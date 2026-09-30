@@ -14,6 +14,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
     __package__ = "EVRPTW_Benchmark.Exact.Gurobi_Solver.VRPTW"
 
+from ..resume import completed_instance_ids
 from .classical_core.io import iter_instances, save_solution
 from .classical_core.schema import ClassicalVRPSolution, solution_route_sequence
 from .gurobi_solver import GurobiVRPTWSolver, GurobiSolverConfig
@@ -163,7 +164,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--start_index", type=int, default=None)
     parser.add_argument("--end_index", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--skip_completed", action="store_true")
+    parser.add_argument("--skip_completed", action="store_true", help="Skip finished summary results, including TIME_LIMIT; retry errors and interrupted runs.")
     parser.add_argument("--checkpoints_s", default="60,300,900,3600,7200")
     parser.add_argument("--save_traceback", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -177,7 +178,9 @@ def main(argv: list[str] | None = None) -> None:
     checkpoint_dir = solution_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    completed = {r["instance_id"] for r in read_rows(summary_path)} if args.skip_completed else set()
+    summary_rows = read_rows(summary_path)
+    completed = completed_instance_ids(summary_rows) if args.skip_completed else set()
+    skipped_completed_count = 0
     records = []
     for inst in iter_instances(dataset_path):
         idx = instance_index(inst.instance_id)
@@ -186,6 +189,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.end_index is not None and (idx is None or idx >= args.end_index):
             continue
         if inst.instance_id in completed:
+            skipped_completed_count += 1
             continue
         records.append((dataset_path, inst))
         if args.limit is not None and len(records) >= int(args.limit):
@@ -198,8 +202,14 @@ def main(argv: list[str] | None = None) -> None:
         checkpoints_s=parse_checkpoints(args.checkpoints_s),
         threads=args.threads,
     )
+    print(
+        f"Resume: {'enabled' if args.skip_completed else 'disabled'}; "
+        f"skipped={skipped_completed_count} pending={len(records)}; summary={summary_path}"
+    )
     print(f"Loaded {len(records)} VRPTW instances. workers={args.workers} threads={args.threads} output={save_path}")
-    summary_rows = read_rows(summary_path)
+    if not records:
+        print("No pending instances; nothing to solve.")
+        return
     time_rows = read_rows(trace_path)
 
     def handle(result: dict[str, Any]) -> None:

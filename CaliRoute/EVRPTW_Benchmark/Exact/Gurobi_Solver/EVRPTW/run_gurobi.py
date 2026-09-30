@@ -17,6 +17,7 @@ if __package__ in (None, ""):
     __package__ = "EVRPTW_Benchmark.Exact.Gurobi_Solver.EVRPTW"
 
 
+from ..resume import completed_instance_ids
 from .evrptw_core.io import iter_instances, save_solution
 from .evrptw_core.schema import EVRPTWSolution, solution_route_sequence
 from .evrptw_core.validation import validate_instance_structure
@@ -598,7 +599,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--start_index", type=int, default=None, help="Optional inclusive lower bound for the numeric instance id suffix.")
     parser.add_argument("--end_index", type=int, default=None, help="Optional exclusive upper bound for the numeric instance id suffix.")
     parser.add_argument("--scales", default="", help="Optional comma-separated scale filter, e.g. Cus5,Cus15.")
-    parser.add_argument("--skip_completed", action="store_true", help="Skip instances already present in gurobi_summary.csv.")
+    parser.add_argument("--skip_completed", action="store_true", help="Skip finished summary results, including TIME_LIMIT; retry errors and interrupted runs.")
     parser.add_argument("--expert_summary_path", default="", help="Optional existing gurobi_summary.csv used as warm-start experts for refine runs.")
     parser.add_argument("--reference_save_path", default="", help="Optional reference_solutions root for split/Cus*/solutions.csv and routes/*.json.")
     parser.add_argument("--reference_split", default="", help="Reference split name. Defaults to train/val/eval/test inferred from dataset_path.")
@@ -639,8 +640,6 @@ def main(argv: list[str] | None = None) -> None:
         expert_index = build_expert_index(expert_summary_path)
         print(f"Expert summary: {expert_summary_path} rows={len(expert_index)}")
 
-    preflight_gurobi_license()
-
     dataset_path = Path(args.dataset_path)
     save_path = Path(args.save_path)
     trace_path = save_path / "gurobi_time_trace.csv"
@@ -668,11 +667,7 @@ def main(argv: list[str] | None = None) -> None:
 
     instance_files = discover_instance_files(dataset_path)
     existing_summary_rows = read_csv_rows(summary_path)
-    completed_ids = {
-        str(row.get("instance_id", ""))
-        for row in existing_summary_rows
-        if str(row.get("status_name") or row.get("status") or "") not in {"", "ERROR", "INVALID_INSTANCE"}
-    }
+    completed_ids = completed_instance_ids(existing_summary_rows)
     records: list[tuple[Path, Any, list[list[int]] | None]] = []
     skipped_completed_count = 0
     skipped_range_count = 0
@@ -744,6 +739,15 @@ def main(argv: list[str] | None = None) -> None:
             f"skipped_time_limit_no_incumbent={skipped_refine_no_incumbent} "
             f"skipped_other_status={skipped_refine_status}"
         )
+
+    print(
+        f"Resume: {'enabled' if args.skip_completed else 'disabled'}; "
+        f"skipped={skipped_completed_count} pending={len(records)}; summary={summary_path}"
+    )
+    if not records:
+        print("No pending instances; nothing to solve.")
+        return
+    preflight_gurobi_license()
 
     summary_rows: list[dict[str, Any]] = existing_summary_rows
     time_rows: list[dict[str, Any]] = read_csv_rows(trace_path)

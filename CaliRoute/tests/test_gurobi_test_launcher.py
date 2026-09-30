@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
 import json
 import os
 from pathlib import Path
@@ -85,6 +86,9 @@ def checkout(tmp_path):
     scripts.mkdir(parents=True)
     for name in ("run_gurobi_test.py", "run_gurobi_test.sh"):
         shutil.copy2(CODE_ROOT / "scripts" / name, scripts / name)
+    helper = Path("EVRPTW_Benchmark/Exact/Gurobi_Solver/resume.py")
+    (root / helper).parent.mkdir(parents=True)
+    shutil.copy2(CODE_ROOT / helper, root / helper)
     outside = tmp_path / "outside checkout"
     outside.mkdir()
     stubs = tmp_path / "stub modules"
@@ -208,3 +212,32 @@ def test_rejects_missing_test_bundle(checkout):
     result = checkout.run("evrptw", "100")
     assert result.returncode != 0
     assert not checkout.record_path.exists()
+
+
+@pytest.mark.parametrize("problem", ["cvrp", "vrptw", "evrptw"])
+def test_shell_reports_existing_results_without_modifying_summary(checkout, problem):
+    output = checkout.output(problem, 15)
+    output.mkdir(parents=True)
+    summary = output / "gurobi_summary.csv"
+    with summary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["instance_id", "status_name", "feasible"])
+        writer.writeheader()
+        writer.writerows([
+            {"instance_id": "finished_000000", "status_name": "OPTIMAL", "feasible": True},
+            {"instance_id": "limited_000001", "status_name": "TIME_LIMIT", "feasible": False},
+            {"instance_id": "retry_000002", "status_name": "ERROR", "feasible": False},
+            {"instance_id": "stopped_000003", "status_name": "INTERRUPTED", "feasible": False},
+            # A repeated record counts once and the latest status determines completion.
+            {"instance_id": "finished_000000", "status_name": "OPTIMAL", "feasible": True},
+        ])
+    original = summary.read_bytes()
+    result = checkout.run(problem, "15", shell=True)
+    assert result.returncode == 0, result.stderr
+    assert "--skip_completed" in checkout.record()["argv"]
+    log = next((output / "logs").glob("*.log")).read_text()
+    for message in (result.stdout, log):
+        assert "Resume: enabled" in message
+        assert f"summary={summary}" in message
+        assert "recorded_completed=2" in message
+        assert "exact skipped/pending counts appear in the log" in message
+    assert summary.read_bytes() == original

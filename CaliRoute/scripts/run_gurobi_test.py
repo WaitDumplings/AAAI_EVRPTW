@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime
 import fcntl
 import importlib.util
@@ -15,6 +16,9 @@ import sys
 
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT))
+
+from EVRPTW_Benchmark.Exact.Gurobi_Solver.resume import read_completed_ids
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -77,6 +81,16 @@ def main(argv: list[str] | None = None) -> None:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.error(f"This task/scale is already running. PID file: {pid_path}")
+        summary_path = output / "gurobi_summary.csv"
+        try:
+            completed = read_completed_ids(summary_path)
+        except (OSError, ValueError, csv.Error) as exc:
+            parser.error(f"Cannot check existing results: {exc}")
+        resume_message = (
+            f"Resume: enabled; summary={summary_path}; recorded_completed={len(completed)}\n"
+            "Matching instance IDs will be skipped; exact skipped/pending counts appear in the log before solving."
+        )
+        print(resume_message, flush=True)
         logs = output / "logs"
         logs.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -89,6 +103,7 @@ def main(argv: list[str] | None = None) -> None:
             log.write(
                 f"Test: {args.problem}/Cus{args.scale}; metadata instances=1000\n"
                 "Workers=30; threads per worker=1; Gurobi time limit per instance=7200s\n"
+                f"{resume_message}\n"
                 f"Command: {shlex.join(command)}\n\n"
             )
             log.flush()
@@ -105,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
         log_path.with_suffix(".pid").write_text(f"{child.pid}\n", encoding="utf-8")
 
     print(f"Started {args.problem}/Cus{args.scale}: PID={child.pid} (30 workers, 7200s/instance)")
-    print(f"Input: {bundle} (1000 instances; existing summary rows are resumed)")
+    print(f"Input: {bundle} (1000 instances; completed results are skipped)")
     print(f"Results: {output}")
     print(f"Log: {log_path}")
     print(f"Follow: tail -f {shlex.quote(str(log_path))}")

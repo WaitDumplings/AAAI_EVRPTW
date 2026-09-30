@@ -268,3 +268,9 @@ Problems: `vrptw`, `evrptw`, `cvrp`; scales: `15`, `50`, `100`. This starts all
 worker, and a 2-hour optimization limit per instance. Results and logs are under
 `results/gurobi/<problem>/test/CusN/`. EVRPTW's optional vehicle-count tie-break is
 disabled to avoid a second 2-hour solve; see the benchmark guide for details.
+
+Resume is automatic: re-run the same command to skip completed instance IDs in
+that task/scale's `gurobi_summary.csv`. `TIME_LIMIT` results count as completed;
+errors, interrupted runs, and missing results retry. The shell shows the checked
+summary path; the background log reports exact skipped/pending counts before
+solving. If no instances remain, the runner exits without creating workers.

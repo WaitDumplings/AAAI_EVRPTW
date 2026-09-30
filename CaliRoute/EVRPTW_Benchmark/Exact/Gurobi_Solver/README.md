@@ -6,9 +6,10 @@ CVRP, VRPTW, and EVRPTW solvers imported from
 AAAI batch solvers, before the ICLR solver optimizations. `SOURCE.json` records
 the original Python file hashes.
 
-The MILP formulations, callbacks, time limits, resume behavior, and EVRPTW
+The MILP formulations, callbacks, optimize-call time limits, and EVRPTW
 warm starts and vehicle-count tie-break are preserved. Integration changes cover
-package imports, dataset/output paths, test-split selection, and launch scripts.
+package imports, dataset/output paths, test-split selection, launch scripts, and
+consistent result-based resume checks.
 Each solver retains its original schema under its own package; CVRP and VRPTW
 have different `classical_core` schemas.
 
@@ -88,11 +89,34 @@ An inherited lock prevents concurrent launches of the same problem/scale through
 this script and releases when the batch exits. Different problem/scale pairs may
 run concurrently, each using its own 30 workers.
 
-Re-running a command resumes using the legacy summary rules: CVRP/VRPTW skip all
-IDs already in `gurobi_summary.csv`, including error rows; EVRPTW retries `ERROR`
-and `INVALID_INSTANCE` rows. Launch settings and the exact solver command are
-recorded at the top of each log. Worker startup or license failures appear there.
-The general range launchers below retain their previous defaults.
+Resume is always enabled for this two-argument launcher. Before starting the
+background runner, it checks that problem/scale's `gurobi_summary.csv` and prints
+the summary path and number of recorded completed IDs. The runner then matches
+actual input instance IDs against those results before submitting any worker
+jobs. It logs the exact matching skipped/pending counts, for example:
+
+```text
+Resume: enabled; skipped=237 pending=763; summary=.../gurobi_summary.csv
+```
+
+All three problems use the same rules:
+
+- Finished results such as `OPTIMAL`, `TIME_LIMIT`, and `INFEASIBLE` are skipped.
+  Reaching the 2-hour limit counts as finished even if no feasible solution was found.
+- Missing results, blank statuses, `ERROR`, `INVALID_INSTANCE`, `INTERRUPTED`,
+  `LOADED`, and `INPROGRESS` are retried. Checkpoint files alone do not count as a
+  finished result; unfinished instances start a new solve.
+- Status matching ignores case and surrounding whitespace. If duplicate IDs occur
+  in the summary, the last row is used. Unrelated IDs do not affect the actual
+  skipped/pending counts for the selected bundle.
+- If no instances remain, the runner logs `No pending instances; nothing to solve.`
+  and exits without creating a worker pool or performing a license preflight.
+
+Completed summary rows are retained as new results are saved. The recorded-ID
+count shown by the shell is historical; exact counts for the current input bundle
+appear in the log. Launch settings and the exact solver command are also recorded
+there, along with any worker startup or license failures. The general range
+launchers below use these same resume rules when `--skip_completed` is enabled.
 
 ## Run a batch
 
@@ -116,7 +140,7 @@ Remove `--dry-run` to solve. Indices are half-open: `[start_index, end_index)`.
 Use `--split test` for final evaluation on the frozen release. Both module
 execution and direct execution of `.../<problem>/run_range.py` are supported.
 
-The range runners resume by skipping IDs already in their output summary;
+The range runners resume by skipping finished results in their output summary;
 `--no_skip_completed` requests recomputation. Give concurrent independent jobs
 different output directories. Existing legacy CSV upsert behavior is preserved.
 
