@@ -21,6 +21,9 @@ sys.path.insert(0, str(CODE_ROOT))
 from EVRPTW_Benchmark.Exact.Gurobi_Solver.resume import read_completed_ids
 
 
+EVRPTW_CS_COPIES = {15: 1, 50: 2, 100: 2}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -70,7 +73,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.problem == "evrptw":
         # The legacy tie-break starts a second optimize call with a fresh time limit.
         command.extend([
-            "--reference_split", "test", "--cs_copies", "4",
+            "--reference_split", "test", "--cs_copies", str(EVRPTW_CS_COPIES[args.scale]),
             "--no-tie_break_vehicle_count",
         ])
 

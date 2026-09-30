@@ -266,8 +266,10 @@ bash scripts/run_gurobi_test.sh evrptw 50
 Problems: `vrptw`, `evrptw`, `cvrp`; scales: `15`, `50`, `100`. This starts all
 1,000 test instances in the background with 30 workers, one Gurobi thread per
 worker, and a 2-hour optimization limit per instance. Results and logs are under
-`results/gurobi/<problem>/test/CusN/`. EVRPTW's optional vehicle-count tie-break is
-disabled to avoid a second 2-hour solve; see the benchmark guide for details.
+`results/gurobi/<problem>/test/CusN/`. For EVRPTW, the launcher automatically uses
+1 copy per physical charging station for Cus15 and 2 copies for Cus50/Cus100.
+EVRPTW's optional vehicle-count tie-break is disabled to avoid a second 2-hour
+solve; see the benchmark guide for details.
 
 Resume is automatic: re-run the same command to skip completed instance IDs in
 that task/scale's `gurobi_summary.csv`. `TIME_LIMIT` results count as completed;

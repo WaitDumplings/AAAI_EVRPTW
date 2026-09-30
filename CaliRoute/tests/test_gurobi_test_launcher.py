@@ -159,7 +159,7 @@ def test_launches_complete_test_bundle_with_fixed_budget(checkout, problem, scal
     assert {"--skip_completed", "--verbose", "--save_traceback"}.issubset(argv)
     assert not {"--start_index", "--end_index", "--limit"}.intersection(argv)
     if problem == "evrptw":
-        assert argv[argv.index("--cs_copies") + 1] == "4"
+        assert argv[argv.index("--cs_copies") + 1] == {15: "1", 50: "2", 100: "2"}[scale]
         assert argv[argv.index("--reference_split") + 1] == "test"
         assert "--no-tie_break_vehicle_count" in argv
     else:

@@ -77,7 +77,8 @@ Fixed settings:
   gap. Instances proven optimal finish earlier. Model construction and saving add
   overhead; the whole 1,000-instance batch takes longer than 2 hours.
 - Incumbent checkpoints at 60, 300, 900, 3,600, and 7,200 seconds.
-- EVRPTW uses 4 charging-station copies, matching the legacy shell launcher.
+- EVRPTW copies per physical charging station depend on scale: Cus15 uses 1;
+  Cus50 and Cus100 each use 2. The launcher sets this automatically.
   Its optional vehicle-count tie-break is disabled for this entry point because
   the legacy second optimization would receive another 7,200-second budget.
 
@@ -166,7 +167,7 @@ override it); `--conda-env NAME` optionally selects a Conda environment.
 Legacy shell defaults are retained: 24 workers, 1 thread per worker, Cus15,
 indices `[0,100)`, and 7200 seconds. The split defaults to val for CVRP and train
 for VRPTW/EVRPTW. Set the split explicitly when comparing methods.
-EVRPTW charging-station copies default to 4 in the shell launcher, 2 in
+EVRPTW charging-station copies default to 4 in the legacy `run_gurobi_range.sh`, 2 in
 `run_range.py`, and 3 in the low-level runner/solver, matching the old entry
 points. Set this parameter explicitly for reproducible comparisons.
 
