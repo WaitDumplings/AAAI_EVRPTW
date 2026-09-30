@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/WaitDumplings/gurobi_mul",
+  "revision": "c891bedcb2fa125891bc55f464470d8fafbd3e0f",
+  "source_python_sha256": {
+    "CVRP/classical_core/__init__.py": "130313bdce75a2d27631b073be58f652c923b8aaefcc5e0793ce93856459e642",
+    "CVRP/classical_core/io.py": "ab6b8d0e35fba86f6454b935fcbd109f28e35bf18c69fdbe2e3c18c8f2abb5f1",
+    "CVRP/classical_core/schema.py": "3c3a91299fcf6d2fe35d8977643cfbe0e6e4ef6144078f1afd352f492b354f93",
+    "CVRP/gurobi_solver.py": "53c7c95a5126cc8c7ac0e879a32a084615a2b32d281e997767c1e3133e07f735",
+    "CVRP/run_gurobi.py": "824b43ab2f5159a6c3163af7a79984e99af8530115036da80839c1f5329d3194",
+    "CVRP/run_range.py": "56b69e8bae985413e368227d1350b99ce6561079d6aa3945a344d7aa293121dd",
+    "VRPTW/classical_core/__init__.py": "130313bdce75a2d27631b073be58f652c923b8aaefcc5e0793ce93856459e642",
+    "VRPTW/classical_core/io.py": "ab6b8d0e35fba86f6454b935fcbd109f28e35bf18c69fdbe2e3c18c8f2abb5f1",
+    "VRPTW/classical_core/schema.py": "f4c0fab6061a94fcd927ec349f8627819532a3d1fdb597a13e2c557c88b71794",
+    "VRPTW/gurobi_solver.py": "9ae0907bca9e73c5320e910c31f7b136009358b5652d44e8ab886878c0e0513c",
+    "VRPTW/run_gurobi.py": "6d9c7468d1f8d8c194263f89f5bb24cd67590498f2a2b7b1af448de9b575b640",
+    "VRPTW/run_range.py": "cfa88035a89d6a75583e506d928333e74e3f2edc2e8659190d8d39cc7dffcdc8",
+    "EVRPTW/evrptw_core/__init__.py": "89bbe3c7833c9f636088aa725f397ea3902868aac88d6f9f30d0242f0a622332",
+    "EVRPTW/evrptw_core/io.py": "f8ee4fdde1a18a3a6d2d7269f8608ea914ced21741006e6d2eac614c849afb60",
+    "EVRPTW/evrptw_core/schema.py": "0e115b2fa1ce16064e02ad8484360e9b6d7e8256644efb8423bd802eade5091b",
+    "EVRPTW/evrptw_core/validation.py": "e0d7ce41043b47fc85c1d6db2b1c2782422ca8fe1fb242e452232ce5d1ad7377",
+    "EVRPTW/gurobi_solver.py": "ca8606e9a82f2d2d307b7bda9042a4da0035fe7707866d03c84b45515e1c14fe",
+    "EVRPTW/run_gurobi.py": "9f818ba0b3bc640bf2239055e2b4d6ea734f936eb1180e197d2059e2128a83bb",
+    "EVRPTW/run_range.py": "cddfb93045fa6bb3602709cfaf2a0735a74fa6590a8b26120a79e0dba6adb893"
+  },
+  "integration_changes": [
+    "Package-relative imports and direct-script bootstrapping",
+    "AAAI_Dataset paths and results/gurobi output paths",
+    "Test split support and configuration-only dry run",
+    "Portable shell wrappers using the active Python environment"
+  ],
+  "solver_formulations": "Preserved from the legacy gurobi_mul source; no ICLR solver changes."
+}

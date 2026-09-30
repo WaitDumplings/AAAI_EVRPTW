@@ -1,0 +1,4 @@
+# Choose a gurobipy version compatible with your Gurobi license.
+# Gurobi is an optional benchmark dependency, not required for CaliRoute training.
+gurobipy
+numpy

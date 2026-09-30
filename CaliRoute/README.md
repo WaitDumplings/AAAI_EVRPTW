@@ -248,3 +248,11 @@ docs/                          Engineering notes and review documents.
 
 Generated logs and checkpoints are written under `results/`, which is ignored by
 git.
+
+## Gurobi benchmarks
+
+`EVRPTW_Benchmark/Exact/Gurobi_Solver/{CVRP,VRPTW,EVRPTW}/` contains the original
+AAAI Gurobi batch solvers. They use the sibling `AAAI_Dataset` and write results
+under `results/gurobi/`. The solvers preserve the earlier `gurobi_mul`
+formulations; see the [benchmark guide](EVRPTW_Benchmark/Exact/Gurobi_Solver/README.md)
+for setup, dry runs, test-set selection, and EVRPTW warm starts.

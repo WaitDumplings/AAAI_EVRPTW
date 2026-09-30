@@ -50,3 +50,10 @@ python train.py --problem evrptw --customers 50 --charging-stations 10 \
 
 See [CaliRoute documentation](CaliRoute/README.md) for method settings, launch
 scripts, and ablations. Generated logs and checkpoints are excluded from Git.
+
+## Gurobi benchmarks
+
+The earlier CVRP, VRPTW, and EVRPTW Gurobi solvers are included under
+`CaliRoute/EVRPTW_Benchmark/Exact/Gurobi_Solver/`. See the
+[benchmark guide](CaliRoute/EVRPTW_Benchmark/Exact/Gurobi_Solver/README.md) for
+optional dependencies, batch commands, and configuration-only dry runs.
