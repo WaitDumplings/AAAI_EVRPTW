@@ -49,6 +49,51 @@ and are ignored by Git. No historical result files are bundled with this code.
 and `CusN` beneath each split. `--output_path` overrides the results directory.
 Explicit relative paths are relative to the caller's working directory.
 
+## Full frozen test run (two arguments)
+
+From `AAAI_EVRPTW/CaliRoute`, activate the Python environment with Gurobi installed,
+then choose only the problem and customer scale:
+
+```bash
+bash scripts/run_gurobi_test.sh vrptw 15
+bash scripts/run_gurobi_test.sh evrptw 50
+bash scripts/run_gurobi_test.sh cvrp 100
+```
+
+Each command immediately returns after starting an independent background batch.
+Accepted problems are `vrptw`, `evrptw`, and `cvrp`; scales are `15`, `50`, and `100`.
+The script also works from another directory when invoked by its absolute path.
+`python scripts/run_gurobi_test.py evrptw 50` is an equivalent entry point.
+
+Fixed settings:
+
+- Input: `AAAI_Dataset/test_release/<problem>/test/CusN/instances.pkl`.
+  Each of the nine bundles has 1,000 instances. Metadata is checked before launch;
+  the whole bundle is read without filtering numeric instance-ID suffixes.
+- 30 worker processes, each solving one instance at a time with one Gurobi thread.
+  A separate coordinator writes results as workers finish.
+- 7,200 seconds (2 hours) of Gurobi optimization per instance, with zero target MIP
+  gap. Instances proven optimal finish earlier. Model construction and saving add
+  overhead; the whole 1,000-instance batch takes longer than 2 hours.
+- Incumbent checkpoints at 60, 300, 900, 3,600, and 7,200 seconds.
+- EVRPTW uses 4 charging-station copies, matching the legacy shell launcher.
+  Its optional vehicle-count tie-break is disabled for this entry point because
+  the legacy second optimization would receive another 7,200-second budget.
+
+Results go to `results/gurobi/<problem>/test/CusN/`. Each launch prints its PID,
+log file, a `tail -f` command, and a command to stop that batch's process group.
+Logs and per-launch PID files are in that output directory's `logs/`; `launcher.pid`
+records the latest coordinator PID. PID files remain after completion as records.
+An inherited lock prevents concurrent launches of the same problem/scale through
+this script and releases when the batch exits. Different problem/scale pairs may
+run concurrently, each using its own 30 workers.
+
+Re-running a command resumes using the legacy summary rules: CVRP/VRPTW skip all
+IDs already in `gurobi_summary.csv`, including error rows; EVRPTW retries `ERROR`
+and `INVALID_INSTANCE` rows. Launch settings and the exact solver command are
+recorded at the top of each log. Worker startup or license failures appear there.
+The general range launchers below retain their previous defaults.
+
 ## Run a batch
 
 Inspect paths and arguments first:

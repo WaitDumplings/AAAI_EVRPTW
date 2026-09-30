@@ -256,3 +256,15 @@ AAAI Gurobi batch solvers. They use the sibling `AAAI_Dataset` and write results
 under `results/gurobi/`. The solvers preserve the earlier `gurobi_mul`
 formulations; see the [benchmark guide](EVRPTW_Benchmark/Exact/Gurobi_Solver/README.md)
 for setup, dry runs, test-set selection, and EVRPTW warm starts.
+
+For a full frozen test batch, choose only the problem and scale:
+
+```bash
+bash scripts/run_gurobi_test.sh evrptw 50
+```
+
+Problems: `vrptw`, `evrptw`, `cvrp`; scales: `15`, `50`, `100`. This starts all
+1,000 test instances in the background with 30 workers, one Gurobi thread per
+worker, and a 2-hour optimization limit per instance. Results and logs are under
+`results/gurobi/<problem>/test/CusN/`. EVRPTW's optional vehicle-count tie-break is
+disabled to avoid a second 2-hour solve; see the benchmark guide for details.
