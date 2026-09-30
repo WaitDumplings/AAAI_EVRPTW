@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caliroute"
+version = "0.1.0"
+description = "CaliRoute training code for real-road CVRP, VRPTW, and EVRPTW experiments."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "PyYAML",
+]
+
+[project.scripts]
+caliroute-train = "caliroute.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["caliroute*", "offline2online*"]

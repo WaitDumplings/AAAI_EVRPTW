@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+results/
+results_legacy/
+logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
