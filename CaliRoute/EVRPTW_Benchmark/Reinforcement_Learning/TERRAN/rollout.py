@@ -32,8 +32,31 @@ def _sync_cuda(device: str | torch.device) -> None:
         torch.cuda.synchronize()
 
 
-def sample_actions(agent, obs_batch: dict[str, np.ndarray], decode_mode: str, device: str | torch.device):
-    logits_tuple = agent.backbone(obs_batch)
+@torch.no_grad()
+def encode_static_rollout(agent, obs_batch: dict[str, np.ndarray]):
+    """Cache only backbones that explicitly guarantee static, deterministic encoding.
+
+    The caller owns this cache for one rollout, discards it at reset, and must
+    never pass it to a gradient-bearing policy update. Legacy encoders with
+    training-time dropout stay on the original full-forward path.
+    """
+    if not getattr(agent.backbone, "supports_static_rollout_cache", False):
+        return None
+    return agent.backbone.encode(obs_batch)
+
+
+def sample_actions(
+    agent,
+    obs_batch: dict[str, np.ndarray],
+    decode_mode: str,
+    device: str | torch.device,
+    cached_embeddings=None,
+):
+    logits_tuple = (
+        agent.backbone(obs_batch)
+        if cached_embeddings is None
+        else agent.backbone.decode(obs_batch, cached_embeddings)
+    )
     logits = logits_tuple[0]
     dist = torch.distributions.Categorical(logits=logits)
     if decode_mode == "greedy":
@@ -147,8 +170,9 @@ def collect_rollout(
     num_customers = int(getattr(envs[0].unwrapped, "num_customers", 0))
     current_route_customer_count = np.zeros((len(envs), envs[0].unwrapped.n_traj), dtype=np.int32)
     route_boundary_steps = []
+    cached_embeddings = None
 
-    for _ in range(int(rollout_steps)):
+    for step in range(int(rollout_steps)):
         valid = ~done
         stack_start = time.perf_counter()
         obs_batch = stack_observations(observations)
@@ -166,7 +190,12 @@ def collect_rollout(
             _sync_cuda(device)
         model_start = time.perf_counter()
         with torch.no_grad():
-            actions, logprob, entropy, value, _ = sample_actions(agent, obs_batch, decode_mode=decode_mode, device=device)
+            if step == 0:
+                cached_embeddings = encode_static_rollout(agent, obs_batch)
+            actions, logprob, entropy, value, _ = sample_actions(
+                agent, obs_batch, decode_mode=decode_mode, device=device,
+                cached_embeddings=cached_embeddings,
+            )
         if profile_timing:
             _sync_cuda(device)
         model_action_time_s += time.perf_counter() - model_start
@@ -282,10 +311,16 @@ def rollout_single_instance(
     obs, info = env.reset(seed=seed) if seed is not None else env.reset()
     done = np.zeros(env.unwrapped.n_traj, dtype=bool)
     start = time.perf_counter()
-    for _ in range(int(max_steps)):
+    cached_embeddings = None
+    for step in range(int(max_steps)):
         obs_batch = stack_observations([obs])
         with torch.no_grad():
-            actions, _, _, _, _ = sample_actions(agent, obs_batch, decode_mode=decode_mode, device=device)
+            if step == 0:
+                cached_embeddings = encode_static_rollout(agent, obs_batch)
+            actions, _, _, _, _ = sample_actions(
+                agent, obs_batch, decode_mode=decode_mode, device=device,
+                cached_embeddings=cached_embeddings,
+            )
         obs, reward, terminated, truncated, info = env.step(actions.squeeze(0).detach().cpu().numpy().astype(np.int64))
         done = done | np.asarray(terminated, dtype=bool) | np.asarray(truncated, dtype=bool)
         if done.all():
@@ -311,10 +346,16 @@ def rollout_eval_batch(
     n_traj = int(envs[0].unwrapped.n_traj)
     done = np.zeros((len(envs), n_traj), dtype=bool)
     start = time.perf_counter()
-    for _ in range(int(max_steps)):
+    cached_embeddings = None
+    for step in range(int(max_steps)):
         obs_batch = stack_observations(observations)
         with torch.no_grad():
-            actions, _, _, _, _ = sample_actions(agent, obs_batch, decode_mode=decode_mode, device=device)
+            if step == 0:
+                cached_embeddings = encode_static_rollout(agent, obs_batch)
+            actions, _, _, _, _ = sample_actions(
+                agent, obs_batch, decode_mode=decode_mode, device=device,
+                cached_embeddings=cached_embeddings,
+            )
         action_np = actions.detach().cpu().numpy().astype(np.int64)
         observations, _, step_done, infos = step_envs(envs, action_np)
         done = done | step_done

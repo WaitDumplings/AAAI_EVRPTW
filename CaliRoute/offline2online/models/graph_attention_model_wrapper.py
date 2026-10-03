@@ -168,6 +168,10 @@ class StateWrapper:
 class Backbone(nn.Module):
     """Ablation TERRAN-style backbone with graph token and optional DDE."""
 
+    # Encoder inputs are static within an episode and contain no dropout or
+    # running-stat normalization; all dynamic route state is read by decode().
+    supports_static_rollout_cache = True
+
     def __init__(
         self,
         embedding_dim: int = 256,

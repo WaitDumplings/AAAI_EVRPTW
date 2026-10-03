@@ -26,6 +26,7 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.env_factory import make_terr
 from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.rollout import (
     collect_rollout,
     compute_returns,
+    encode_static_rollout,
     reset_envs,
     sample_actions,
     stack_observations,
@@ -1171,10 +1172,16 @@ def _rollout_eval_batch_min_median(
     n_traj = int(envs[0].unwrapped.n_traj)
     done = np.zeros((len(envs), n_traj), dtype=bool)
     start = time.perf_counter()
-    for _ in range(int(max_steps)):
+    cached_embeddings = None
+    for step in range(int(max_steps)):
         obs_batch = stack_observations(observations)
         with torch.no_grad():
-            actions, _, _, _, _ = sample_actions(agent, obs_batch, decode_mode=decode_mode, device=device)
+            if step == 0:
+                cached_embeddings = encode_static_rollout(agent, obs_batch)
+            actions, _, _, _, _ = sample_actions(
+                agent, obs_batch, decode_mode=decode_mode, device=device,
+                cached_embeddings=cached_embeddings,
+            )
         action_np = actions.detach().cpu().numpy().astype(np.int64)
         observations, _, step_done, infos = step_envs(envs, action_np)
         done = done | step_done
