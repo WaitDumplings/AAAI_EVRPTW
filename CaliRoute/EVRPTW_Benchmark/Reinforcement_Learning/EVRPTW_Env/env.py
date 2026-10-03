@@ -180,6 +180,8 @@ class EVRPTWVectorEnv(Env):
             "edge_distance": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
             "edge_time": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
             "edge_energy": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
+            "full_charge_time": spaces.Box(0.0, np.inf, shape=(1,), dtype=np.float32),
+            "fixed_full_charge": spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
             "demand": spaces.Box(0.0, np.inf, shape=(n,), dtype=np.float32),
             "time_window": spaces.Box(0.0, np.inf, shape=(n, 2), dtype=np.float32),
             "service_time": spaces.Box(0.0, np.inf, shape=(n,), dtype=np.float32),
@@ -543,6 +545,8 @@ class EVRPTWVectorEnv(Env):
             # self.battery_capacity_kwh / self.cargo_capacity_cm3 for dynamics.
             "battery_capacity": np.array([1.0], dtype=np.float32),
             "loading_capacity": np.array([1.0], dtype=np.float32),
+            "full_charge_time": np.array([self.full_charge_time_s / self.horizon_s], dtype=np.float32),
+            "fixed_full_charge": np.array([self.charging_mode == "fixed_full"], dtype=np.float32),
             "visited_customers_ratio": visited_ratio,
             "visited_customers_raio": visited_ratio,
             "remain_feasible_customers_ratio": remain_feasible_ratio,

@@ -139,3 +139,67 @@ filtering identified in the code review. Apply the same evaluator to old and new
 models. Tune on train/validation only; frozen test evaluation follows model and
 hyperparameter selection. Model-design benefits remain hypotheses until controlled
 quality/feasibility experiments are complete.
+
+## Controlled design implementation and two-GPU comparison
+
+The optional designs are now exposed by `--optimization-profile optimized`.
+`--optimization-profile baseline` disables all optional architecture, replay,
+and speed changes while retaining the shared correctness fixes. Neither profile
+changes the PPO/SL-PPO method itself. Individual YAML settings remain available
+for later ablation. EVRPTW post-charge features are experimental: synthetic
+transition tests do not establish performance on real EVRPTW data.
+
+The optimized profile adds a zero-output directed per-head edge adapter;
+post-charge action bias for EVRPTW only; active DDE projection slices and cached
+static node projections/observations; shared PPO/SL forward evaluation; static
+expert-route encoding; and a bounded policy-route pool for SL-PPO only. A PPO
+initialization can use this profile without enabling the SL-only replay loss.
+The pool retains at most three diverse, verified routes per training instance,
+within 5% of its best retained route; its default replay budget is at most 25%
+of current environments (capped at 16 candidates), with a separate weight of
+0.2. Original expert weighting and normalization remain unchanged. Pool actions
+are independently replayed and current-policy log probabilities are recomputed
+before use. No validation or test route enters training memory.
+
+Both comparison arms use the epoch-100 CVRP50 PPO checkpoint trained from the
+frozen original code. The planned first comparison is 100 SL-PPO epochs, seed
+3009, 64 environments x 50 trajectories, four PPO updates, learning rate 5e-5,
+and validation on 1,000 instances with 50 samples before training (epoch 0) and every 20 epochs. This is a
+single-seed screening experiment, not a multi-seed improvement claim. The
+baseline includes the same expert-weight wiring, empty-loss safety,
+feasibility-first checkpoint selection, and independent evaluation RNG fixes as
+the optimized arm. It is explicitly not an untouched historical-code run.
+
+From `CaliRoute`, launch both processes in the background with:
+
+```bash
+bash scripts/run_slppo_comparison.sh \
+  --init-checkpoint /absolute/path/to/checkpoint_epoch_0100.pt \
+  --data-root /absolute/path/to/AAAI_Dataset/dataset \
+  --problem cvrp --customers 50 --gpus 0,1
+```
+
+Commit the source before launch; use a detached checkout of that commit to keep
+running experiments isolated from later edits. The launcher rejects an existing
+run directory and never overwrites a previous experiment. `--dry-run` prints
+both configurations without starting jobs. `--optimization-profile` on
+`train.py` is the separate single-run interface. Default methods remain backward
+compatible unless a profile or individual flag is supplied.
+
+`results/optimization/<run>/` contains `manifest.json` (source commit and input
+SHA256 checksums), `status.json`, per-arm YAML/console logs, and an automatically
+updated `comparison.json`. The report pairs the same validation instance IDs at
+the same epoch and reports feasibility separately from distance on jointly
+feasible instances; failed partial routes cannot masquerade as short solutions.
+Matched-epoch training time excludes initial warmup and validation and includes
+the cost of the added design and route replay. Exported CVRP solutions undergo
+an independent customer-coverage, depot, capacity, and matrix-distance check.
+Gurobi TIME_LIMIT values remain incumbent references, not certified optima.
+
+Validation before the full run: all 118 tests passed, including shared-loss and
+expert-cache gradient comparisons, zero-init compatibility, replay rejection
+cases, evaluation RNG isolation, and configuration checks. A real CVRP50
+three-epoch GPU0/GPU1 integration smoke used eight train and eight validation
+instances: initial validation distance matched exactly, both arms completed,
+and the optimized arm used four historical replay candidates on epoch 3. The
+smoke is a functional check, not an estimate of generalization improvement.

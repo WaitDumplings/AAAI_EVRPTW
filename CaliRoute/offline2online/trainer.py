@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import csv
 from dataclasses import dataclass
 import itertools
@@ -168,6 +168,8 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "config": cfg,
             "model_state_dict": agent.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            **({"policy_route_pool_state": agent.policy_route_pool.state_dict()}
+               if getattr(agent, "policy_route_pool", None) is not None else {}),
         },
         path,
     )
@@ -559,6 +561,9 @@ def _tail_gap_stats(rows: list[dict[str, Any]], references: dict[str, dict[str, 
     policy_k_gaps: dict[int, list[float]] = {k: [] for k in range(1, 5)}
     policy_k_objs: dict[int, list[float]] = {k: [] for k in range(1, 5)}
     for row in rows:
+        # An unfinished route is not a valid improvement over a complete reference.
+        if not bool(row.get("feasible", False)):
+            continue
         ref = references.get(str(row.get("instance_id", "")))
         if ref is None:
             continue
@@ -895,6 +900,32 @@ def _make_envs(cfg: dict[str, Any], seed: int, *, problem_type: str):
     return envs, pool
 
 
+_INIT_CHECKPOINT_NEW_MODULE_PREFIXES = (
+    "backbone.residual_edge_bias.",
+    "backbone.decoder.post_charge_adapter.",
+)
+
+
+def _load_initial_model_state(agent: Agent, state_dict: dict[str, Any], *, strict: bool):
+    """Permit only the explicitly added zero-initialized adapters during finetuning."""
+    if strict:
+        return agent.load_state_dict(state_dict, strict=True)
+    expected = agent.state_dict()
+    missing = set(expected) - set(state_dict)
+    unexpected = set(state_dict) - set(expected)
+    forbidden_missing = sorted(
+        key for key in missing if not key.startswith(_INIT_CHECKPOINT_NEW_MODULE_PREFIXES)
+    )
+    if forbidden_missing or unexpected:
+        raise RuntimeError(
+            "Incompatible initialization checkpoint; only new residual-edge/post-charge "
+            f"adapter keys may be missing. Missing: {forbidden_missing}; "
+            f"unexpected: {sorted(unexpected)}"
+        )
+    # PyTorch still rejects shape mismatches, including within allowed modules.
+    return agent.load_state_dict(state_dict, strict=False)
+
+
 def _load_agent_checkpoint(
     agent: Agent,
     path: str | Path | None,
@@ -918,7 +949,7 @@ def _load_agent_checkpoint(
     else:
         state_dict = checkpoint
         checkpoint = {}
-    result = agent.load_state_dict(state_dict, strict=strict)
+    result = _load_initial_model_state(agent, state_dict, strict=strict)
     return {
         "checkpoint_path": str(ckpt_path),
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
@@ -954,6 +985,8 @@ def _load_training_checkpoint(
         checkpoint = {}
     result = agent.load_state_dict(state_dict, strict=strict)
     optimizer_loaded = False
+    if isinstance(checkpoint, dict) and checkpoint.get("policy_route_pool_state") is not None:
+        agent._pending_policy_route_pool_state = checkpoint["policy_route_pool_state"]
     if isinstance(checkpoint, dict) and checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         torch_device = torch.device(device)
@@ -1126,6 +1159,11 @@ def _select_min_median_trajectory_stats(info: dict[str, Any]) -> dict[str, Any]:
             "feasible": False,
             "traj_feasible_rate": float(np.mean(success)) if success.size else np.nan,
             "feasible_traj_count": 0.0,
+            "selected_trajectory_index": None,
+            "routes": [],
+            "route_sequence": [],
+            "served_customers": 0,
+            "invalid_action": False,
             "objective_distance_km": np.nan,
             "min_objective_distance_km": np.nan,
             "median_objective_distance_km": np.nan,
@@ -1145,8 +1183,16 @@ def _select_min_median_trajectory_stats(info: dict[str, Any]) -> dict[str, Any]:
             return float(vehicle[idx])
         return np.nan
 
+    routes = info.get("routes", [])
+    sequences = info.get("route_sequence", [])
+    invalid = np.asarray(info.get("invalid_action", []), dtype=bool).reshape(-1)
     return {
         "feasible": feasible,
+        "selected_trajectory_index": min_idx,
+        "routes": routes[min_idx] if min_idx < len(routes) else [],
+        "route_sequence": sequences[min_idx] if min_idx < len(sequences) else [],
+        "served_customers": int(served[min_idx]) if min_idx < served.size and np.isfinite(served[min_idx]) else None,
+        "invalid_action": bool(invalid[min_idx]) if min_idx < invalid.size else False,
         "traj_feasible_rate": float(np.mean(success)) if success.size else np.nan,
         "feasible_traj_count": float(np.sum(success)) if success.size else np.nan,
         "objective_distance_km": float(objective[min_idx]),
@@ -1198,7 +1244,144 @@ def _rollout_eval_batch_min_median(
     return rows
 
 
+@contextmanager
+def _isolated_eval_rng(seed: int, device: str | torch.device):
+    """Keep evaluation sampling reproducible and independent of training randomness."""
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_device = torch.device(device)
+    cuda_devices = ([torch_device.index if torch_device.index is not None else torch.cuda.current_device()]
+                    if torch_device.type == "cuda" else [])
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            random.seed(int(seed))
+            np.random.seed(int(seed) % (2**32))
+            torch.random.default_generator.manual_seed(int(seed))
+            for index in cuda_devices:
+                torch.cuda.default_generators[index].manual_seed(int(seed))
+            yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+
+
+def _is_better_eval_result(row: dict[str, Any], best_feasible_rate: float, best_objective: float) -> bool:
+    try:
+        feasible_rate = float(row.get("eval_feasible_rate", float("nan")))
+        objective = float(row.get("eval_avg_objective_distance_km", float("nan")))
+    except (TypeError, ValueError):
+        return False
+    if row.get("eval_status") != "ok" or not np.isfinite(objective) or not np.isfinite(feasible_rate) or feasible_rate <= 0.0:
+        return False
+    return feasible_rate > best_feasible_rate or (
+        feasible_rate == best_feasible_rate and objective < best_objective
+    )
+
+
+def _json_finite(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_finite(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _validate_cvrp_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
+    """Independently verify the exported CVRP route against the instance arrays."""
+    n = int(instance.num_customers)
+    demands = np.asarray(instance.demands_cm3, dtype=np.float64)
+    distance = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+    capacity = float(instance.vehicle["cargo_capacity_cm3"])
+    routes = row.get("routes", [])
+    coverage = np.zeros(n, dtype=np.int64)
+    indices_ok = True
+    depot_ok = bool(routes)
+    loads = []
+    recomputed_distance = 0.0
+    for route in routes:
+        nodes = []
+        for node in route:
+            if isinstance(node, (bool, np.bool_)) or not isinstance(node, (int, np.integer)) or not 0 <= int(node) <= n:
+                indices_ok = False
+                continue
+            nodes.append(int(node))
+        if len(nodes) != len(route) or len(nodes) < 2 or nodes[0] != 0 or nodes[-1] != 0 or 0 in nodes[1:-1]:
+            depot_ok = False
+        customers = [node for node in nodes if node != 0]
+        for node in customers:
+            coverage[node - 1] += 1
+        loads.append(float(sum(demands[node - 1] for node in customers)))
+        if len(nodes) == len(route):
+            recomputed_distance += sum(float(distance[a, b]) for a, b in zip(nodes, nodes[1:]))
+    coverage_ok = bool(np.all(coverage == 1))
+    capacity_ok = bool(all(load <= capacity + 1e-6 * max(1.0, capacity) for load in loads))
+    objective = float(row.get("objective_distance_km", float("nan")))
+    distance_ok = bool(indices_ok and np.isfinite(objective) and np.isclose(
+        recomputed_distance, objective, rtol=1e-6, atol=1e-5,
+    ))
+    return {
+        "checked": True,
+        "problem_type": "cvrp",
+        "valid": bool(indices_ok and depot_ok and coverage_ok and capacity_ok and distance_ok),
+        "indices_valid": indices_ok,
+        "depot_endpoints_valid": depot_ok,
+        "customer_coverage_valid": coverage_ok,
+        "missing_customers": (np.where(coverage == 0)[0] + 1).tolist(),
+        "repeated_customers": (np.where(coverage > 1)[0] + 1).tolist(),
+        "capacity_valid": capacity_ok,
+        "route_loads_cm3": loads,
+        "cargo_capacity_cm3": capacity,
+        "distance_matches": distance_ok,
+        "recomputed_distance_km": recomputed_distance if indices_ok else None,
+        "distance_error_km": recomputed_distance - objective if indices_ok and np.isfinite(objective) else None,
+        "distance_atol_km": 1e-5,
+        "distance_rtol": 1e-6,
+    }
+
+
+def _write_eval_instances(rows: list[dict[str, Any]], cfg: dict[str, Any], seed: int, epoch: int) -> Path:
+    eval_cfg = cfg.get("evaluation", {}) or {}
+    data_cfg = cfg.get("data", {}) or {}
+    output_dir = _resolve_path(eval_cfg.get("eval_output_dir"))
+    if output_dir is None:
+        problem = problem_type_from_config(cfg)
+        customers = int(data_cfg.get("num_customers", 15))
+        stations = num_charging_stations_for_problem(data_cfg, problem)
+        output_dir = (REPO_ROOT / "results" / "evaluations" / f"Cus_{customers}_CS_{stations}"
+                      / str(cfg.get("run_name", "O2O_TERRAN_FULL")) / f"seed_{seed}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"epoch_{epoch:04d}.jsonl"
+    temporary = path.with_suffix(".jsonl.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(_json_finite(row), allow_nan=False) + "\n")
+    temporary.replace(path)
+    return path
+
+
 def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: int, device: str | torch.device) -> dict[str, Any]:
+    eval_seed = int((cfg.get("evaluation", {}) or {}).get("eval_seed", int(seed) + 17_000_000))
+    was_training = agent.training
+    try:
+        with _isolated_eval_rng(eval_seed, device):
+            return _evaluate_fixed_dataset_impl(agent, cfg, seed, epoch, device, eval_seed=eval_seed)
+    finally:
+        agent.train(was_training)
+
+
+def _evaluate_before_training(agent: Agent, cfg: dict[str, Any], seed: int,
+                              device: str | torch.device, *, resume_checkpoint_path=None) -> dict[str, Any] | None:
+    if resume_checkpoint_path or not bool((cfg.get("evaluation", {}) or {}).get("eval_before_training", False)):
+        return None
+    return evaluate_fixed_dataset(agent, cfg, seed=seed, epoch=0, device=device)
+
+
+def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, epoch: int,
+                                 device: str | torch.device, *, eval_seed: int) -> dict[str, Any]:
     eval_cfg = cfg.get("evaluation", {}) or {}
     data_cfg = cfg.get("data", {}) or {}
     problem_type = problem_type_from_config(cfg)
@@ -1255,10 +1438,35 @@ def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: 
             decode_mode=decode_mode,
             max_steps=max_steps,
             device=device,
-            seed=seed + epoch * 1_000_000 + seen_before_batch,
+            seed=eval_seed + seen_before_batch,
         )
         for instance, row in zip(instances, batch_rows):
             row["instance_id"] = instance.instance_id
+            row["problem_type"] = problem_type
+            row["eval_seed"] = eval_seed
+            row["epoch"] = epoch
+            row["feasibility_source"] = "environment_success"
+            if eval_save_routes:
+                row["environment_feasible"] = bool(row["feasible"])
+                if problem_type == "cvrp":
+                    row["route_validation"] = _validate_cvrp_eval_route(instance, row)
+                    row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
+                    row["feasibility_source"] = "environment_success_and_independent_cvrp_route_validation"
+                else:
+                    row["route_validation"] = {
+                        "checked": False, "reason": "independent_validation_implemented_for_cvrp_only",
+                    }
+            reference = reference_metrics.get(str(instance.instance_id), {})
+            reference_objective = reference.get("objective_distance_km", float("nan"))
+            row["reference_objective_distance_km"] = reference_objective
+            row["distance_gap_km"] = (
+                float(row["objective_distance_km"]) - reference_objective
+                if row["feasible"] and np.isfinite(reference_objective) else float("nan")
+            )
+            row["relative_gap_pct"] = (
+                100.0 * row["distance_gap_km"] / reference_objective
+                if np.isfinite(reference_objective) and reference_objective > 0 else float("nan")
+            )
         rows.extend(batch_rows)
         num_batches += 1
         seen_before_batch += len(instances)
@@ -1299,6 +1507,8 @@ def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: 
     }
     if reference_metrics:
         out.update(_tail_gap_stats(rows, reference_metrics))
+    if eval_save_routes:
+        _write_eval_instances(rows, cfg, seed, epoch)
     return out
 
 
@@ -1331,6 +1541,116 @@ def _update_policy_best_objectives(
         previous_best = policy_best_objectives.get(instance_id)
         if previous_best is None or current_best < previous_best:
             policy_best_objectives[instance_id] = current_best
+
+
+def _init_policy_route_pool(cfg, train_pool):
+    from .policy_route_replay import PolicyRoutePool, require_train_dataset
+
+    offline_cfg = cfg.get("offline", {}) or {}
+    if not bool(offline_cfg.get("policy_replay_enabled", False)):
+        return None
+    if not _is_solution_level_method(_offline_method(cfg)):
+        raise ValueError("Policy route replay is supported only for solution-level PPO")
+    dataset_path = cfg.get("data", {}).get("train_dataset_path")
+    if not dataset_path:
+        raise ValueError("Policy route replay requires a fixed train dataset")
+    require_train_dataset(_resolve_path(dataset_path))
+    instances = getattr(train_pool, "instances", None)
+    if not instances:
+        raise ValueError("Policy route replay requires a nonempty training instance pool")
+    return PolicyRoutePool(
+        instances, cfg.get("env", {}) or {},
+        capacity=offline_cfg.get("policy_replay_capacity", 3),
+        max_relative_gap=offline_cfg.get("policy_replay_max_relative_gap", 0.05),
+        min_edge_distance=offline_cfg.get("policy_replay_min_edge_distance", 0.10),
+    )
+
+
+def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, device, epoch):
+    """Use historical verified train solutions, then ingest this rollout.
+
+    This objective has its own route mean; it never dilutes or changes the
+    existing expert-candidate normalization or configured expert weight.
+    """
+    if route_pool is None:
+        return [], {}
+    offline_cfg = cfg.get("offline", {}) or {}
+    adv_cfg = _advantage_config(cfg)
+    weight = float(offline_cfg.get("policy_replay_weight", 0.2))
+    fraction = float(offline_cfg.get("policy_replay_fraction", 0.25))
+    if not np.isfinite(weight) or not np.isfinite(fraction) or weight < 0 or not 0 <= fraction <= 1:
+        raise ValueError("Policy replay weight must be finite and nonnegative and fraction in [0, 1]")
+    num_envs, n_traj = int(batch.actions.size(1)), int(batch.actions.size(2))
+    objective, success, _ = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    budget = min(max(0, int(offline_cfg.get("policy_replay_max_candidates", 16))), int(math.ceil(num_envs * fraction)))
+    candidates = []
+    verified = 0
+    order = [(route_pool.cursor + offset) % num_envs for offset in range(num_envs)]
+    selected_ids = set()
+    for env_idx in order:
+        if len(candidates) >= budget or weight == 0:
+            break
+        instance_id = _env_instance_id(envs[env_idx])
+        if instance_id in selected_ids:
+            continue
+        routes = route_pool.routes.get(instance_id, [])
+        if not routes:
+            continue
+        # Rotate the small diverse set rather than replaying only its best route.
+        route = routes[(int(epoch) - 1) % len(routes)]
+        stats = _sl_candidate_improvement_stats(objective[env_idx], success[env_idx], route.objective, adv_cfg)
+        if stats is None:
+            continue
+        _, gap, scale = stats
+        successful = objective[env_idx][success[env_idx] & np.isfinite(objective[env_idx])]
+        if gap <= 0 or route.objective > float(successful.min()) * (1 + route_pool.max_relative_gap):
+            continue
+        eta = max(float(adv_cfg.get("sl_candidate_quality_gate_eta", 0.05)), 1e-8)
+        gate = float(np.clip(gap / (eta * route.objective + 1e-8), 0.0, 1.0))
+        advantage = weight * gate * float(np.clip(gap / scale, 0.0, adv_cfg.get("sl_candidate_clip", 2.0)))
+        observations = route_pool.replay(route)
+        if observations is None:
+            continue
+        verified += 1
+        selected_ids.add(instance_id)
+        candidates.append(SolutionCandidate(env_idx, observations, list(route.actions), advantage, gate))
+    route_pool.cursor = (route_pool.cursor + max(budget, 1)) % max(num_envs, 1)
+    if candidates:
+        with torch.no_grad():
+            old_mean = _expert_route_mean_logprobs(
+                agent, candidates, device, int(adv_cfg.get("sl_expert_logprob_chunk_size", 4096)),
+                cache_static=bool(cfg.get("training", {}).get("cache_expert_route_encoding", False)),
+            ).detach().float().cpu().numpy()
+        for candidate, logprob in zip(candidates, old_mean):
+            candidate.old_mean_logprob = float(logprob)
+        candidates = [candidate for candidate in candidates if np.isfinite(candidate.old_mean_logprob) and candidate.advantage > 1e-8]
+
+    # Independent masked environment replay verifies each accepted new solution.
+    # CPU conversion happens once for the complete action/valid tensors.
+    actions = batch.actions.detach().cpu().numpy()
+    valid = batch.valid.detach().cpu().numpy()
+    new_budget = max(0, int(offline_cfg.get("policy_replay_max_new_routes", 32)))
+    added = rejected = attempted = 0
+    ranked = [np.flatnonzero(success[index] & np.isfinite(objective[index])) for index in range(num_envs)]
+    ranked = [indices[np.argsort(objective[index, indices], kind="stable")] for index, indices in enumerate(ranked)]
+    for rank in range(route_pool.capacity):
+        for env_idx in order:
+            if attempted >= new_budget:
+                break
+            if len(ranked[env_idx]) <= rank:
+                continue
+            trajectory = int(ranked[env_idx][rank])
+            sequence = actions[:, env_idx, trajectory][valid[:, env_idx, trajectory]].tolist()
+            attempted += 1
+            accepted = route_pool.add(_env_instance_id(envs[env_idx]), sequence, objective[env_idx, trajectory])
+            added += int(accepted)
+            rejected += int(not accepted)
+    return candidates, {
+        "policy_replay_pool_routes": float(len(route_pool)),
+        "policy_replay_candidates": float(len(candidates)),
+        "policy_replay_added": float(added), "policy_replay_rejected": float(rejected),
+        "policy_replay_verified": float(verified), "policy_replay_weight": weight,
+    }
 
 
 def _finite_mean_std(value: np.ndarray) -> tuple[float, float]:
@@ -1460,14 +1780,57 @@ def _sl_candidate_expert_gate(
     return quality_gate * memory_gate, falsified, best_gap_ratio
 
 
+def _cached_expert_route_mean_logprobs(agent, candidates, device, chunk_size):
+    """Batch teacher-forced time states on the existing trajectory dimension.
+
+    Nodes are encoded once per route; independent dynamic decisions are decoded
+    together. Padding repeats the final valid state/action but contributes zero
+    to the route mean. The cache never survives this call or optimizer.step.
+    """
+    means = []
+    static_keys = {
+        "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
+        "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
+        "full_charge_time", "fixed_full_charge", "instance_mask",
+    }
+    maximum_length = max(len(candidate.actions) for candidate in candidates)
+    route_batch_size = max(1, int(chunk_size) // max(maximum_length, 1))
+    for start in range(0, len(candidates), route_batch_size):
+        group = candidates[start : start + route_batch_size]
+        lengths = [len(candidate.actions) for candidate in group]
+        if min(lengths) <= 0:
+            raise ValueError("Expert route candidates must contain at least one action")
+        horizon = max(lengths)
+        route_observations = []
+        padded_actions = []
+        for candidate, length in zip(group, lengths):
+            steps = [candidate.observations[min(step, length - 1)] for step in range(horizon)]
+            route_observations.append({
+                key: steps[0][key] if key in static_keys else np.concatenate([obs[key] for obs in steps], axis=0)
+                for key in steps[0]
+            })
+            padded_actions.append([candidate.actions[min(step, length - 1)] for step in range(horizon)])
+        obs = stack_observations(route_observations)
+        cache = agent.backbone.encode(obs)
+        actions = torch.as_tensor(padded_actions, dtype=torch.long, device=device)
+        _, logprob, _, _, _ = agent.get_action_and_value_cached(obs, action=actions, state=cache)
+        lengths_t = torch.as_tensor(lengths, dtype=logprob.dtype, device=device)
+        active = torch.arange(horizon, device=device)[None, :] < lengths_t[:, None]
+        means.append(logprob.masked_fill(~active, 0.0).sum(dim=1) / lengths_t)
+    return torch.cat(means)
+
+
 def _expert_route_mean_logprobs(
     agent: Agent,
     candidates: list[Any],
     device: str | torch.device,
     chunk_size: int,
+    cache_static: bool = False,
 ) -> torch.Tensor:
     if not candidates:
         return torch.empty(0, dtype=torch.float32, device=device)
+    if cache_static and getattr(agent.backbone, "supports_static_rollout_cache", False):
+        return _cached_expert_route_mean_logprobs(agent, candidates, device, chunk_size)
     route_sums: torch.Tensor | None = None
     route_lens: torch.Tensor | None = None
     observations: list[dict[str, np.ndarray]] = []
@@ -1554,7 +1917,7 @@ def _prepare_sl_expert_candidates(
     if candidates:
         chunk_size = int(adv_cfg.get("sl_expert_logprob_chunk_size", 4096))
         with torch.no_grad():
-            old_mean = _expert_route_mean_logprobs(agent, candidates, device, chunk_size).detach().float().cpu().numpy()
+            old_mean = _expert_route_mean_logprobs(agent, candidates, device, chunk_size, cache_static=bool(cfg.get("training", {}).get("cache_expert_route_encoding", False))).detach().float().cpu().numpy()
         use_support_gate = bool(adv_cfg.get("sl_candidate_use_support_gate", False))
         support_min = float(adv_cfg.get("sl_candidate_support_logprob_min", -20.0))
         support_temp = max(float(adv_cfg.get("sl_candidate_support_gate_temperature", 1.0)), 1e-8)
@@ -1896,6 +2259,20 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / denom
 
 
+def _policy_chunk_evaluations(agent, batch, env_indices, step_start, step_end):
+    """Reusable gradient-bearing outputs, valid only until this optimizer step."""
+    indices = np.asarray(env_indices, dtype=np.int64)
+    cache = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], indices))
+    outputs = []
+    for step in range(step_start, step_end):
+        _, logprob, entropy, value, _ = agent.get_action_and_value_cached(
+            _slice_obs_by_env(batch.observations[step], indices),
+            action=batch.actions[step, indices].long(), state=cache,
+        )
+        outputs.append((logprob, entropy, value))
+    return outputs
+
+
 def _evaluate_policy_loss_with_stats(
     agent,
     batch,
@@ -1905,6 +2282,7 @@ def _evaluate_policy_loss_with_stats(
     env_indices: Sequence[int] | np.ndarray | None = None,
     step_start: int = 0,
     step_end: int | None = None,
+    evaluations=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     train_cfg = cfg["training"]
     clip_coef = float(train_cfg.get("clip_coef", 0.2))
@@ -1922,7 +2300,7 @@ def _evaluate_policy_loss_with_stats(
     if step_start >= step_end:
         raise ValueError(f"empty PPO step range: [{step_start}, {step_end})")
 
-    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
+    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices)) if evaluations is None else None
     policy_losses = []
     value_losses = []
     entropy_losses = []
@@ -1932,11 +2310,12 @@ def _evaluate_policy_loss_with_stats(
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
         old_logprob = batch.old_logprobs[step, env_indices]
-        _, new_logprob, entropy, value, _ = agent.get_action_and_value_cached(
-            obs_mb,
-            action=actions,
-            state=cached_state,
-        )
+        if evaluations is None:
+            _, new_logprob, entropy, value, _ = agent.get_action_and_value_cached(
+                obs_mb, action=actions, state=cached_state,
+            )
+        else:
+            new_logprob, entropy, value = evaluations[step - step_start]
         value = value.squeeze(-1)
         logratio = new_logprob - old_logprob
         ratio = torch.exp(logratio)
@@ -1969,6 +2348,7 @@ def _evaluate_policy_loss_policy_only_with_stats(
     env_indices: Sequence[int] | np.ndarray | None = None,
     step_start: int = 0,
     step_end: int | None = None,
+    evaluations=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     train_cfg = cfg["training"]
     clip_coef = float(train_cfg.get("clip_coef", 0.2))
@@ -1985,7 +2365,7 @@ def _evaluate_policy_loss_policy_only_with_stats(
     if step_start >= step_end:
         raise ValueError(f"empty PPO step range: [{step_start}, {step_end})")
 
-    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
+    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices)) if evaluations is None else None
     policy_losses = []
     entropy_losses = []
     approx_kls = []
@@ -1994,11 +2374,12 @@ def _evaluate_policy_loss_policy_only_with_stats(
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
         old_logprob = batch.old_logprobs[step, env_indices]
-        _, new_logprob, entropy, _value, _ = agent.get_action_and_value_cached(
-            obs_mb,
-            action=actions,
-            state=cached_state,
-        )
+        if evaluations is None:
+            _, new_logprob, entropy, _value, _ = agent.get_action_and_value_cached(
+                obs_mb, action=actions, state=cached_state,
+            )
+        else:
+            new_logprob, entropy, _value = evaluations[step - step_start]
         logratio = new_logprob - old_logprob
         ratio = torch.exp(logratio)
         adv = advantages[step, env_indices]
@@ -2331,6 +2712,7 @@ def _evaluate_policy_loss_decomposed(
     env_indices: np.ndarray | None = None,
     step_start: int = 0,
     step_end: int | None = None,
+    evaluations=None,
 ):
     del device
     train_cfg = cfg["training"]
@@ -2353,7 +2735,7 @@ def _evaluate_policy_loss_decomposed(
     if step_start >= step_end:
         raise ValueError(f"empty PPO step range: [{step_start}, {step_end})")
 
-    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
+    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices)) if evaluations is None else None
     policy_losses = []
     value_total_losses = []
     value_boundary_losses = []
@@ -2364,11 +2746,12 @@ def _evaluate_policy_loss_decomposed(
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
         old_logprob = batch.old_logprobs[step, env_indices]
-        _, new_logprob, entropy, value, _ = agent.get_action_and_value_cached(
-            obs_mb,
-            action=actions,
-            state=cached_state,
-        )
+        if evaluations is None:
+            _, new_logprob, entropy, value, _ = agent.get_action_and_value_cached(
+                obs_mb, action=actions, state=cached_state,
+            )
+        else:
+            new_logprob, entropy, value = evaluations[step - step_start]
         value = _to_scalar_values(value)
         if value.dim() < 3 or value.size(-1) < 3:
             raise ValueError("decomposed critic requires value tensor with three heads")
@@ -2924,19 +3307,24 @@ def _compute_solution_level_weighted_logprob_loss(
     device: str | torch.device,
     step_start: int,
     step_end: int,
+    evaluations=None,
 ) -> torch.Tensor:
     del device
     env_indices = np.asarray(env_indices, dtype=np.int64)
-    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
     loss = torch.zeros((), dtype=batch.old_logprobs.dtype, device=batch.old_logprobs.device)
     weights = weights.detach()
     valid_counts = valid_counts.detach().clamp_min(1.0)
     if not bool((weights != 0).any()):
-        return loss
+        # Standalone zero remains safe for legacy callers that invoke backward.
+        return loss.requires_grad_()
+    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices)) if evaluations is None else None
     for step in range(step_start, step_end):
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
-        _, new_logprob, _, _, _ = agent.get_action_and_value_cached(obs_mb, action=actions, state=cached_state)
+        if evaluations is None:
+            _, new_logprob, _, _, _ = agent.get_action_and_value_cached(obs_mb, action=actions, state=cached_state)
+        else:
+            new_logprob = evaluations[step - step_start][0]
         valid = batch.valid[step, env_indices].to(dtype=new_logprob.dtype)
         loss = loss - ((weights / valid_counts) * new_logprob * valid).sum()
     return loss
@@ -2965,23 +3353,43 @@ def _compute_sl_expert_candidate_loss(
         }
 
     chunk_size = int(adv_cfg.get("sl_expert_logprob_chunk_size", 4096))
-    new_mean_logprob = _expert_route_mean_logprobs(agent, selected, device, chunk_size)
-    old_mean_logprob = torch.as_tensor([candidate.old_mean_logprob for candidate in selected], dtype=new_mean_logprob.dtype, device=new_mean_logprob.device)
-    adv = torch.as_tensor([candidate.advantage for candidate in selected], dtype=new_mean_logprob.dtype, device=new_mean_logprob.device)
-    route_ratio = torch.exp(new_mean_logprob - old_mean_logprob.detach())
+    new_mean_logprob = _expert_route_mean_logprobs(agent, selected, device, chunk_size, cache_static=bool(cfg.get("training", {}).get("cache_expert_route_encoding", False)))
+    # Perform ratio math in float32 even when decoder execution uses AMP.
+    new_mean_logprob = new_mean_logprob.float()
+    old_mean_logprob = torch.as_tensor([candidate.old_mean_logprob for candidate in selected], dtype=torch.float32, device=new_mean_logprob.device)
+    adv = torch.as_tensor([candidate.advantage for candidate in selected], dtype=torch.float32, device=new_mean_logprob.device).detach()
+    logratio = new_mean_logprob - old_mean_logprob.detach()
     route_clip_eps = float((cfg.get("offline", {}) or {}).get("route_clip_eps", (cfg.get("offline", {}) or {}).get("sl_clip_coef", 0.20)))
-    unclipped = route_ratio * adv.detach()
-    clipped = torch.clamp(route_ratio, 1.0 - route_clip_eps, 1.0 + route_clip_eps) * adv.detach()
-    route_loss = -torch.minimum(unclipped, clipped).mean()
-    clip_frac = ((route_ratio > 1.0 + route_clip_eps) | (route_ratio < 1.0 - route_clip_eps)).float().mean()
+    if not 0.0 < route_clip_eps < 1.0:
+        raise ValueError("SL route clip coefficient must be between zero and one")
+    # This is algebraically the same clipped PPO surrogate, but clips the
+    # saturated branch BEFORE exp: positive advantage caps the upper ratio;
+    # negative advantage floors the lower ratio. This avoids 0 * inf backward.
+    selected_logratio = torch.where(
+        adv >= 0,
+        logratio.clamp(max=math.log1p(route_clip_eps)),
+        logratio.clamp(min=math.log1p(-route_clip_eps)),
+    )
+    max_log = math.log(torch.finfo(torch.float32).max) - 2.0
+    safe_limit = max_log - adv.abs().clamp_min(1.0).log()
+    finite = torch.isfinite(logratio) & torch.isfinite(adv) & (selected_logratio <= safe_limit)
+    safe_logratio = torch.where(finite, selected_logratio, torch.zeros_like(selected_logratio))
+    safe_adv = torch.where(finite, adv, torch.zeros_like(adv))
+    route_loss = -(safe_logratio.exp() * safe_adv).sum() / finite.sum().clamp_min(1)
+    with torch.no_grad():
+        # Bounding diagnostics does not change the loss or its gradients.
+        ratio = logratio[finite].double().clamp(-80.0, 80.0).exp()
+        kept_adv = adv[finite]
+        clip_frac = ((ratio > 1.0 + route_clip_eps) | (ratio < 1.0 - route_clip_eps)).double().mean() if ratio.numel() else ratio.new_zeros(())
     return route_loss, {
         "sl_candidate_expert_loss": float(route_loss.detach().cpu().item()),
-        "sl_candidate_expert_ratio_mean": float(route_ratio.detach().mean().cpu().item()),
-        "sl_candidate_expert_ratio_std": float(route_ratio.detach().std(unbiased=False).cpu().item()) if route_ratio.numel() > 1 else 0.0,
-        "sl_candidate_expert_clip_frac": float(clip_frac.detach().cpu().item()),
-        "sl_candidate_expert_adv_mean": float(adv.detach().mean().cpu().item()),
-        "sl_candidate_expert_adv_std": float(adv.detach().std(unbiased=False).cpu().item()) if adv.numel() > 1 else 0.0,
-        "sl_candidate_expert_num_routes": float(len(selected)),
+        "sl_candidate_expert_ratio_mean": float(ratio.mean().cpu().item()) if ratio.numel() else 1.0,
+        "sl_candidate_expert_ratio_std": float(ratio.std(unbiased=False).cpu().item()) if ratio.numel() > 1 else 0.0,
+        "sl_candidate_expert_clip_frac": float(clip_frac.cpu().item()),
+        "sl_candidate_expert_adv_mean": float(kept_adv.mean().cpu().item()) if kept_adv.numel() else 0.0,
+        "sl_candidate_expert_adv_std": float(kept_adv.std(unbiased=False).cpu().item()) if kept_adv.numel() > 1 else 0.0,
+        "sl_candidate_expert_num_routes": float(finite.sum().cpu().item()),
+        "sl_candidate_expert_rejected_nonfinite": float((~finite).sum().cpu().item()),
     }
 
 
@@ -3819,6 +4227,13 @@ def train_from_config(
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
+            use_residual_edge_bias=bool(model_cfg.get("use_residual_edge_bias", False)),
+            residual_edge_hidden_dim=int(model_cfg.get("residual_edge_hidden_dim", 32)),
+            use_post_charge_adapter=bool(model_cfg.get("use_post_charge_adapter", False)),
+            post_charge_adapter_hidden_dim=int(model_cfg.get("post_charge_adapter_hidden_dim", 32)),
+            optimize_dynamic_projections=bool(model_cfg.get("optimize_dynamic_projections", False)),
+            cache_static_observations=bool(model_cfg.get("cache_static_observations", False)),
+            use_static_rollout_cache=bool(model_cfg.get("use_static_rollout_cache", True)),
             use_decomposed_critic=use_decomposed_critic,
         ).to(device)
 
@@ -4265,6 +4680,12 @@ def train_from_config(
         "sl_candidate_expert_gate_std",
         "sl_candidate_expert_num_routes",
         "sl_candidate_expert_weight",
+        "policy_replay_pool_routes",
+        "policy_replay_candidates",
+        "policy_replay_added",
+        "policy_replay_rejected",
+        "policy_replay_verified",
+        "policy_replay_weight",
         "offline_updates",
         "group_adv_mean",
         "group_adv_std",
@@ -4339,7 +4760,6 @@ def train_from_config(
     hidden_metric_prefixes = (
         "partition_",
         "hard_",
-        "sl_candidate_",
         "bafipo_",
         "gcbpo_",
         "pomo_",
@@ -4457,6 +4877,7 @@ def train_from_config(
             eval_writer.writeheader()
         expert_buffer = _load_expert_buffer(cfg, seed, debug_enabled, df)
         best_eval_objective = float("inf")
+        best_eval_feasible_rate = -1.0
         best_eval_epoch = 0
         if append_existing_logs:
             best_meta_path = ckpt_dir / "best_checkpoint.json"
@@ -4465,10 +4886,18 @@ def train_from_config(
                     best_meta = json.loads(best_meta_path.read_text(encoding="utf-8"))
                     best_eval_objective = float(best_meta.get("eval_avg_objective_distance_km", best_eval_objective))
                     best_eval_epoch = int(best_meta.get("epoch", best_eval_epoch))
+                    best_eval_feasible_rate = float(best_meta.get("eval_feasible_rate", -1.0))
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     best_eval_objective = float("inf")
                     best_eval_epoch = 0
         policy_best_objectives: dict[str, float] = {}
+        policy_route_pool = _init_policy_route_pool(cfg, pool)
+        if policy_route_pool is not None:
+            agent.policy_route_pool = policy_route_pool
+            pending_replay = getattr(agent, "_pending_policy_route_pool_state", None)
+            if pending_replay is not None:
+                policy_route_pool.load_state_dict(pending_replay)
+                del agent._pending_policy_route_pool_state
         _debug_log(
             debug_enabled,
             df,
@@ -4522,6 +4951,27 @@ def train_from_config(
                 f"sample_offset={sample_count_offset} "
                 f"missing={len(resume_checkpoint_info.get('missing_keys', []))} "
                 f"unexpected={len(resume_checkpoint_info.get('unexpected_keys', []))}",
+            )
+        if train_cfg.get("post_init_seed") is not None:
+            # New zero-initialized adapters must not shift the rollout RNG stream.
+            set_seed(int(train_cfg["post_init_seed"]))
+        initial_eval_start = time.perf_counter()
+        initial_eval = _evaluate_before_training(
+            agent, cfg, seed, device, resume_checkpoint_path=resume_checkpoint_path,
+        )
+        if initial_eval is not None:
+            # Epoch zero documents the common initialization; it is excluded from
+            # training checkpoint selection and does not consume training randomness.
+            eval_writer.writerow({"epoch": 0, **initial_eval})
+            ef.flush()
+            _debug_log(
+                debug_enabled, df,
+                "[EvalInit] epoch=0 checkpoint_selection=excluded "
+                f"n={initial_eval.get('eval_num_instances')} "
+                f"fr={_format_float(initial_eval.get('eval_feasible_rate'))} "
+                f"min_obj={_format_float(initial_eval.get('eval_avg_objective_distance_km'))} "
+                f"eval_wall={time.perf_counter() - initial_eval_start:.3f}s "
+                f"status={initial_eval.get('eval_status')}",
             )
         for epoch in range(resume_start_epoch, epochs + 1):
             epoch_start = time.perf_counter()
@@ -4693,6 +5143,8 @@ def train_from_config(
                 route_adv_tensor = None
                 route_success_tensor = None
                 sl_expert_candidates: list[SolutionCandidate] = []
+                policy_replay_candidates: list[SolutionCandidate] = []
+                policy_replay_info = {}
                 bafipo_pairs: list[BafipoPreferencePair] = []
                 bafipo_incumbents: list[BafipoIncumbentCandidate] = []
                 gcbpo_pairs: list[GcbpoPreferencePair] = []
@@ -4716,6 +5168,9 @@ def train_from_config(
                         device,
                     )
                     adv_info.update(sl_candidate_expert_info)
+                    policy_replay_candidates, policy_replay_info = _prepare_policy_replay_candidates(
+                        agent, batch, cfg, envs, policy_route_pool, device, epoch,
+                    )
                     # Gate the current batch with historical policy memory only;
                     # the current rollout becomes memory for subsequent epochs.
                     _update_policy_best_objectives(policy_best_objectives, batch, envs)
@@ -4948,7 +5403,11 @@ def train_from_config(
                             for step_start in range(0, total_steps, chunk_size):
                                 step_end = min(step_start + chunk_size, total_steps)
                                 chunk_weight = float(step_end - step_start) / max(float(total_steps), 1.0)
+                                shared_sl_forward = bool(train_cfg.get("share_ppo_sl_forward", False)) and sl_enabled and sl_weights is not None
                                 with _autocast_context(device, amp_enabled):
+                                    chunk_evaluations = _policy_chunk_evaluations(
+                                        agent, batch, env_indices, step_start, step_end,
+                                    ) if shared_sl_forward else None
                                     if use_decomposed_critic:
                                         if decomposed_returns is None:
                                             raise RuntimeError("decomposed critic enabled but decomposed returns are missing")
@@ -4962,6 +5421,7 @@ def train_from_config(
                                             env_indices=env_indices,
                                             step_start=step_start,
                                             step_end=step_end,
+                                            evaluations=chunk_evaluations,
                                         )
                                         decomposed_loss_infos.append(value_info)
                                     elif use_pomo_trajectory_advantage:
@@ -4973,6 +5433,7 @@ def train_from_config(
                                             env_indices=env_indices,
                                             step_start=step_start,
                                             step_end=step_end,
+                                            evaluations=chunk_evaluations,
                                         )
                                         approx_kls.append(float(ppo_stats["approx_kl"]))
                                         clip_fracs.append(float(ppo_stats["clip_fraction"]))
@@ -4986,9 +5447,18 @@ def train_from_config(
                                             env_indices=env_indices,
                                             step_start=step_start,
                                             step_end=step_end,
+                                            evaluations=chunk_evaluations,
                                         )
                                         approx_kls.append(float(ppo_stats["approx_kl"]))
                                         clip_fracs.append(float(ppo_stats["clip_fraction"]))
+                                    if shared_sl_forward:
+                                        shared_route_loss = _compute_solution_level_weighted_logprob_loss(
+                                            agent, batch, sl_weights, sl_valid_counts, env_indices,
+                                            device, step_start, step_end, evaluations=chunk_evaluations,
+                                        )
+                                        # PPO is averaged across time; the SL weights already
+                                        # include the full-route length and route-count factors.
+                                        loss = loss + sl_coef * shared_route_loss / chunk_weight
                                 _backward(loss * chunk_weight / group_size, scaler, amp_enabled)
                                 weighted_policy += policy_loss.item() * chunk_weight
                                 weighted_value += value_loss.item() * chunk_weight
@@ -5050,7 +5520,7 @@ def train_from_config(
                                     anchor_loss_points.append(float(anchor_info.get("anchor_loss_points", 0.0)))
                                     anchor_candidate_points.append(float(anchor_info.get("anchor_candidate_points", 0.0)))
                                     anchor_violation_ratios.append(float(anchor_info.get("anchor_violation_ratio", 0.0)))
-                                if sl_enabled and sl_weights is not None and sl_valid_counts is not None:
+                                if sl_enabled and sl_weights is not None and sl_valid_counts is not None and not shared_sl_forward:
                                     with _autocast_context(device, amp_enabled):
                                         route_chunk_loss = _compute_solution_level_weighted_logprob_loss(
                                             agent,
@@ -5080,6 +5550,12 @@ def train_from_config(
                                 sl_candidate_expert_adv_means.append(float(expert_info["sl_candidate_expert_adv_mean"]))
                                 sl_candidate_expert_adv_stds.append(float(expert_info["sl_candidate_expert_adv_std"]))
                                 sl_candidate_expert_route_counts.append(float(expert_info["sl_candidate_expert_num_routes"]))
+                            if policy_replay_candidates:
+                                with _autocast_context(device, amp_enabled):
+                                    replay_loss, _ = _compute_sl_expert_candidate_loss(
+                                        agent, policy_replay_candidates, cfg, env_indices, device,
+                                    )
+                                _backward(sl_coef * replay_loss / group_size, scaler, amp_enabled)
                             if (
                                 bafipo_enabled
                                 and bafipo_pairs
@@ -5381,6 +5857,7 @@ def train_from_config(
                         "sl_candidate_expert_num_routes": int(np.sum(sl_candidate_expert_route_counts)) if sl_candidate_expert_route_counts else int(adv_info.get("sl_candidate_expert_num_routes", 0)),
                         "sl_candidate_expert_weight": adv_info.get("sl_candidate_expert_weight", 0.0),
                     }
+                sl_info.update(policy_replay_info)
                 if profile_timing:
                     _sync_cuda(device)
                 ppo_update_time_s = time.perf_counter() - ppo_start
@@ -5465,13 +5942,14 @@ def train_from_config(
                 except (TypeError, ValueError):
                     eval_obj_f = float("nan")
                     eval_fr_f = 0.0
-                if eval_row.get("eval_status") == "ok" and np.isfinite(eval_obj_f) and eval_fr_f > 0.0 and eval_obj_f < best_eval_objective:
+                if _is_better_eval_result(eval_row, best_eval_feasible_rate, best_eval_objective):
                     best_eval_objective = eval_obj_f
+                    best_eval_feasible_rate = eval_fr_f
                     best_eval_epoch = int(epoch)
                     best_path = ckpt_dir / "checkpoint_best.pt"
                     save_checkpoint(best_path, agent, optimizer, cfg, epoch, seed)
                     (ckpt_dir / "best_checkpoint.json").write_text(
-                        json.dumps({"epoch": best_eval_epoch, "eval_avg_objective_distance_km": best_eval_objective, "eval_feasible_rate": eval_fr_f}, indent=2),
+                        json.dumps({"epoch": best_eval_epoch, "eval_avg_objective_distance_km": best_eval_objective, "eval_feasible_rate": eval_fr_f, "selection": "feasibility_then_distance_v1"}, indent=2),
                         encoding="utf-8",
                     )
 

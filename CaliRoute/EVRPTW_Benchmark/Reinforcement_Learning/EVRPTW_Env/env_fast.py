@@ -144,6 +144,8 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
             "service_time": service_norm,
             "battery_capacity": np.array([1.0], dtype=np.float32),
             "loading_capacity": np.array([1.0], dtype=np.float32),
+            "full_charge_time": np.array([self.full_charge_time_s / self.horizon_s], dtype=np.float32),
+            "fixed_full_charge": np.array([self.charging_mode == "fixed_full"], dtype=np.float32),
         }
 
     def _can_return_to_depot(self, start: int, current_time_s: float, battery_used_kwh: float, traj_idx: int | None = None) -> bool:
@@ -219,6 +221,8 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
             "current_time": current_time,
             "battery_capacity": static["battery_capacity"],
             "loading_capacity": static["loading_capacity"],
+            "full_charge_time": static["full_charge_time"],
+            "fixed_full_charge": static["fixed_full_charge"],
             "visited_customers_ratio": visited_ratio,
             "visited_customers_raio": visited_ratio,
             "remain_feasible_customers_ratio": remain_feasible_ratio,

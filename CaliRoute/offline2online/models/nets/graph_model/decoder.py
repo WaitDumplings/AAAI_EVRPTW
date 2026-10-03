@@ -1,5 +1,8 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
+
+from .routing_adapters import PostChargeAdapter
 
 from ...nets.graph_model.multi_head_attention import (
     AttentionScore,
@@ -162,6 +165,7 @@ class DynamicGraphKVEncoder(nn.Module):
         enable_delta_v=True,
         enable_delta_action_key=True,
         enable_action_bias=True,
+        optimize_dynamic_projections=False,
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -170,6 +174,7 @@ class DynamicGraphKVEncoder(nn.Module):
         self.enable_delta_v = bool(enable_delta_v)
         self.enable_delta_action_key = bool(enable_delta_action_key)
         self.enable_action_bias = bool(enable_action_bias)
+        self.optimize_dynamic_projections = bool(optimize_dynamic_projections)
         self.routing_system_feature_dim = 10
         self.problem_system_feature_dim = 5
         self.system_feature_dim = (
@@ -268,6 +273,24 @@ class DynamicGraphKVEncoder(nn.Module):
         nn.init.zeros_(self.action_bias_proj[1].bias)
         nn.init.zeros_(self.action_bias_proj[3].weight)
         nn.init.zeros_(self.action_bias_proj[3].bias)
+
+    def project_enabled(self, layer, value):
+        """Keep original parameter tensors, but compute only enabled output rows."""
+        flags = (self.enable_delta_k, self.enable_delta_v, self.enable_delta_action_key)
+        if not self.optimize_dynamic_projections or all(flags):
+            return layer(value).chunk(3, dim=-1)
+        width = self.embedding_dim
+        return tuple(
+            F.linear(value, layer.weight[i * width:(i + 1) * width]) if enabled else None
+            for i, enabled in enumerate(flags)
+        )
+
+    def precompute_node_projections(self, node_embeddings):
+        if not self.enabled or not self.optimize_dynamic_projections:
+            return None
+        if not (self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key):
+            return None
+        return self.project_enabled(self.node_state_proj, node_embeddings)
 
     @staticmethod
     def _step_count(state, fallback=1):
@@ -663,6 +686,7 @@ class DynamicGraphKVEncoder(nn.Module):
         graph_context,
         driver_query,
         state,
+        node_projections=None,
     ):
         if not self.enabled:
             return 0, 0, 0, 0
@@ -705,6 +729,26 @@ class DynamicGraphKVEncoder(nn.Module):
             T,
             node_embeddings,
         )
+        candidate_features = self._candidate_features(
+            state=state,
+            node_embeddings=node_embeddings,
+            T=T,
+            action_mask=action_mask,
+            depot_mask=depot_mask,
+            customer_mask=customer_mask,
+            rs_mask=rs_mask,
+            route_mask=route_mask,
+            visit_count=visit_count,
+            route_order=route_order,
+            current_node_idx=current_node_idx,
+            prev_node_idx=prev_node_idx,
+        )
+        if self.optimize_dynamic_projections and not (
+            self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key
+        ):
+            bias = self.action_bias_proj(candidate_features).squeeze(-1) if self.enable_action_bias else 0
+            return 0, 0, 0, torch.tanh(self.action_bias_scale) * bias
+
         current_node = self._gather_node(node_embeddings, current_node_idx)
 
         route_summary = self._masked_mean(
@@ -768,28 +812,16 @@ class DynamicGraphKVEncoder(nn.Module):
         flat_tokens = self.token_ff_norm(flat_tokens + self.token_ff(flat_tokens))
         decision_token = flat_tokens[:, 0, :].reshape(B, T, D)
 
-        candidate_features = self._candidate_features(
-            state=state,
-            node_embeddings=node_embeddings,
-            T=T,
-            action_mask=action_mask,
-            depot_mask=depot_mask,
-            customer_mask=customer_mask,
-            rs_mask=rs_mask,
-            route_mask=route_mask,
-            visit_count=visit_count,
-            route_order=route_order,
-            current_node_idx=current_node_idx,
-            prev_node_idx=prev_node_idx,
-        )
         key_delta = 0
         value_delta = 0
         action_key_delta = 0
         if self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key:
             candidate_base = self.candidate_delta_base(candidate_features)
-            node_key, node_value, node_action_key = self.node_state_proj(node_embeddings).chunk(3, dim=-1)
-            decision_key, decision_value, decision_action_key = self.decision_state_proj(decision_token).chunk(3, dim=-1)
-            step_key, step_value, step_action_key = self.step_state_proj(state_token).chunk(3, dim=-1)
+            if node_projections is None:
+                node_projections = self.project_enabled(self.node_state_proj, node_embeddings)
+            node_key, node_value, node_action_key = node_projections
+            decision_key, decision_value, decision_action_key = self.project_enabled(self.decision_state_proj, decision_token)
+            step_key, step_value, step_action_key = self.project_enabled(self.step_state_proj, state_token)
             if self.enable_delta_k:
                 key_delta = self.candidate_key_delta_proj(candidate_base)
                 key_delta = key_delta + node_key.unsqueeze(1)
@@ -845,6 +877,9 @@ class Decoder(nn.Module):
         dynamic_decision_delta_v=True,
         dynamic_decision_delta_action_key=True,
         dynamic_decision_action_bias=True,
+        use_post_charge_adapter=False,
+        post_charge_adapter_hidden_dim=32,
+        optimize_dynamic_projections=False,
     ):
         super().__init__()
 
@@ -873,6 +908,7 @@ class Decoder(nn.Module):
             enable_delta_v=dynamic_decision_delta_v,
             enable_delta_action_key=dynamic_decision_delta_action_key,
             enable_action_bias=dynamic_decision_action_bias,
+            optimize_dynamic_projections=optimize_dynamic_projections,
         )
 
         # glimpse + pointer
@@ -893,6 +929,10 @@ class Decoder(nn.Module):
             nn.Linear(embedding_dim, embedding_dim),
         )
 
+        self.post_charge_adapter = None
+        if use_post_charge_adapter:
+            with torch.random.fork_rng(devices=[]):
+                self.post_charge_adapter = PostChargeAdapter(post_charge_adapter_hidden_dim)
         self.decode_type = None
 
     # ------------------------------------------------------------------
@@ -935,6 +975,9 @@ class Decoder(nn.Module):
         )
 
         cache = (node_embed, graph_context, glimpse_key, glimpse_val, action_key)
+        node_projections = self.dynamic_graph_kv_encoder.precompute_node_projections(node_embed)
+        if node_projections is not None:
+            cache = (*cache, {"node_projections": node_projections})
         return cache
 
     # ------------------------------------------------------------------
@@ -947,7 +990,8 @@ class Decoder(nn.Module):
         state: StateWrapper
         node_mask: [B,N] optional extra mask over real nodes
         """
-        node_embeddings, graph_context, glimpse_K, glimpse_V, action_key = cached_embeddings
+        node_embeddings, graph_context, glimpse_K, glimpse_V, action_key = cached_embeddings[:5]
+        node_projections = cached_embeddings[5].get("node_projections") if len(cached_embeddings) > 5 else None
 
         query = self.driver_query_encoder(node_embeddings, graph_context, state)
         key_delta, val_delta, action_key_delta, action_bias = self.dynamic_graph_kv_encoder(
@@ -955,7 +999,10 @@ class Decoder(nn.Module):
             graph_context=graph_context,
             driver_query=query,
             state=state,
+            node_projections=node_projections,
         )
+        if self.post_charge_adapter is not None:
+            action_bias = action_bias + self.post_charge_adapter(state, node_embeddings)
 
         tensor_deltas = [
             delta

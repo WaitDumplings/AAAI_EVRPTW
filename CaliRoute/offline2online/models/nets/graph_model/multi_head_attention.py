@@ -134,7 +134,8 @@ class Vanilla_AttentionScore(nn.Module):
         # Optional external attention bias
         if attn_bias is not None:
             # attn_bias: [B,Q,K] → [1,B,Q,K] → broadcast to [H,B,Q,K]
-            u_score = u_score + attn_bias.unsqueeze(0).to(u_score.device)
+            bias = attn_bias.unsqueeze(0) if attn_bias.dim() == 3 else attn_bias.permute(1, 0, 2, 3)
+            u_score = u_score + bias.to(u_score.device)
 
         # Apply mask (masked positions receive -inf)
         if mask is not None:

@@ -11,6 +11,8 @@
 
 # Generated experiment artifacts and local environments.
 results/
+# Experiment worktrees may symlink this output directory.
+/CaliRoute/results
 results_legacy/
 logs/
 checkpoints/

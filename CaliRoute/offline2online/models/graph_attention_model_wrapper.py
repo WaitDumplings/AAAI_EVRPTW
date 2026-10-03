@@ -9,6 +9,7 @@ import torch.nn as nn
 from .nets.graph_model.decoder import Decoder
 from .nets.graph_model.embedding import AutoEmbedding
 from .nets.graph_model.encoder import GraphAttentionEncoder
+from .nets.graph_model.routing_adapters import DirectedEdgeBias
 
 
 class Problem:
@@ -26,7 +27,7 @@ def prepare_observation_batch(obs: dict[str, Any]) -> dict[str, Any]:
     """Add the outer env-batch dimension when a single EVRPTW env obs is passed."""
     out: dict[str, Any] = {}
     for key, value in obs.items():
-        arr = np.asarray(value)
+        arr = value if isinstance(value, torch.Tensor) else np.asarray(value)
         if key in {
             "cus_loc",
             "rs_loc",
@@ -66,7 +67,7 @@ def prepare_observation_batch(obs: dict[str, Any]) -> dict[str, Any]:
             "current_route_customer_count",
         }:
             out[key] = arr[None, ...] if arr.ndim == 2 else value
-        elif key in {"battery_capacity", "loading_capacity"}:
+        elif key in {"battery_capacity", "loading_capacity", "full_charge_time", "fixed_full_charge"}:
             out[key] = arr[None, ...] if arr.ndim == 1 else value
         else:
             out[key] = value
@@ -188,12 +189,21 @@ class Backbone(nn.Module):
         dynamic_decision_delta_action_key: bool = True,
         dynamic_decision_action_bias: bool = True,
         use_encoder_distance_bias: bool = True,
+        use_residual_edge_bias: bool = False,
+        residual_edge_hidden_dim: int = 32,
+        use_post_charge_adapter: bool = False,
+        post_charge_adapter_hidden_dim: int = 32,
+        optimize_dynamic_projections: bool = False,
+        cache_static_observations: bool = False,
+        use_static_rollout_cache: bool = True,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
         self.device = device
         self.problem = Problem(problem_name)
         self.use_encoder_distance_bias = bool(use_encoder_distance_bias)
+        self.supports_static_rollout_cache = bool(use_static_rollout_cache)
+        self.cache_static_observations = bool(cache_static_observations)
         self.embedding = AutoEmbedding(self.problem.NAME, {"embedding_dim": embedding_dim})
         self.encoder = GraphAttentionEncoder(
             n_heads=n_heads,
@@ -212,11 +222,19 @@ class Backbone(nn.Module):
             dynamic_decision_delta_v=dynamic_decision_delta_v,
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
+            use_post_charge_adapter=use_post_charge_adapter,
+            post_charge_adapter_hidden_dim=post_charge_adapter_hidden_dim,
+            optimize_dynamic_projections=optimize_dynamic_projections,
         )
 
         self.dist_bias_scale = nn.Parameter(torch.tensor(1.0))
         self.type_pair_bias = nn.Embedding(3 * 3, 1)
         nn.init.zeros_(self.type_pair_bias.weight)
+        self.residual_edge_bias = None
+        if use_residual_edge_bias:
+            # Optional modules must not shift initialization of shared weights.
+            with torch.random.fork_rng(devices=[]):
+                self.residual_edge_bias = DirectedEdgeBias(n_heads=n_heads, hidden_dim=residual_edge_hidden_dim)
 
     def _build_node_type(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
@@ -250,6 +268,8 @@ class Backbone(nn.Module):
         pair_id = node_type.unsqueeze(2) * 3 + node_type.unsqueeze(1)
         type_bias = self.type_pair_bias(pair_id).squeeze(-1)
         attn_bias = dist_bias + type_bias
+        if self.residual_edge_bias is not None:
+            attn_bias = attn_bias.unsqueeze(1) + self.residual_edge_bias(state.states)
 
         edge_energy = state.states.get("edge_energy")
         battery_capacity = state.states.get("battery_capacity")
@@ -271,7 +291,10 @@ class Backbone(nn.Module):
             battery_capacity = battery_capacity.expand(attn_bias.size(0), -1, -1)
         unreachable = edge_energy > (battery_capacity + 1e-6)
         eye = torch.eye(attn_bias.size(-1), dtype=torch.bool, device=attn_bias.device).unsqueeze(0)
-        return attn_bias.masked_fill(unreachable & ~eye, -1e9)
+        unreachable = unreachable & ~eye
+        if attn_bias.dim() == 4:
+            unreachable = unreachable.unsqueeze(1)
+        return attn_bias.masked_fill(unreachable, -1e9)
 
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
         return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
@@ -286,7 +309,17 @@ class Backbone(nn.Module):
             mask=None,
             attn_bias=self._build_attn_bias(state),
         )
-        return self.decoder._precompute(encoded_nodes, mask=node_mask), node_mask
+        cached = self.decoder._precompute(encoded_nodes, mask=node_mask)
+        if self.cache_static_observations:
+            static_keys = {
+                "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
+                "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
+                "full_charge_time", "fixed_full_charge",
+            }
+            auxiliary = dict(cached[5]) if len(cached) > 5 else {}
+            auxiliary["static_state"] = {key: state.states[key] for key in static_keys if key in state.states}
+            cached = (*cached[:5], auxiliary)
+        return cached, node_mask
 
     def forward(self, obs: dict[str, Any], use_mask: bool = False):
         state = self._build_state(obs)
@@ -300,6 +333,8 @@ class Backbone(nn.Module):
         return cached_embeddings
 
     def decode(self, obs: dict[str, Any], cached_embeddings, use_mask: bool = False):
+        if len(cached_embeddings) > 5 and "static_state" in cached_embeddings[5]:
+            obs = {**obs, **cached_embeddings[5]["static_state"]}
         state = self._build_state(obs)
         node_mask = state.states.get("instance_mask") if use_mask else None
         if node_mask is not None:
@@ -349,6 +384,13 @@ class Agent(nn.Module):
         dynamic_decision_delta_action_key: bool = True,
         dynamic_decision_action_bias: bool = True,
         use_encoder_distance_bias: bool = True,
+        use_residual_edge_bias: bool = False,
+        residual_edge_hidden_dim: int = 32,
+        use_post_charge_adapter: bool = False,
+        post_charge_adapter_hidden_dim: int = 32,
+        optimize_dynamic_projections: bool = False,
+        cache_static_observations: bool = False,
+        use_static_rollout_cache: bool = True,
         use_decomposed_critic: bool = False,
     ):
         super().__init__()
@@ -367,6 +409,13 @@ class Agent(nn.Module):
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
+            use_residual_edge_bias=use_residual_edge_bias,
+            residual_edge_hidden_dim=residual_edge_hidden_dim,
+            use_post_charge_adapter=use_post_charge_adapter,
+            post_charge_adapter_hidden_dim=post_charge_adapter_hidden_dim,
+            optimize_dynamic_projections=optimize_dynamic_projections,
+            cache_static_observations=cache_static_observations,
+            use_static_rollout_cache=use_static_rollout_cache,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

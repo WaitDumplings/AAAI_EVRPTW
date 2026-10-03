@@ -132,6 +132,7 @@ def _method_offline_config(args: Namespace, train_data: Path) -> tuple[dict[str,
             offline_cfg["sl_coef"] = float(args.sl_coef)
         if args.sl_expert_candidate_weight is not None:
             offline_cfg["sl_expert_candidate_weight"] = float(args.sl_expert_candidate_weight)
+            advantage_cfg["sl_expert_candidate_weight"] = float(args.sl_expert_candidate_weight)
 
     if args.bc_coef is not None:
         offline_cfg["bc_coef"] = float(args.bc_coef)
@@ -263,6 +264,13 @@ def build_training_config(args: Namespace) -> dict[str, Any]:
         cfg["training"]["resume_checkpoint_path"] = str(Path(args.resume_checkpoint))
     if args.resume_start_epoch is not None:
         cfg["training"]["resume_start_epoch"] = int(args.resume_start_epoch)
+    if getattr(args, "optimization_profile", None) is not None:
+        from .optimization import apply_optimization_profile
+        cfg = apply_optimization_profile(cfg, args.optimization_profile)
+    if getattr(args, "profile_timing", False):
+        cfg["training"]["profile_timing"] = True
+    if getattr(args, "eval_seed", None) is not None:
+        cfg["evaluation"]["eval_seed"] = int(args.eval_seed)
     return _clean_none(cfg)
 
 
