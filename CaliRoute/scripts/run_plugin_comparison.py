@@ -41,6 +41,7 @@ def build_long_configs(args, experiment):
         cfg['training'].update({
             'epochs': args.epochs, 'num_minibatches': args.num_minibatches,
             'checkpoint_interval': args.checkpoint_interval,
+            'latest_checkpoint_interval': 5,
             'learning_rate': args.learning_rate, 'lr_schedule': 'warmup_cosine',
             'lr_warmup_epochs': args.lr_warmup_epochs, 'lr_min': args.lr_min,
             'entropy_initial_coef': .01, 'entropy_final_coef': .002,
@@ -67,6 +68,76 @@ def latest_monitor(path):
     return last
 
 
+RECORDED_TIME_SCOPE = ("sum of each previous session's last recorded elapsed time plus the current "
+                       'session elapsed time; excludes downtime, discarded work, and unrecorded tails')
+
+
+def recorded_session_times(rows):
+    """Keep raw clocks and add a continuous clock across retained run sessions.
+
+    Input rows must follow recording order. A restart resets run_elapsed_seconds;
+    only the retained portion of each session contributes to this comparison.
+    """
+    offset, last_elapsed, current_session = 0., 0., None
+    result = []
+    for row in rows:
+        elapsed = number(row, 'run_elapsed_seconds')
+        session = row.get('run_session_id') or '__legacy_session__'
+        output = dict(row)
+        output['recorded_active_session_seconds'] = None
+        if math.isfinite(elapsed) and elapsed >= 0:
+            # Legacy logs may lack IDs; a backwards clock still identifies a restart.
+            if current_session is not None and (session != current_session or elapsed < last_elapsed):
+                offset += last_elapsed
+                last_elapsed = 0.
+            current_session, last_elapsed = session, elapsed
+            output['recorded_active_session_seconds'] = offset + elapsed
+        result.append(output)
+    return result
+
+
+def training_progress(manifest, status, training_rows, evaluation_rows):
+    """Distinguish a configured epoch budget from completed work and termination."""
+    target = int(manifest['protocol']['epochs'])
+    interrupted = bool(status.get('interrupted_signal'))
+    arms = {}
+    for arm in manifest['arms']:
+        epochs = {int(row['epoch']) for row in training_rows.get(arm, []) if row.get('epoch') not in (None, '')}
+        completed = len(epochs & set(range(1, target + 1)))
+        evaluations = [int(row['epoch']) for row in evaluation_rows.get(arm, [])
+                       if row.get('epoch') not in (None, '') and row.get('eval_status') == 'ok']
+        process = status.get('arms', {}).get(arm, {})
+        code = process.get('exit_code')
+        if interrupted and code is not None:
+            process_state = 'interrupted'
+        elif code is not None:
+            process_state = 'completed' if code == 0 and completed == target else 'failed'
+        elif status.get('finished_at_utc'):
+            process_state = 'interrupted'
+        else:
+            process_state = 'running' if process.get('pid') else 'pending'
+        arms[arm] = {
+            'completed_training_epochs': completed,
+            'latest_training_epoch': max(epochs, default=0),
+            'latest_validation_epoch': max(evaluations, default=None),
+            'remaining_epochs': max(0, target - completed),
+            'process_state': process_state,
+            'exit_code': code,
+        }
+    if interrupted:
+        state = 'interrupted'
+    elif status.get('exit_code') not in (None, 0) or any(item['process_state'] == 'failed' for item in arms.values()):
+        state = 'failed'
+    elif (set(arms) >= {'baseline', 'optimized'} and status.get('exit_code') == 0
+          and all(item['process_state'] == 'completed' for item in arms.values())):
+        state = 'completed'
+    elif status.get('finished_at_utc'):
+        state = 'interrupted'
+    else:
+        state = 'running'
+    return {'target_epochs': target, 'run_state': state, 'arms': arms}
+
+
 def update_long_report(experiment, manifest, status):
     update_report(experiment, manifest, status)
     path = experiment / 'comparison.json'
@@ -75,9 +146,14 @@ def update_long_report(experiment, manifest, status):
     report['source_commit'] = manifest['git_commit']
     report['diagnostics'] = {}
     report['validation_vs_wall_time'] = {}
+    report['validation_wall_time_scope'] = RECORDED_TIME_SCOPE
     training = {}
+    train_rows, evaluation_rows = {}, {}
     for arm, spec in manifest['arms'].items():
         rows = read_csv(Path(spec['log_dir']) / 'train_log.csv')
+        train_rows[arm] = rows
+        evaluation_rows[arm] = read_csv(Path(spec['log_dir']) / 'eval_log.csv')
+        report['arms'][arm]['lineage'] = {key: spec[key] for key in ('resume_checkpoint', 'source_experiment') if key in spec}
         training[arm] = {int(row['epoch']): row for row in rows}
         steady_times = [number(row, 'distributed_train_wall_time_s') for row in rows
                         if int(row['epoch']) > max(1, manifest['protocol']['lr_warmup_epochs'])
@@ -88,15 +164,20 @@ def update_long_report(experiment, manifest, status):
                     for rank in range(2)}
         report['diagnostics'][arm] = {'latest_rank_monitors': monitors, 'latest_train_row': rows[-1] if rows else None}
         cumulative, curve = 0., []
-        for row in rows:
+        for row in recorded_session_times(rows):
             cumulative += number(row, 'epoch_wall_time_s')
             if row.get('eval_status') == 'ok':
                 curve.append({'epoch': int(row['epoch']), 'epoch_wall_seconds_cumulative': cumulative,
                               'run_elapsed_seconds': number(row, 'run_elapsed_seconds'),
                               'run_session_id': row.get('run_session_id'),
+                              'recorded_active_session_seconds': row['recorded_active_session_seconds'],
                               'feasible_rate': number(row, 'eval_feasible_rate'),
                               'mean_distance_km': number(row, 'eval_avg_min_objective_distance_km')})
         report['validation_vs_wall_time'][arm] = curve
+    progress = training_progress(manifest, status, train_rows, evaluation_rows)
+    report = {'progress': progress, **report}
+    for arm, fields in progress['arms'].items():
+        report['arms'][arm].update(fields)
     warmup = manifest['protocol']['lr_warmup_epochs']
     epochs = sorted(training['baseline'].keys() & training['optimized'].keys())
     matched = [epoch for epoch in epochs if epoch > max(1, warmup) and all(
@@ -299,6 +380,7 @@ def main():
                      'entropy_initial': .01, 'entropy_final': .002, 'amp_init_scale': 4096., 'ppo_update_epochs': 4, 'clip_coef': .2,
                      'evaluation': 'fixed validation IDs and seed, 50 samples by default; never trains on frozen test',
                      'monitor_interval': args.monitor_interval, 'eval_n_traj': args.n_traj,
+                     'latest_checkpoint_interval': 5,
                      'quality_claim': 'single-seed screening; improvements require the completed paired validation results'},
         'arms': {},
     }

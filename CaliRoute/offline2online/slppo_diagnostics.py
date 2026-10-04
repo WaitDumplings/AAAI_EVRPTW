@@ -61,19 +61,23 @@ def value_and_advantage_diagnostics(values, returns, advantages, valid):
     }
 
 
-def gradient_component_diagnostics(losses, parameters):
-    """Optional sampled pre-backward gradient balance (no mutation, no CPU sync).
+def detached_component_gradients(loss, parameters):
+    """Sample a small common head before its *normal* training backward.
 
-    Host should call only on a small common parameter subset and infrequently;
-    extra autograd work is intentional, so this must not run each time step.
+    The caller must still backward this loss/graph to release its saved tensors.
+    Only detached head gradients escape, so different loss graphs can be sampled
+    sequentially without keeping their activations alive together.
     """
     parameters = tuple(parameter for parameter in parameters if parameter.requires_grad)
-    gradients = {}
-    for name, loss in losses.items():
-        if not parameters or not loss.requires_grad:
-            continue
-        grads = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
-        gradients[name] = tuple(torch.zeros_like(p) if g is None else g.detach() for p, g in zip(parameters, grads))
+    if not parameters or not loss.requires_grad:
+        return ()
+    grads = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+    return tuple(torch.zeros_like(p) if g is None else g.detach() for p, g in zip(parameters, grads))
+
+
+def gradient_diagnostics_from_components(gradients):
+    """Summarize detached head gradients; never retain a model forward graph."""
+    gradients = {name: grads for name, grads in gradients.items() if grads}
     out = {}
     for name, grads in gradients.items():
         out[f"grad_{name}_norm"] = torch.stack([g.float().square().sum() for g in grads]).sum().sqrt()
@@ -85,3 +89,16 @@ def gradient_component_diagnostics(losses, parameters):
             out[f"grad_{left}_{right}_cosine"] = dot / denom.clamp_min(1e-12)
             out[f"grad_{left}_to_{right}_ratio"] = out[f"grad_{left}_norm"] / out[f"grad_{right}_norm"].clamp_min(1e-12)
     return out
+
+
+def gradient_component_diagnostics(losses, parameters):
+    """Sample already-live training graphs, all of which must be backwarded.
+
+    For sequential losses, prefer detached_component_gradients before each
+    normal backward, then gradient_diagnostics_from_components afterwards.
+    """
+    parameters = tuple(parameters)
+    return gradient_diagnostics_from_components({
+        name: detached_component_gradients(loss, parameters)
+        for name, loss in losses.items()
+    })

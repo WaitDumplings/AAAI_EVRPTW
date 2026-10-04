@@ -362,3 +362,30 @@ Parameters differed by at most `3.70e-6`; CUDA execution is not claimed to be
 bitwise reproducible. These checks establish functionality, not accuracy gains.
 Local evidence is under `results/optimization/PLUGIN_DUAL_SMOKE_20261004/`,
 including `resume_check/result.json`.
+
+
+### Recovery after the first long-run interruption
+
+The first 1,000-epoch job stopped before baseline epoch 20 completed; optimized
+reached epoch 25 and was terminated by fail-fast. Its last saved checkpoint and
+validation were epoch 20. These are completed-epoch counts, not a 1,000-epoch
+result. Baseline had no saved training checkpoint.
+
+The baseline gradient monitor retained an extra SL computation graph from epoch
+1 until the next diagnostic at epoch 20. Allocating another graph exceeded the
+2080 Ti memory capacity. Diagnostics now extract detached common-head gradients
+from the normal PPO and SL forwards, without an extra forward or long-lived
+graph. Tests verify identical training gradients/updates with monitoring enabled
+and disabled and prove intermediate activations are released. Old memory/timing
+measurements involving this retained graph must not be used as the final speed
+comparison.
+
+Rolling recovery checkpoints now save every five completed epochs before
+validation, independently of the every-50-epoch archive. The atomic latest file
+contains each rank's training state and explicitly marks pending evaluation.
+The recovery experiment retains the failed run as evidence, restarts baseline
+from the original PPO init, and resumes optimized from epoch 20. Imported history
+and checkpoint provenance are recorded in its manifest. Progress reports separate
+target epochs, completed training epochs, latest validation epoch, and exit state.
+Across resumed sessions, plotted time is cumulative recorded active-session
+time; it excludes downtime, discarded work, and unrecorded session tails.

@@ -45,9 +45,11 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.trainer import (
 )
 
 from .models import Agent
+from .checkpoint_schedule import epoch_checkpoint_plan
 from .training_schedule import apply_epoch_schedule
 from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
-from .slppo_diagnostics import tensors_to_floats, value_and_advantage_diagnostics, gradient_component_diagnostics
+from .slppo_diagnostics import (tensors_to_floats, value_and_advantage_diagnostics,
+                                detached_component_gradients, gradient_diagnostics_from_components)
 from .distributed import (
     DistributedContext, DISTRIBUTED_TRAIN_FIELDS, rank_seed,
     capture_local_training_state, restore_local_training_state,
@@ -4364,6 +4366,7 @@ def train_from_config(
     num_minibatches = max(1, int(train_cfg.get("num_minibatches", 4)))
     gradient_accumulation_steps = max(1, int(train_cfg.get("gradient_accumulation_steps", 1)))
     checkpoint_interval = int(train_cfg.get("checkpoint_interval", 50))
+    latest_checkpoint_interval = int(train_cfg.get("latest_checkpoint_interval", 0) or 0)
     eval_interval = int(eval_cfg.get("eval_interval", 0) or 0)
     debug_enabled = bool(train_cfg.get("debug", False))
     debug_log_every = max(1, int(train_cfg.get("debug_log_every", 1)))
@@ -5543,19 +5546,27 @@ def train_from_config(
                                         # PPO is averaged across time; the SL weights already
                                         # include the full-route length and route-count factors.
                                         loss = loss + sl_coef * shared_route_loss / chunk_weight
-                                if (monitor_sampled and not monitor_gradient_values and sl_weights is not None
-                                        and bool(train_cfg.get("monitor_gradient_components", True))):
-                                    with _autocast_context(device, amp_enabled):
-                                        monitor_sl_loss = shared_route_loss if shared_sl_forward else _compute_solution_level_weighted_logprob_loss(
-                                            agent, batch, sl_weights, sl_valid_counts, env_indices,
-                                            device, step_start, step_end,
-                                        )
+                                sample_gradient_components = (
+                                    monitor_sampled and not monitor_gradient_values and sl_weights is not None
+                                    and bool(train_cfg.get("monitor_gradient_components", True))
+                                )
+                                if sample_gradient_components:
                                     common_parameters = tuple(agent.backbone.decoder.action_query_proj.parameters())[-2:]
-                                    monitor_gradient_values = tensors_to_floats(gradient_component_diagnostics(
-                                        {"ppo": ppo_loss_for_monitor * chunk_weight / group_size,
-                                         "sl": sl_coef * monitor_sl_loss / group_size}, common_parameters,
-                                    ))
+                                    # Sample the existing training graphs. A separate diagnostic
+                                    # SL forward would retain an extra route graph across epochs.
+                                    component_gradients = {"ppo": detached_component_gradients(
+                                        ppo_loss_for_monitor * chunk_weight / group_size, common_parameters,
+                                    )}
+                                    if shared_sl_forward:
+                                        component_gradients["sl"] = detached_component_gradients(
+                                            sl_coef * shared_route_loss / group_size, common_parameters,
+                                        )
+                                        monitor_gradient_values = tensors_to_floats(
+                                            gradient_diagnostics_from_components(component_gradients)
+                                        )
+                                        del component_gradients, common_parameters
                                 _backward(loss * chunk_weight / group_size, scaler, amp_enabled)
+                                del ppo_loss_for_monitor
                                 weighted_policy += policy_loss.item() * chunk_weight
                                 weighted_value += value_loss.item() * chunk_weight
                                 weighted_entropy += entropy.item() * chunk_weight
@@ -5628,6 +5639,14 @@ def train_from_config(
                                             step_start=step_start,
                                             step_end=step_end,
                                         )
+                                    if sample_gradient_components:
+                                        component_gradients["sl"] = detached_component_gradients(
+                                            sl_coef * route_chunk_loss / group_size, common_parameters,
+                                        )
+                                        monitor_gradient_values = tensors_to_floats(
+                                            gradient_diagnostics_from_components(component_gradients)
+                                        )
+                                        del component_gradients, common_parameters
                                     _backward(sl_coef * route_chunk_loss / group_size, scaler, amp_enabled)
                             if sl_expert_candidates:
                                 with _autocast_context(device, amp_enabled):
@@ -6016,8 +6035,13 @@ def train_from_config(
             } if str(device).startswith("cuda") else {}
             eval_row: dict[str, Any] = {}
             eval_wall_time_s = 0.0
-            should_eval = eval_interval > 0 and (epoch % eval_interval == 0 or epoch == epochs)
-            should_checkpoint = checkpoint_interval > 0 and (epoch % checkpoint_interval == 0 or epoch == epochs)
+            checkpoint_plan = epoch_checkpoint_plan(
+                epoch, epochs, eval_interval=eval_interval,
+                checkpoint_interval=checkpoint_interval,
+                latest_checkpoint_interval=latest_checkpoint_interval,
+            )
+            should_eval = checkpoint_plan.evaluate
+            should_checkpoint = checkpoint_plan.archive
             train_wall_time_s = time.perf_counter() - epoch_start
             distributed_metrics = distributed.metrics(
                 num_envs=num_envs, n_traj=int(train_cfg.get("n_traj", 50)),
@@ -6052,17 +6076,26 @@ def train_from_config(
                 "global_policy_loss": global_values[2], "global_value_loss": global_values[3],
                 "global_entropy": global_values[4], "global_approx_kl": global_values[5],
             })
-            if should_eval or should_checkpoint or epoch == epochs:
+            if checkpoint_plan.capture_resume_state:
                 local_state = capture_local_training_state(distributed, pool, expert_buffer, policy_route_pool, policy_best_objectives, scaler, sample_count_offset)
                 rank_states = distributed.gather_objects(local_state)
                 agent._training_resume_state = {
                     "version": 1, "world_size": distributed.world_size, "ranks": rank_states,
                     "sampler_state_complete": all(item["sampler"]["supported"] for item in rank_states),
                     "resume_contract": "epoch_boundary_rng_scaler_optimizer_sampler_and_route_memory; CUDA kernel determinism not guaranteed",
+                    "completed_epoch": int(epoch),
+                    "next_training_epoch": int(epoch) + 1,
+                    "snapshot_stage": "training_complete_before_evaluation",
+                    "evaluation_pending": bool(should_eval),
                 }
+            if checkpoint_plan.latest:
+                # All optimizer updates are complete. Save before validation so
+                # a validation failure cannot discard this training progress.
+                save_checkpoint(ckpt_dir / "checkpoint_latest.pt", agent, optimizer, cfg, epoch, seed)
             if should_eval and distributed.is_primary:
                 eval_start = time.perf_counter()
                 eval_row = evaluate_fixed_dataset(agent, cfg, seed=seed, epoch=epoch, device=device)
+                agent._training_resume_state["evaluation_pending"] = False
                 eval_wall_time_s = time.perf_counter() - eval_start
                 eval_writer.writerow({"epoch": epoch, **eval_row})
                 ef.flush()
@@ -6102,6 +6135,7 @@ def train_from_config(
             if should_eval:
                 eval_payload = distributed.broadcast_object((eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s))
                 eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s = eval_payload
+                agent._training_resume_state["evaluation_pending"] = False
                 agent.train()
             epoch_wall_time_s = time.perf_counter() - epoch_start
             distributed_metrics.update({
@@ -6205,7 +6239,7 @@ def train_from_config(
                 "alerts": {"approx_kl_above_target": float(ppo_stats_info.get("approx_kl") or 0.0) > float(train_cfg.get("monitor_target_kl", 0.02)),
                            "amp_skipped": distributed.epoch_amp_skipped_steps > 0},
             })
-            if should_checkpoint or epoch == epochs:
+            if should_checkpoint:
                 save_checkpoint(ckpt_dir / f"checkpoint_epoch_{epoch:04d}.pt", agent, optimizer, cfg, epoch, seed)
 
     save_checkpoint(ckpt_dir / "checkpoint_final.pt", agent, optimizer, cfg, epochs, seed)

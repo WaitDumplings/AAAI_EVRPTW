@@ -6,6 +6,8 @@ import csv
 import json
 from pathlib import Path
 
+from run_plugin_comparison import recorded_session_times
+
 
 def read_rows(path):
     if not path.exists():
@@ -22,7 +24,7 @@ def render(experiment):
     fig, axes = plt.subplots(3, 3, figsize=(15, 11), constrained_layout=True)
     charts = [
         (f"Validation best-of-{manifest['protocol'].get('eval_n_traj', 50)} distance (km)", 'eval_avg_min_objective_distance_km', 'eval'),
-        ('Validation distance vs elapsed run time', 'eval_avg_min_objective_distance_km', 'time'),
+        ('Validation distance vs recorded active-session time', 'eval_avg_min_objective_distance_km', 'time'),
         ('Validation feasibility', 'eval_feasible_rate', 'eval'),
         ('PPO approximate KL', 'global_approx_kl', 'train'),
         ('Policy entropy', 'global_entropy', 'train'),
@@ -48,9 +50,9 @@ def render(experiment):
                 except json.JSONDecodeError:
                     pass
         by_epoch = {}
-        for row in train:
-            if row.get('run_elapsed_seconds'):
-                by_epoch[int(row['epoch'])] = float(row['run_elapsed_seconds']) / 60
+        for row in recorded_session_times(train):
+            if row['recorded_active_session_seconds'] is not None:
+                by_epoch[int(row['epoch'])] = row['recorded_active_session_seconds'] / 60
         for axis, (title, key, kind) in zip(axes.flat, charts):
             rows = monitored if kind == 'monitor' else evaluation if kind in ('eval', 'time') else train
             values = []
@@ -65,7 +67,8 @@ def render(experiment):
             if values:
                 axis.plot(*zip(*values), label=arm, linewidth=1.4)
             axis.set_title(title, fontsize=10)
-            axis.set_xlabel('Run wall time (min)' if kind == 'time' else 'Epoch')
+            axis.set_xlabel('Recorded active-session time (min)\nExcludes downtime, discarded work, unrecorded tails'
+                            if kind == 'time' else 'Epoch', fontsize=9)
             axis.grid(alpha=.2)
     axes[1, 0].axhline(.02, color='grey', linestyle='--', linewidth=.8)
     for axis in axes.flat:
@@ -73,7 +76,14 @@ def render(experiment):
             handles, labels = axis.get_legend_handles_labels()
             if handles:
                 axis.legend(fontsize=8)
-    fig.suptitle('CVRP plug-in comparison — one-seed screening, validation only')
+    title = 'CVRP plug-in comparison — one-seed screening, validation only'
+    report_path = experiment / 'comparison.json'
+    if report_path.exists():
+        progress = json.loads(report_path.read_text()).get('progress')
+        if progress:
+            completed = ', '.join(f"{arm}: {item['completed_training_epochs']}" for arm, item in progress['arms'].items())
+            title += f"\n{progress['run_state']} | target {progress['target_epochs']} epochs | completed {completed}"
+    fig.suptitle(title)
     for extension in ('png', 'svg'):
         fig.savefig(experiment / f'training_curves.{extension}', dpi=150)
     plt.close(fig)
