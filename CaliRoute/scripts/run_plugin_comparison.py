@@ -46,7 +46,7 @@ def build_long_configs(args, experiment):
             'entropy_initial_coef': .01, 'entropy_final_coef': .002,
             'monitor_interval': args.monitor_interval, 'monitor_gradient_components': True,
             'monitor_output_dir': str(experiment / arm / 'monitoring'),
-            'monitor_target_kl': .02,
+            'monitor_target_kl': .02, 'amp_init_scale': 4096.,
         })
         schedule_for_epoch(cfg, 1)
         schedule_for_epoch(cfg, args.epochs)
@@ -79,6 +79,11 @@ def update_long_report(experiment, manifest, status):
     for arm, spec in manifest['arms'].items():
         rows = read_csv(Path(spec['log_dir']) / 'train_log.csv')
         training[arm] = {int(row['epoch']): row for row in rows}
+        steady_times = [number(row, 'distributed_train_wall_time_s') for row in rows
+                        if int(row['epoch']) > max(1, manifest['protocol']['lr_warmup_epochs'])
+                        and number(row, 'eval_wall_time_s') == 0
+                        and math.isfinite(number(row, 'distributed_train_wall_time_s'))]
+        report['arms'][arm]['median_epoch_seconds_excluding_warmup_and_eval'] = statistics.median(steady_times) if steady_times else None
         monitors = {str(rank): latest_monitor(experiment / arm / 'monitoring' / f'monitor_rank_{rank}.jsonl')
                     for rank in range(2)}
         report['diagnostics'][arm] = {'latest_rank_monitors': monitors, 'latest_train_row': rows[-1] if rows else None}
@@ -291,7 +296,7 @@ def main():
                      'gradient_objective': 'mean of rank-local masked objectives; not global valid-token weighting',
                      'learning_rate_peak': args.learning_rate, 'lr_warmup_epochs': args.lr_warmup_epochs,
                      'learning_rate_final': args.lr_min, 'lr_scaling': 'sqrt(global instance batch / previous 64), a tuning hypothesis',
-                     'entropy_initial': .01, 'entropy_final': .002, 'ppo_update_epochs': 4, 'clip_coef': .2,
+                     'entropy_initial': .01, 'entropy_final': .002, 'amp_init_scale': 4096., 'ppo_update_epochs': 4, 'clip_coef': .2,
                      'evaluation': 'fixed validation IDs and seed, 50 samples by default; never trains on frozen test',
                      'monitor_interval': args.monitor_interval, 'eval_n_traj': args.n_traj,
                      'quality_claim': 'single-seed screening; improvements require the completed paired validation results'},

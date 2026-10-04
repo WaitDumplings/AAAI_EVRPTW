@@ -21,7 +21,7 @@ def test_long_two_gpu_protocol_is_equal_across_models(tmp_path):
     assert a['data'] == b['data']
     assert a['offline']['init_checkpoint_path'] == b['offline']['init_checkpoint_path']
     for key in ('num_envs_per_gpu', 'n_traj', 'num_minibatches', 'ppo_update_epochs', 'learning_rate',
-                'lr_schedule', 'lr_warmup_epochs', 'lr_min', 'entropy_initial_coef', 'entropy_final_coef'):
+                'lr_schedule', 'lr_warmup_epochs', 'lr_min', 'entropy_initial_coef', 'entropy_final_coef', 'amp_init_scale'):
         assert a['training'][key] == b['training'][key]
     assert not a['model']['use_rdi_v2']
     assert b['model']['use_rdi_v2'] and b['model']['use_agda_v2']

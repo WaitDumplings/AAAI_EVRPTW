@@ -153,3 +153,17 @@ def test_only_primary_writes_atomic_checkpoint_with_resume_state(tmp_path):
     assert new_optimizer.param_groups[0]['lr'] == .01
     assert restored._pending_training_resume_state['world_size'] == 2
     assert restored._pending_training_resume_state['ranks'][1]['rank'] == 1
+
+
+def test_gradient_monitor_counts_nonfinite_and_clipping_over_finite_attempts():
+    context = DistributedContext()
+    context.record_step(float('inf'), skipped=True, max_grad_norm=1.)
+    context.record_step(2., skipped=False, max_grad_norm=1.)
+    context.record_step(.5, skipped=False, max_grad_norm=1.)
+    values = context.metrics(num_envs=2, n_traj=3, effective_instances=1, train_seconds=1, learning_rate=1e-4, samples_seen=2)
+    assert values['grad_norm_nonfinite_count'] == 1
+    assert values['grad_norm_finite_mean'] == 1.25
+    assert values['grad_clipped_fraction'] == .5
+    assert values['amp_skipped_steps_epoch'] == 1
+    context.reset_epoch()
+    assert context.epoch_finite_grad_clipped == []

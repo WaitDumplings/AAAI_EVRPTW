@@ -39,6 +39,7 @@ class DistributedContext:
     epoch_amp_skipped_steps: int = 0
     epoch_gradient_sync_sec: float = 0.0
     epoch_grad_norms: list[float] = field(default_factory=list)
+    epoch_finite_grad_clipped: list[bool] = field(default_factory=list)
 
     @property
     def enabled(self) -> bool:
@@ -146,9 +147,12 @@ class DistributedContext:
         self.epoch_amp_skipped_steps = 0
         self.epoch_gradient_sync_sec = 0.0
         self.epoch_grad_norms.clear()
+        self.epoch_finite_grad_clipped.clear()
 
-    def record_step(self, grad_norm: float, skipped: bool):
+    def record_step(self, grad_norm: float, skipped: bool, max_grad_norm: float = 1.0):
         self.epoch_grad_norms.append(float(grad_norm))
+        if np.isfinite(grad_norm):
+            self.epoch_finite_grad_clipped.append(float(grad_norm) > float(max_grad_norm))
         if skipped:
             self.amp_skipped_steps += 1
             self.epoch_amp_skipped_steps += 1
@@ -164,6 +168,7 @@ class DistributedContext:
             dist.all_reduce(elapsed, op=dist.ReduceOp.MAX)
             dist.all_reduce(samples, op=dist.ReduceOp.SUM)
         seconds = max(float(elapsed.item()), 1e-9)
+        finite_grad_norms = [norm for norm in self.epoch_grad_norms if np.isfinite(norm)]
         return {
             "distributed_rank": self.rank,
             "distributed_world_size": self.world_size,
@@ -178,6 +183,10 @@ class DistributedContext:
             "amp_skipped_steps_epoch": self.epoch_amp_skipped_steps,
             "grad_norm": float(np.mean(self.epoch_grad_norms)) if self.epoch_grad_norms else 0.0,
             "grad_norm_max": float(np.max(self.epoch_grad_norms)) if self.epoch_grad_norms else 0.0,
+            "grad_norm_finite_mean": float(np.mean(finite_grad_norms)) if finite_grad_norms else float("nan"),
+            "grad_norm_nonfinite_count": len(self.epoch_grad_norms) - len(finite_grad_norms),
+            "grad_clipped_fraction": float(np.mean(self.epoch_finite_grad_clipped)) if self.epoch_finite_grad_clipped else float("nan"),
+            "grad_clipped_fraction_scope": "fraction of finite attempted global gradient norms exceeding max_grad_norm",
             "learning_rate": float(learning_rate),
             "distributed_gradient_sync_sec": self.epoch_gradient_sync_sec,
             "global_instances_per_sec": num_envs * self.world_size / seconds,

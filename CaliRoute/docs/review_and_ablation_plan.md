@@ -261,6 +261,7 @@ fixes. The baseline is therefore not a byte-for-byte historical executable.
 | Entropy coefficient | Cosine decay from 0.01 to 0.002 over the training horizon. |
 | Validation | Same 1,000 validation IDs and fixed evaluation seed; 50 sampled routes per instance, best feasible distance; epoch 0 and every 20 epochs, plus the final epoch. |
 | Monitoring | Basic records each epoch; more expensive critic/gradient/plugin/synchronization diagnostics at epoch 1 and every 20 epochs, written separately for each rank. |
+| Mixed precision | Shared initial gradient scale 4096, then standard dynamic scaling; the real four-rank smoke with the default 65536 initially skipped four updates per arm before recovering. |
 | Checkpoints | Every 50 epochs and the final epoch, with rank-local RNG/sampler/replay/scaler state where supported. |
 
 Here an epoch is one global rollout plus its PPO update passes, not a complete
@@ -351,3 +352,13 @@ tensor contracts and gradient flow; no experiment on a second real routing model
 has been completed. EVRPTW post-charge integration remains validated only on
 synthetic transition tests, and this launcher intentionally admits CVRP/VRPTW
 only. No real-data EVRPTW speed or quality improvement is established here.
+
+The pre-launch four-rank CVRP50 integration check used eight real train and eight
+validation instances for three epochs, with a shortened replay warmup solely to
+exercise replay. Both arms completed with finite later updates and synchronized
+parameter checksums. A real two-rank epoch-2-to-3 resume restored sampler, RNG,
+replay, scaler and update counters exactly, and reproduced validation routes.
+Parameters differed by at most `3.70e-6`; CUDA execution is not claimed to be
+bitwise reproducible. These checks establish functionality, not accuracy gains.
+Local evidence is under `results/optimization/PLUGIN_DUAL_SMOKE_20261004/`,
+including `resume_check/result.json`.

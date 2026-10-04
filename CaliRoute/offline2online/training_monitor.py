@@ -42,7 +42,10 @@ def module_update_snapshot(agent):
     return grouped
 
 
-def finish_module_update(agent, snapshot):
+def finish_module_update(agent, snapshot, skipped=False):
+    if snapshot:
+        parameter = next(agent.parameters())
+        agent._monitor_optimizer_metrics["module_first_attempt_skipped"] = parameter.new_tensor(float(skipped))
     for name, values in snapshot.items():
         update = torch.stack([(p.detach().float() - before.float()).square().sum() for p, before in values]).sum().sqrt()
         agent._monitor_optimizer_metrics[f'module_{name}_update_norm'] = update

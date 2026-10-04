@@ -136,13 +136,13 @@ def _autocast_context(device: str | torch.device, enabled: bool):
     return torch.autocast(device_type=device_type, dtype=torch.float16, enabled=True)
 
 
-def _new_grad_scaler(enabled: bool):
+def _new_grad_scaler(enabled: bool, init_scale: float = 65536.0):
     if not enabled:
         return None
     try:
-        return torch.amp.GradScaler("cuda", enabled=True)
+        return torch.amp.GradScaler("cuda", enabled=True, init_scale=init_scale)
     except (AttributeError, TypeError):
-        return torch.cuda.amp.GradScaler(enabled=True)
+        return torch.cuda.amp.GradScaler(enabled=True, init_scale=init_scale)
 
 
 def _backward(loss: torch.Tensor, scaler, amp_enabled: bool) -> None:
@@ -183,9 +183,9 @@ def _optimizer_step(
         skipped = False
     else:
         skipped = True
-    finish_module_update(agent, monitor_snapshot)
+    finish_module_update(agent, monitor_snapshot, skipped=skipped)
     if context is not None:
-        context.record_step(float(grad_norm.item()), skipped)
+        context.record_step(float(grad_norm.item()), skipped, max_grad_norm=max_grad_norm)
 
 
 def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, cfg: dict[str, Any], epoch: int, seed: int) -> None:
@@ -4389,7 +4389,7 @@ def train_from_config(
         )
     )
     amp_enabled = _amp_enabled(train_cfg, device)
-    scaler = _new_grad_scaler(amp_enabled)
+    scaler = _new_grad_scaler(amp_enabled, float(train_cfg.get("amp_init_scale", 65536.0)))
     max_grad_norm = float(train_cfg.get("max_grad_norm", 1.0))
     record_eval_median = str(
         os.environ.get("O2O_RECORD_MEDIAN_EVAL", eval_cfg.get("record_median_eval", True))
@@ -4900,7 +4900,7 @@ def train_from_config(
         eval_fields = [field for field in eval_fields if field not in median_fields]
 
     train_fields.extend(DISTRIBUTED_TRAIN_FIELDS)
-    train_fields.extend(["run_elapsed_seconds", "run_session_id", "run_elapsed_scope"])
+    train_fields.extend(["run_elapsed_seconds", "run_session_id", "run_elapsed_scope", "global_rollout_samples_seen", "sample_draw_scope"])
     train_fields.extend(["global_unique_instances_per_rollout", "global_duplicate_instances_per_rollout", "global_instance_ids_observed", "global_instance_ids_missing"])
     train_fields.extend(["global_train_feasible_rate", "global_train_avg_best_objective_distance_km", "global_policy_loss", "global_value_loss", "global_entropy", "global_approx_kl"])
     sample_count_offset = 0
@@ -6027,6 +6027,13 @@ def train_from_config(
             )
             sampled_instance_ids = list(getattr(batch, "instance_ids", None) or [])
             distributed_metrics.update(rollout_instance_coverage(distributed, sampled_instance_ids))
+            warmup_only_epochs = min(epoch, bc_warmup_epochs) if (
+                expert_buffer is not None and (offline_method in {"bc_ppo", "bc-ppo"} or _is_dapg_method(offline_method) or _is_sl_candidate_method(offline_method))
+            ) else 0
+            distributed_metrics.update({
+                "global_rollout_samples_seen": (epoch - warmup_only_epochs) * num_envs * distributed.world_size,
+                "sample_draw_scope": "global_samples_seen includes environment construction/reset draws; global_rollout_samples_seen counts fixed-size on-policy epochs, including prior epochs on resume",
+            })
             epoch_parameter_sync = parameter_sync_diagnostics(distributed, agent, scaler) if monitor_sampled else {}
             local_fr = float(train_summary.get("train_feasible_rate", 0.0))
             local_obj = float(train_summary.get("train_avg_best_objective_distance_km", float("nan")))
@@ -6181,6 +6188,7 @@ def train_from_config(
                 "sampled_instance_ids": sampled_instance_ids,
                 "parameter_sync": epoch_parameter_sync,
                 "gradient_diagnostic_scope": "first_update_first_chunk_common_action_query_head; PPO includes policy/value/entropy, SL excludes experts/replay",
+                "module_update_scope": "first attempted optimizer step per sampled epoch; module_first_attempt_skipped identifies AMP/nonfinite skips",
                 "route_diagnostic_aggregation": "local minibatch arithmetic mean; quantiles are means of local minibatch quantiles",
                 **distributed_metrics, **epoch_schedule, **epoch_gpu_memory,
                 "local_training": {**train_summary, **ppo_stats_info, **decomposed_info},
