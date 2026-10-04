@@ -102,3 +102,41 @@ def test_candidates_use_history_budget_and_refresh_old_policy_logprob():
     assert len(second) == 1
     assert np.isfinite(second[0].old_mean_logprob)
     assert abs(old_logprob - second[0].old_mean_logprob) > 1e-7
+
+
+def test_replay_warmup_collects_without_loss_and_rejects_weak_history():
+    agent = _agent()
+    batch = _run(agent)
+    envs = [_env(), _env(1.3)]
+    pool = _pool(max_relative_gap=0.2)
+    actions = [1, 3, 0, 2, 0]
+    for instance_id in pool.instances:
+        assert pool.add(instance_id, actions, _cost(pool, actions, instance_id))
+    cfg = {"training": {"cache_expert_route_encoding": True}, "offline": {
+        "policy_replay_enabled": True, "policy_replay_fraction": 1.0,
+        "policy_replay_max_candidates": 2, "policy_replay_max_new_routes": 0,
+        "policy_replay_weight": 0.1, "policy_replay_warmup_epochs": 25,
+        "policy_replay_ramp_epochs": 75, "policy_replay_require_current_improvement": True,
+        "policy_replay_min_current_improvement": 0.002,
+    }, "advantage": {}}
+    for info in batch.final_infos:
+        info["objective_distance_km"] = np.asarray(info["objective_distance_km"]) + 100
+    first, stats = _prepare_policy_replay_candidates(agent, batch, cfg, envs, pool, "cpu", 25)
+    assert first == [] and stats['policy_replay_weight'] == 0
+    second, stats = _prepare_policy_replay_candidates(agent, batch, cfg, envs, pool, "cpu", 26)
+    assert len(second) == 2
+    assert stats['policy_replay_weight'] == pytest.approx(.1 / 75)
+    assert stats['policy_replay_current_best_gap_mean'] > .002
+    # History is better than the sample mean, but equal to the current best:
+    # legacy gate allows it; v2 refuses to reinforce an already matched route.
+    for index, info in enumerate(batch.final_infos):
+        instance_id = envs[index].unwrapped.instance.instance_id
+        cost = _cost(pool, actions, instance_id)
+        info['objective_distance_km'] = np.array([cost, cost + 10, cost + 20])
+        info['success'] = np.ones(3, dtype=bool)
+    rejected, stats = _prepare_policy_replay_candidates(agent, batch, cfg, envs, pool, "cpu", 100)
+    assert not rejected
+    assert stats['policy_replay_quality_rejected'] == 2
+    cfg['offline']['policy_replay_require_current_improvement'] = False
+    allowed, _ = _prepare_policy_replay_candidates(agent, batch, cfg, envs, pool, "cpu", 100)
+    assert len(allowed) == 2

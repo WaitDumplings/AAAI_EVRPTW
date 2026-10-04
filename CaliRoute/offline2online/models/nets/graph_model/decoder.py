@@ -1,8 +1,8 @@
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from .routing_adapters import PostChargeAdapter
+from caliroute.plugins.agda import AdaptiveGraphAttention
 
 from ...nets.graph_model.multi_head_attention import (
     AttentionScore,
@@ -146,7 +146,7 @@ class DriverQueryEncoder(nn.Module):
         return self.query_proj(torch.cat([graph_context, current_node, state_context], dim=-1))
 
 
-class DynamicGraphKVEncoder(nn.Module):
+class DynamicGraphKVEncoder(AdaptiveGraphAttention):
     """
     Candidate-side dynamic graph encoder for the decoder.
 
@@ -155,142 +155,6 @@ class DynamicGraphKVEncoder(nn.Module):
     produces dynamic corrections for attention keys, values, action keys, and a
     scalar action bias.
     """
-
-    def __init__(
-        self,
-        embedding_dim,
-        n_heads=4,
-        enabled=False,
-        enable_delta_k=True,
-        enable_delta_v=True,
-        enable_delta_action_key=True,
-        enable_action_bias=True,
-        optimize_dynamic_projections=False,
-    ):
-        super().__init__()
-        self.embedding_dim = int(embedding_dim)
-        self.enabled = bool(enabled)
-        self.enable_delta_k = bool(enable_delta_k)
-        self.enable_delta_v = bool(enable_delta_v)
-        self.enable_delta_action_key = bool(enable_delta_action_key)
-        self.enable_action_bias = bool(enable_action_bias)
-        self.optimize_dynamic_projections = bool(optimize_dynamic_projections)
-        self.routing_system_feature_dim = 10
-        self.problem_system_feature_dim = 5
-        self.system_feature_dim = (
-            self.routing_system_feature_dim + self.problem_system_feature_dim
-        )
-        self.routing_candidate_feature_dim = 16
-        self.problem_candidate_feature_dim = 14
-        self.candidate_feature_dim = (
-            self.routing_candidate_feature_dim + self.problem_candidate_feature_dim
-        )
-        self.num_tokens = 9
-
-        n_heads = max(1, int(n_heads))
-        if self.embedding_dim % n_heads != 0:
-            n_heads = 1
-
-        self.state_proj = nn.Sequential(
-            nn.LayerNorm(self.system_feature_dim),
-            nn.Linear(self.system_feature_dim, embedding_dim),
-            nn.SiLU(),
-            nn.Linear(embedding_dim, embedding_dim),
-        )
-        self.token_type = nn.Parameter(torch.zeros(1, self.num_tokens, embedding_dim))
-        self.token_attn = nn.MultiheadAttention(
-            embed_dim=embedding_dim,
-            num_heads=n_heads,
-            batch_first=True,
-        )
-        self.token_norm = nn.LayerNorm(embedding_dim)
-        self.token_ff = nn.Sequential(
-            nn.LayerNorm(embedding_dim),
-            nn.Linear(embedding_dim, 2 * embedding_dim),
-            nn.SiLU(),
-            nn.Linear(2 * embedding_dim, embedding_dim),
-        )
-        self.token_ff_norm = nn.LayerNorm(embedding_dim)
-        self.route_pos_proj = nn.Sequential(
-            nn.LayerNorm(4 * embedding_dim),
-            nn.Linear(4 * embedding_dim, embedding_dim),
-            nn.SiLU(),
-            nn.Linear(embedding_dim, embedding_dim),
-        )
-        self.node_state_proj = nn.Linear(embedding_dim, 3 * embedding_dim, bias=False)
-        self.decision_state_proj = nn.Linear(embedding_dim, 3 * embedding_dim, bias=False)
-        self.step_state_proj = nn.Linear(embedding_dim, 3 * embedding_dim, bias=False)
-        self.candidate_feature_proj = nn.Sequential(
-            nn.LayerNorm(self.candidate_feature_dim),
-            nn.Linear(self.candidate_feature_dim, embedding_dim),
-            nn.SiLU(),
-            nn.Linear(embedding_dim, 3 * embedding_dim),
-        )
-        self.candidate_delta_base = nn.Sequential(
-            nn.LayerNorm(self.candidate_feature_dim),
-            nn.Linear(self.candidate_feature_dim, embedding_dim),
-            nn.SiLU(),
-        )
-        self.candidate_key_delta_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.candidate_value_delta_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.candidate_action_key_delta_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.action_bias_proj = nn.Sequential(
-            nn.LayerNorm(self.candidate_feature_dim),
-            nn.Linear(self.candidate_feature_dim, embedding_dim),
-            nn.SiLU(),
-            nn.Linear(embedding_dim, 1),
-        )
-        self.key_scale = nn.Parameter(torch.tensor(0.1))
-        self.value_scale = nn.Parameter(torch.tensor(0.1))
-        self.action_key_scale = nn.Parameter(torch.tensor(0.1))
-        self.action_bias_scale = nn.Parameter(torch.tensor(0.1))
-
-        nn.init.normal_(self.token_type, mean=0.0, std=0.02)
-        nn.init.xavier_uniform_(self.state_proj[1].weight, gain=0.5)
-        nn.init.zeros_(self.state_proj[1].bias)
-        nn.init.xavier_uniform_(self.state_proj[3].weight, gain=0.5)
-        nn.init.zeros_(self.state_proj[3].bias)
-        nn.init.xavier_uniform_(self.route_pos_proj[1].weight, gain=0.5)
-        nn.init.zeros_(self.route_pos_proj[1].bias)
-        nn.init.zeros_(self.route_pos_proj[3].weight)
-        nn.init.zeros_(self.route_pos_proj[3].bias)
-        nn.init.zeros_(self.node_state_proj.weight)
-        nn.init.zeros_(self.decision_state_proj.weight)
-        nn.init.zeros_(self.step_state_proj.weight)
-        nn.init.xavier_uniform_(self.candidate_feature_proj[1].weight, gain=0.5)
-        nn.init.zeros_(self.candidate_feature_proj[1].bias)
-        nn.init.zeros_(self.candidate_feature_proj[3].weight)
-        nn.init.zeros_(self.candidate_feature_proj[3].bias)
-        nn.init.xavier_uniform_(self.candidate_delta_base[1].weight, gain=0.5)
-        nn.init.zeros_(self.candidate_delta_base[1].bias)
-        nn.init.zeros_(self.candidate_key_delta_proj.weight)
-        nn.init.zeros_(self.candidate_key_delta_proj.bias)
-        nn.init.zeros_(self.candidate_value_delta_proj.weight)
-        nn.init.zeros_(self.candidate_value_delta_proj.bias)
-        nn.init.zeros_(self.candidate_action_key_delta_proj.weight)
-        nn.init.zeros_(self.candidate_action_key_delta_proj.bias)
-        nn.init.xavier_uniform_(self.action_bias_proj[1].weight, gain=0.5)
-        nn.init.zeros_(self.action_bias_proj[1].bias)
-        nn.init.zeros_(self.action_bias_proj[3].weight)
-        nn.init.zeros_(self.action_bias_proj[3].bias)
-
-    def project_enabled(self, layer, value):
-        """Keep original parameter tensors, but compute only enabled output rows."""
-        flags = (self.enable_delta_k, self.enable_delta_v, self.enable_delta_action_key)
-        if not self.optimize_dynamic_projections or all(flags):
-            return layer(value).chunk(3, dim=-1)
-        width = self.embedding_dim
-        return tuple(
-            F.linear(value, layer.weight[i * width:(i + 1) * width]) if enabled else None
-            for i, enabled in enumerate(flags)
-        )
-
-    def precompute_node_projections(self, node_embeddings):
-        if not self.enabled or not self.optimize_dynamic_projections:
-            return None
-        if not (self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key):
-            return None
-        return self.project_enabled(self.node_state_proj, node_embeddings)
 
     @staticmethod
     def _step_count(state, fallback=1):
@@ -746,8 +610,7 @@ class DynamicGraphKVEncoder(nn.Module):
         if self.optimize_dynamic_projections and not (
             self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key
         ):
-            bias = self.action_bias_proj(candidate_features).squeeze(-1) if self.enable_action_bias else 0
-            return 0, 0, 0, torch.tanh(self.action_bias_scale) * bias
+            return super().forward(node_embeddings, None, candidate_features, node_projections=node_projections)
 
         current_node = self._gather_node(node_embeddings, current_node_idx)
 
@@ -796,56 +659,9 @@ class DynamicGraphKVEncoder(nn.Module):
             ],
             dim=2,
         )
-        B, _, S, D = tokens.shape
-        flat_tokens = tokens.reshape(B * T, S, D)
-        flat_tokens = flat_tokens + self.token_type[:, :S, :].to(
-            device=flat_tokens.device,
-            dtype=flat_tokens.dtype,
-        )
-        attended_tokens, _ = self.token_attn(
-            flat_tokens,
-            flat_tokens,
-            flat_tokens,
-            need_weights=False,
-        )
-        flat_tokens = self.token_norm(flat_tokens + attended_tokens)
-        flat_tokens = self.token_ff_norm(flat_tokens + self.token_ff(flat_tokens))
-        decision_token = flat_tokens[:, 0, :].reshape(B, T, D)
+        return super().forward(node_embeddings, tokens, candidate_features,
+                               state_token=state_token, node_projections=node_projections)
 
-        key_delta = 0
-        value_delta = 0
-        action_key_delta = 0
-        if self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key:
-            candidate_base = self.candidate_delta_base(candidate_features)
-            if node_projections is None:
-                node_projections = self.project_enabled(self.node_state_proj, node_embeddings)
-            node_key, node_value, node_action_key = node_projections
-            decision_key, decision_value, decision_action_key = self.project_enabled(self.decision_state_proj, decision_token)
-            step_key, step_value, step_action_key = self.project_enabled(self.step_state_proj, state_token)
-            if self.enable_delta_k:
-                key_delta = self.candidate_key_delta_proj(candidate_base)
-                key_delta = key_delta + node_key.unsqueeze(1)
-                key_delta = key_delta + decision_key.unsqueeze(2)
-                key_delta = key_delta + step_key.unsqueeze(2)
-                key_delta = torch.tanh(self.key_scale) * key_delta
-            if self.enable_delta_v:
-                value_delta = self.candidate_value_delta_proj(candidate_base)
-                value_delta = value_delta + node_value.unsqueeze(1)
-                value_delta = value_delta + decision_value.unsqueeze(2)
-                value_delta = value_delta + step_value.unsqueeze(2)
-                value_delta = torch.tanh(self.value_scale) * value_delta
-            if self.enable_delta_action_key:
-                action_key_delta = self.candidate_action_key_delta_proj(candidate_base)
-                action_key_delta = action_key_delta + node_action_key.unsqueeze(1)
-                action_key_delta = action_key_delta + decision_action_key.unsqueeze(2)
-                action_key_delta = action_key_delta + step_action_key.unsqueeze(2)
-                action_key_delta = torch.tanh(self.action_key_scale) * action_key_delta
-        if self.enable_action_bias:
-            action_bias = self.action_bias_proj(candidate_features).squeeze(-1)
-            action_bias = torch.tanh(self.action_bias_scale) * action_bias
-        else:
-            action_bias = 0
-        return key_delta, value_delta, action_key_delta, action_bias
 
 
 class Decoder(nn.Module):
@@ -880,6 +696,8 @@ class Decoder(nn.Module):
         use_post_charge_adapter=False,
         post_charge_adapter_hidden_dim=32,
         optimize_dynamic_projections=False,
+        use_agda_v2=False,
+        agda_hidden_dim=32,
     ):
         super().__init__()
 
@@ -909,6 +727,8 @@ class Decoder(nn.Module):
             enable_delta_action_key=dynamic_decision_delta_action_key,
             enable_action_bias=dynamic_decision_action_bias,
             optimize_dynamic_projections=optimize_dynamic_projections,
+            use_agda_v2=use_agda_v2,
+            agda_hidden_dim=agda_hidden_dim,
         )
 
         # glimpse + pointer

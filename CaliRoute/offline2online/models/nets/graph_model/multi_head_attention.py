@@ -2,6 +2,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 ################################ Decoder Attention ################################
 class AttentionScore(nn.Module):
@@ -158,9 +159,10 @@ class MultiHeadAttentionEncoder(nn.Module):
         mask:  [B, Nk] (bool)
         attn_bias: optional [B, Nq, Nk] (broadcast-safe)
     """
-    def __init__(self, embedding_dim, n_heads=8):
+    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False):
         super().__init__()
         self.n_heads = n_heads
+        self.use_sdpa = bool(use_sdpa)
         self.attentionScore = Vanilla_AttentionScore()
         self.project_out = nn.Linear(embedding_dim, embedding_dim, bias=False)
 
@@ -169,6 +171,22 @@ class MultiHeadAttentionEncoder(nn.Module):
         query_heads = self._make_heads(query)   # [H,B,Nq,D_head]
         key_heads   = self._make_heads(key)     # [H,B,Nk,D_head]
         value_heads = self._make_heads(value)   # [H,B,Nk,D_head]
+
+        if self.use_sdpa:
+            # Only the encoder uses standard scaled-dot-product attention.
+            # Decoder attention has learned scales/tanh clipping and stays intact.
+            bias = attn_bias
+            if bias is not None and bias.dim() == 3:
+                bias = bias.unsqueeze(1)
+            if mask is not None:
+                if bias is None:
+                    bias = query_heads.new_zeros(query.size(0), 1, query.size(1), key.size(1))
+                bias = bias.masked_fill(mask[:, None, None, :].bool(), float("-inf"))
+            output = F.scaled_dot_product_attention(
+                query_heads.transpose(0, 1), key_heads.transpose(0, 1), value_heads.transpose(0, 1),
+                attn_mask=bias, dropout_p=0.0,
+            )
+            return self.project_out(self._unmake_heads(output.transpose(0, 1)))
 
         # Compute attention scores
         compatibility = self.attentionScore(
@@ -208,12 +226,12 @@ class MultiHeadAttentionProj(nn.Module):
         mask: [B, Nk] (bool)
         attn_bias: Optional attention bias, e.g. [B, Nq, Nk]
     """
-    def __init__(self, embedding_dim, n_heads=8):
+    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False):
         super().__init__()
         self.queryEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.keyEncoder   = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.valueEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.MHA = MultiHeadAttentionEncoder(embedding_dim, n_heads)
+        self.MHA = MultiHeadAttentionEncoder(embedding_dim, n_heads, use_sdpa=use_sdpa)
 
     def forward(self, q, h=None, mask=None, attn_bias=None):
         if h is None:

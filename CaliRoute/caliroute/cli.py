@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-bias", choices=["on", "off"], default="on")
     parser.add_argument("--distance-injection", choices=["encoder", "none"], default="encoder")
 
-    parser.add_argument("--optimization-profile", choices=["baseline", "optimized"], default=None,
+    parser.add_argument("--optimization-profile", choices=["baseline", "optimized", "optimized_v2"], default=None,
                         help="Enable a controlled optimization preset; EVRPTW charge features remain experimental.")
     parser.add_argument("--profile-timing", action="store_true")
     parser.add_argument("--eval-seed", type=int, default=None)

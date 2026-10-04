@@ -51,12 +51,14 @@ class MultiHeadAttentionLayer(nn.Module):
         n_heads: int,
         embedding_dim: int,
         feed_forward_hidden: int = 512,
+        use_sdpa: bool = False,
     ):
         super().__init__()
 
         self.attn = MultiHeadAttentionProj(
             embedding_dim=embedding_dim,
             n_heads=n_heads,
+            use_sdpa=use_sdpa,
         )
 
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -95,6 +97,7 @@ class GraphAttentionEncoder(nn.Module):
         embed_dim: int,
         n_layers: int,
         feed_forward_hidden: int = 512,
+        use_sdpa: bool = False,
     ):
         super().__init__()
 
@@ -109,6 +112,7 @@ class GraphAttentionEncoder(nn.Module):
                     n_heads=n_heads,
                     embedding_dim=embed_dim,
                     feed_forward_hidden=feed_forward_hidden,
+                    use_sdpa=use_sdpa,
                 )
                 for _ in range(n_layers)
             ]

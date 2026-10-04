@@ -45,6 +45,16 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.trainer import (
 )
 
 from .models import Agent
+from .training_schedule import apply_epoch_schedule
+from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
+from .slppo_diagnostics import tensors_to_floats, value_and_advantage_diagnostics, gradient_component_diagnostics
+from .distributed import (
+    DistributedContext, DISTRIBUTED_TRAIN_FIELDS, rank_seed,
+    capture_local_training_state, restore_local_training_state,
+    rollout_instance_coverage, parameter_sync_diagnostics,
+)
+from caliroute.plugins.slppo import clipped_route_surrogate, replay_weight_schedule
+from .slppo_diagnostics import numpy_distribution, tensors_to_floats
 from .instance_adapter import (
     AdaptedFixedDatasetInstancePool,
     iter_adapted_instances,
@@ -149,18 +159,41 @@ def _optimizer_step(
     scaler,
     amp_enabled: bool,
 ) -> None:
+    context = getattr(agent, "_distributed_context", None)
+    if context is not None:
+        # Synchronize while still scaled so AMP detects the same overflow on all
+        # ranks, including a rank with no local expert/route contribution.
+        if not context.synchronize_gradients(agent):
+            return
     if amp_enabled and scaler is not None:
+        # A rank with only remotely contributed gradients may never have called
+        # scale locally; this initializes the public scaler API without backward.
+        scaler.scale(torch.zeros((), device=next(agent.parameters()).device))
         scaler.unscale_(optimizer)
-    torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+    monitor_snapshot = module_update_snapshot(agent)
+    grad_norm = torch.nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+    finite = bool(torch.isfinite(grad_norm).item())
     if amp_enabled and scaler is not None:
+        old_scale = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
-    else:
+        skipped = scaler.get_scale() < old_scale
+    elif finite:
         optimizer.step()
+        skipped = False
+    else:
+        skipped = True
+    finish_module_update(agent, monitor_snapshot)
+    if context is not None:
+        context.record_step(float(grad_norm.item()), skipped)
 
 
 def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, cfg: dict[str, Any], epoch: int, seed: int) -> None:
+    context = getattr(agent, "_distributed_context", None)
+    if context is not None and not context.is_primary:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
     torch.save(
         {
             "epoch": int(epoch),
@@ -168,11 +201,14 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "config": cfg,
             "model_state_dict": agent.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            **({"training_resume_state": agent._training_resume_state}
+               if hasattr(agent, "_training_resume_state") else {}),
             **({"policy_route_pool_state": agent.policy_route_pool.state_dict()}
                if getattr(agent, "policy_route_pool", None) is not None else {}),
         },
-        path,
+        temporary_path,
     )
+    os.replace(temporary_path, path)
 
 
 def _offline_method(cfg: dict[str, Any]) -> str:
@@ -902,6 +938,8 @@ def _make_envs(cfg: dict[str, Any], seed: int, *, problem_type: str):
 
 _INIT_CHECKPOINT_NEW_MODULE_PREFIXES = (
     "backbone.residual_edge_bias.",
+    "backbone.rdi_adapter.",
+    "backbone.decoder.dynamic_graph_kv_encoder.agda_adapter.",
     "backbone.decoder.post_charge_adapter.",
 )
 
@@ -918,7 +956,7 @@ def _load_initial_model_state(agent: Agent, state_dict: dict[str, Any], *, stric
     )
     if forbidden_missing or unexpected:
         raise RuntimeError(
-            "Incompatible initialization checkpoint; only new residual-edge/post-charge "
+            "Incompatible initialization checkpoint; only explicitly added RDI/AGDA/edge/charge "
             f"adapter keys may be missing. Missing: {forbidden_missing}; "
             f"unexpected: {sorted(unexpected)}"
         )
@@ -938,7 +976,7 @@ def _load_agent_checkpoint(
         return {}
     if not ckpt_path.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = (
             checkpoint.get("model_state_dict")
@@ -972,7 +1010,7 @@ def _load_training_checkpoint(
         return {}
     if not ckpt_path.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = (
             checkpoint.get("model_state_dict")
@@ -985,6 +1023,8 @@ def _load_training_checkpoint(
         checkpoint = {}
     result = agent.load_state_dict(state_dict, strict=strict)
     optimizer_loaded = False
+    if isinstance(checkpoint, dict) and checkpoint.get("training_resume_state") is not None:
+        agent._pending_training_resume_state = checkpoint["training_resume_state"]
     if isinstance(checkpoint, dict) and checkpoint.get("policy_route_pool_state") is not None:
         agent._pending_policy_route_pool_state = checkpoint["policy_route_pool_state"]
     if isinstance(checkpoint, dict) and checkpoint.get("optimizer_state_dict") is not None:
@@ -1577,6 +1617,8 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
     offline_cfg = cfg.get("offline", {}) or {}
     adv_cfg = _advantage_config(cfg)
     weight = float(offline_cfg.get("policy_replay_weight", 0.2))
+    configured_weight = weight
+    weight = replay_weight_schedule(int(epoch), weight, int(offline_cfg.get("policy_replay_warmup_epochs", 0)), int(offline_cfg.get("policy_replay_ramp_epochs", 0)))
     fraction = float(offline_cfg.get("policy_replay_fraction", 0.25))
     if not np.isfinite(weight) or not np.isfinite(fraction) or weight < 0 or not 0 <= fraction <= 1:
         raise ValueError("Policy replay weight must be finite and nonnegative and fraction in [0, 1]")
@@ -1584,7 +1626,20 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
     objective, success, _ = _final_info_arrays(batch.final_infos, num_envs, n_traj)
     budget = min(max(0, int(offline_cfg.get("policy_replay_max_candidates", 16))), int(math.ceil(num_envs * fraction)))
     candidates = []
+    seen_route_counts = []
+    seen_edge_distances = []
+    from .policy_route_replay import edge_distance
+    for env in envs[:num_envs]:
+        routes = route_pool.routes.get(_env_instance_id(env), [])
+        seen_route_counts.append(len(routes))
+        for left, right in itertools.combinations(routes, 2):
+            seen_edge_distances.append(edge_distance(left, right))
     verified = 0
+    quality_rejected = 0
+    current_best_gaps = []
+    improvement_margin = float(offline_cfg.get("policy_replay_min_current_improvement", 0.0))
+    if not np.isfinite(improvement_margin) or not 0 <= improvement_margin < 1:
+        raise ValueError("policy_replay_min_current_improvement must be in [0, 1)")
     order = [(route_pool.cursor + offset) % num_envs for offset in range(num_envs)]
     selected_ids = set()
     for env_idx in order:
@@ -1605,6 +1660,12 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
         successful = objective[env_idx][success[env_idx] & np.isfinite(objective[env_idx])]
         if gap <= 0 or route.objective > float(successful.min()) * (1 + route_pool.max_relative_gap):
             continue
+        best = float(successful.min())
+        current_best_gap = (best - route.objective) / max(abs(best), 1e-8)
+        if bool(offline_cfg.get("policy_replay_require_current_improvement", False)) and current_best_gap <= improvement_margin:
+            quality_rejected += 1
+            continue
+        current_best_gaps.append(current_best_gap)
         eta = max(float(adv_cfg.get("sl_candidate_quality_gate_eta", 0.05)), 1e-8)
         gate = float(np.clip(gap / (eta * route.objective + 1e-8), 0.0, 1.0))
         advantage = weight * gate * float(np.clip(gap / scale, 0.0, adv_cfg.get("sl_candidate_clip", 2.0)))
@@ -1645,12 +1706,23 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
             accepted = route_pool.add(_env_instance_id(envs[env_idx]), sequence, objective[env_idx, trajectory])
             added += int(accepted)
             rejected += int(not accepted)
-    return candidates, {
+    info = {
         "policy_replay_pool_routes": float(len(route_pool)),
         "policy_replay_candidates": float(len(candidates)),
         "policy_replay_added": float(added), "policy_replay_rejected": float(rejected),
         "policy_replay_verified": float(verified), "policy_replay_weight": weight,
+        "policy_replay_configured_weight": configured_weight,
+        "policy_replay_quality_rejected": float(quality_rejected),
+        "policy_replay_current_best_gap_mean": float(np.mean(current_best_gaps)) if current_best_gaps else 0.0,
+        "policy_replay_active_fraction": float(len(candidates) / max(num_envs, 1)),
+        "policy_replay_pool_instances": float(len(route_pool.routes)),
+        "policy_replay_seen_routes_per_instance": float(np.mean(seen_route_counts)) if seen_route_counts else 0.0,
+        "policy_replay_seen_edge_diversity": float(np.mean(seen_edge_distances)) if seen_edge_distances else 0.0,
     }
+
+    info.update(numpy_distribution([candidate.advantage for candidate in candidates], "monitor_replay_adv"))
+    info.update(numpy_distribution([candidate.old_mean_logprob for candidate in candidates], "monitor_replay_support"))
+    return candidates, info
 
 
 def _finite_mean_std(value: np.ndarray) -> tuple[float, float]:
@@ -1724,6 +1796,18 @@ class GcbpoPreferencePair:
     strong: bool
 
 
+def _solution_advantage_std_floor(adv_cfg, *, reference, absolute_key):
+    mode = str(adv_cfg.get("sl_advantage_scale_mode", "absolute")).lower()
+    if mode == "absolute":
+        return max(float(adv_cfg.get(absolute_key, 5.0)), 0.0)
+    if mode != "relative":
+        raise ValueError("sl_advantage_scale_mode must be absolute or relative")
+    ratio = float(adv_cfg.get("sl_relative_std_floor", 0.01))
+    if not np.isfinite(ratio) or ratio < 0:
+        raise ValueError("sl_relative_std_floor must be finite and nonnegative")
+    return ratio * abs(float(reference))
+
+
 def _sl_candidate_improvement_stats(
     objective_row: np.ndarray,
     success_row: np.ndarray,
@@ -1737,7 +1821,7 @@ def _sl_candidate_improvement_stats(
     if not np.isfinite(base_obj):
         return None
     remaining_gap = float(base_obj) - float(ref_obj)
-    std_floor = max(float(adv_cfg.get("sl_candidate_std_floor", 5.0)), 0.0)
+    std_floor = _solution_advantage_std_floor(adv_cfg, reference=ref_obj, absolute_key="sl_candidate_std_floor")
     sigma = max(float(np.std(succ_obj)), std_floor)
     gap_scale = max(float(adv_cfg.get("sl_candidate_gap_scale_coef", 1.0)), 0.0) * max(remaining_gap, 0.0)
     gap_floor = max(float(adv_cfg.get("sl_candidate_gap_floor_ratio", 0.01)), 0.0) * float(ref_obj)
@@ -1924,8 +2008,10 @@ def _prepare_sl_expert_candidates(
         kept: list[SolutionCandidate] = []
         for candidate, old_logprob in zip(candidates, old_mean):
             candidate.old_mean_logprob = float(old_logprob)
+            if not np.isfinite(candidate.old_mean_logprob):
+                continue
             if use_support_gate:
-                support_gate = float(1.0 / (1.0 + np.exp(-(candidate.old_mean_logprob - support_min) / support_temp)))
+                support_gate = float(1.0 / (1.0 + np.exp(np.clip(-(candidate.old_mean_logprob - support_min) / support_temp, -80.0, 80.0))))
                 candidate.advantage *= support_gate
                 candidate.gate *= support_gate
             if abs(candidate.advantage) > 1e-8:
@@ -1942,6 +2028,9 @@ def _prepare_sl_expert_candidates(
         "sl_candidate_expert_num_routes": float(len(candidates)),
         "sl_candidate_expert_weight": expert_weight,
     }
+    info.update(numpy_distribution(adv_values, "monitor_expert_adv"))
+    info.update(numpy_distribution([candidate.old_mean_logprob for candidate in candidates], "monitor_expert_support"))
+    info["monitor_expert_active_fraction"] = float(len(candidates) / max(num_envs, 1))
     if best_gap_ratios:
         info["sl_candidate_best_gap_mean"] = float(np.mean(best_gap_ratios))
     return candidates, info
@@ -2888,12 +2977,14 @@ def _solution_level_advantage_tensors(
     policy_best_objectives: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     adv_cfg = _advantage_config(cfg)
+    relative_scale = str(adv_cfg.get("sl_advantage_scale_mode", "absolute")).lower() == "relative"
     use_group = _group_advantage_enabled(cfg)
     use_ref = _reference_advantage_enabled(cfg)
     use_sl_candidate = _sl_candidate_enabled(cfg)
     num_envs = int(batch.actions.size(1))
     n_traj = int(batch.actions.size(2))
     objective, success, served = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    feasible_objective = success & np.isfinite(objective)
     route_adv = np.zeros((num_envs, n_traj), dtype=np.float64)
     info = {
         "group_adv_mean": 0.0,
@@ -2928,11 +3019,17 @@ def _solution_level_advantage_tensors(
         num_customers = max(1, int(cfg.get("data", {}).get("num_customers", 1)))
         penalty = float(adv_cfg.get("group_infeasible_penalty", 10.0))
         score = -objective.copy()
-        finite_score = np.isfinite(score)
-        fallback = float(np.nanmin(score[finite_score]) - penalty * (num_customers + 1)) if np.any(finite_score) else -penalty * (num_customers + 1)
-        score[~finite_score] = fallback
-        missing_customers = np.maximum(float(num_customers) - served, 0.0)
-        score[~success] -= penalty * (missing_customers[~success] + 1.0)
+        if relative_scale:
+            # Failed partial-route objectives and a fixed distance penalty must
+            # never enter scale-relative group moments. An all-failed group has
+            # no on-policy learning signal even when an expert is available.
+            score[~feasible_objective] = 0.0
+        else:
+            finite_score = np.isfinite(score)
+            fallback = float(np.nanmin(score[finite_score]) - penalty * (num_customers + 1)) if np.any(finite_score) else -penalty * (num_customers + 1)
+            score[~finite_score] = fallback
+            missing_customers = np.maximum(float(num_customers) - served, 0.0)
+            score[~success] -= penalty * (missing_customers[~success] + 1.0)
         include_reference = bool(adv_cfg.get("sl_include_reference_in_group_stats", True))
         use_memory_incumbent = bool(adv_cfg.get("sl_use_memory_incumbent", True))
         means = np.zeros((num_envs, 1), dtype=np.float64)
@@ -2941,8 +3038,11 @@ def _solution_level_advantage_tensors(
         within_stds: list[float] = []
         reference_count = 0
         for env_idx, env in enumerate(envs[:num_envs]):
-            row_mask = np.isfinite(score[env_idx])
+            row_mask = feasible_objective[env_idx] if relative_scale else np.isfinite(score[env_idx])
             row_values = score[env_idx, row_mask].astype(np.float64, copy=True)
+            if relative_scale and not row_values.size:
+                valid_counts.append(0)
+                continue
             if include_reference and expert_buffer is not None:
                 instance_id = _env_instance_id(env)
                 ref_obj = expert_buffer.reference_objective(instance_id)
@@ -2961,15 +3061,22 @@ def _solution_level_advantage_tensors(
             if row_values.size == 0:
                 continue
             means[env_idx, 0] = float(row_values.mean())
-            stds[env_idx, 0] = max(float(row_values.std()), float(adv_cfg.get("group_adv_std_floor", 5.0)))
+            scale_reference = -float(row_values.mean())
+            if include_reference and expert_buffer is not None and ref_obj is not None and np.isfinite(ref_obj) and ref_obj > 0:
+                scale_reference = float(ref_obj)
+            stds[env_idx, 0] = max(float(row_values.std()), _solution_advantage_std_floor(adv_cfg, reference=scale_reference, absolute_key="group_adv_std_floor"))
             within_stds.append(float(row_values.std()))
         mean = means
         std = stds
-        group_adv = (score - mean) / (std + 1e-8)
+        denominator = np.maximum(std, np.finfo(np.float64).tiny) if relative_scale else std + 1e-8
+        group_adv = (score - mean) / denominator
+        if relative_scale:
+            group_adv = np.where(feasible_objective, group_adv, 0.0)
         group_adv = np.clip(group_adv, -float(adv_cfg.get("group_adv_clip", 3.0)), float(adv_cfg.get("group_adv_clip", 3.0)))
         group_adv *= float(adv_cfg.get("group_adv_coef", 0.30))
         route_adv += group_adv
         info["group_adv_mean"], info["group_adv_std"] = _finite_mean_std(group_adv)
+        info.update(numpy_distribution(group_adv, "monitor_group_adv", success))
         info["sl_obj_within_std_mean"] = float(np.mean(within_stds)) if within_stds else 0.0
         info["sl_obj_valid_count_mean"] = float(np.mean(valid_counts)) if valid_counts else 0.0
         info["sl_group_reference_count"] = float(reference_count)
@@ -2978,7 +3085,7 @@ def _solution_level_advantage_tensors(
         sl_candidate_coef = float(adv_cfg.get("sl_candidate_coef", 0.10))
         sl_candidate_rho = max(float(adv_cfg.get("sl_candidate_rho", 0.10)), 1e-8)
         sl_candidate_clip = float(adv_cfg.get("sl_candidate_clip", 2.0))
-        success_only = bool(adv_cfg.get("sl_candidate_success_only", True))
+        success_only = relative_scale or bool(adv_cfg.get("sl_candidate_success_only", True))
         positive_coef = float(adv_cfg.get("sl_candidate_positive_coef", 1.0))
         negative_coef = float(adv_cfg.get("sl_candidate_negative_coef", 1.0))
         sl_candidate_mode = str(adv_cfg.get("sl_candidate_advantage_mode", "remaining_gap")).lower()
@@ -3059,6 +3166,7 @@ def _solution_level_advantage_tensors(
         sl_candidate_used = sl_candidate_adv * sl_candidate_coef
         route_adv += sl_candidate_used
         info["sl_candidate_adv_mean"], info["sl_candidate_adv_std"] = _finite_mean_std(sl_candidate_used)
+        info.update(numpy_distribution(sl_candidate_used, "monitor_candidate_adv", success))
         info["sl_candidate_positive_mean"], info["sl_candidate_positive_std"] = _finite_mean_std(sl_candidate_positive * sl_candidate_coef)
         info["sl_candidate_negative_mean"], info["sl_candidate_negative_std"] = _finite_mean_std(sl_candidate_negative * sl_candidate_coef)
         info["sl_candidate_gate_mean"], info["sl_candidate_gate_std"] = _finite_mean_std(sl_candidate_gate)
@@ -3070,7 +3178,7 @@ def _solution_level_advantage_tensors(
         ref_clip = float(adv_cfg.get("reference_adv_clip", 2.0))
         ref_coef = float(adv_cfg.get("reference_adv_coef", 0.10))
         ref_rho = max(float(adv_cfg.get("reference_adv_rho", 0.10)), 1e-8)
-        success_only = bool(adv_cfg.get("reference_success_only", True))
+        success_only = relative_scale or bool(adv_cfg.get("reference_success_only", True))
         ref_mode = str(adv_cfg.get("reference_advantage_mode", "absolute")).lower()
         gap_baseline_mode = str(adv_cfg.get("reference_gap_baseline", "mean")).lower()
         gap_floor_ratio = max(float(adv_cfg.get("reference_gap_floor_ratio", 0.01)), 0.0)
@@ -3148,6 +3256,7 @@ def _solution_level_advantage_tensors(
         ref_used *= ref_coef
         route_adv += ref_used
         info["ref_adv_mean"], info["ref_adv_std"] = _finite_mean_std(ref_used)
+        info.update(numpy_distribution(ref_used, "monitor_reference_adv", success))
         info["ref_gate_mean"], info["ref_gate_std"] = _finite_mean_std(combined_gate)
         if base_gap_ratios:
             info["ref_base_gap_ratio_mean"] = float(np.mean(base_gap_ratios))
@@ -3157,10 +3266,13 @@ def _solution_level_advantage_tensors(
             if memory_gaps:
                 info["ref_memory_gap_mean"] = float(np.mean(memory_gaps))
 
+    if relative_scale:
+        route_adv = np.where(feasible_objective, route_adv, 0.0)
     info["route_adv_mean"], info["route_adv_std"] = _finite_mean_std(route_adv)
+    info.update(numpy_distribution(route_adv, "monitor_route_adv", success))
     return (
         torch.as_tensor(route_adv, dtype=batch.old_logprobs.dtype, device=device),
-        torch.as_tensor(success, dtype=torch.bool, device=device),
+        torch.as_tensor(feasible_objective if relative_scale else success, dtype=torch.bool, device=device),
         info,
     )
 
@@ -3192,39 +3304,18 @@ def _compute_solution_level_ppo_loss(
         valid_counts = valid_counts + valid
 
     mean_delta = sum_delta / valid_counts.clamp_min(1.0)
-    route_ratio = torch.exp(mean_delta)
-    adv = route_adv[env_indices].detach()
     route_mask = valid_counts > 0
     if only_success:
         route_mask = route_mask & route_success[env_indices]
-    route_mask = route_mask & torch.isfinite(adv) & (adv != 0)
-    if not bool(route_mask.any()):
-        zero = route_ratio.sum() * 0.0
-        return zero, {
-            "sl_route_loss": 0.0,
-            "sl_route_ratio_mean": 1.0,
-            "sl_route_ratio_std": 0.0,
-            "sl_route_clip_frac": 0.0,
-            "sl_route_adv_mean": 0.0,
-            "sl_route_adv_std": 0.0,
-            "sl_num_routes_used": 0.0,
-        }
+    result = clipped_route_surrogate(mean_delta, route_adv[env_indices], route_mask,
+                                     clip_coef=route_clip_eps, valid_counts=valid_counts)
+    return result.loss, _solution_level_result_info(result)
 
-    r = route_ratio[route_mask]
-    a = adv[route_mask]
-    unclipped = r * a
-    clipped = torch.clamp(r, 1.0 - route_clip_eps, 1.0 + route_clip_eps) * a
-    route_loss = -torch.minimum(unclipped, clipped).mean()
-    clip_frac = ((r > 1.0 + route_clip_eps) | (r < 1.0 - route_clip_eps)).float().mean()
-    return route_loss, {
-        "sl_route_loss": float(route_loss.detach().cpu().item()),
-        "sl_route_ratio_mean": float(r.detach().mean().cpu().item()),
-        "sl_route_ratio_std": float(r.detach().std(unbiased=False).cpu().item()) if r.numel() > 1 else 0.0,
-        "sl_route_clip_frac": float(clip_frac.detach().cpu().item()),
-        "sl_route_adv_mean": float(a.detach().mean().cpu().item()),
-        "sl_route_adv_std": float(a.detach().std(unbiased=False).cpu().item()) if a.numel() > 1 else 0.0,
-        "sl_num_routes_used": float(route_mask.sum().detach().cpu().item()),
-    }
+
+def _solution_level_result_info(result):
+    info = {f"sl_route_{key}": value for key, value in tensors_to_floats(result.diagnostics).items()}
+    info["sl_num_routes_used"] = info.pop("sl_route_num_routes_used")
+    return info
 
 
 def _prepare_solution_level_ppo_weights(
@@ -3255,47 +3346,12 @@ def _prepare_solution_level_ppo_weights(
             valid_counts = valid_counts + valid
 
         mean_delta = sum_delta / valid_counts.clamp_min(1.0)
-        route_ratio = torch.exp(mean_delta)
-        adv = route_adv[env_indices].detach()
         route_mask = valid_counts > 0
         if only_success:
             route_mask = route_mask & route_success[env_indices]
-        route_mask = route_mask & torch.isfinite(adv) & (adv != 0)
-        weights = torch.zeros_like(route_ratio)
-        if not bool(route_mask.any()):
-            return weights, valid_counts, {
-                "sl_route_loss": 0.0,
-                "sl_route_ratio_mean": 1.0,
-                "sl_route_ratio_std": 0.0,
-                "sl_route_clip_frac": 0.0,
-                "sl_route_adv_mean": 0.0,
-                "sl_route_adv_std": 0.0,
-                "sl_num_routes_used": 0.0,
-            }
-
-        r = route_ratio[route_mask]
-        a = adv[route_mask]
-        unclipped = r * a
-        clipped_ratio = torch.clamp(r, 1.0 - route_clip_eps, 1.0 + route_clip_eps)
-        clipped = clipped_ratio * a
-        use_unclipped = unclipped <= clipped
-        selected_indices = route_mask.nonzero(as_tuple=True)
-        active_env = selected_indices[0][use_unclipped]
-        active_traj = selected_indices[1][use_unclipped]
-        denom = float(max(int(route_mask.sum().detach().cpu().item()), 1))
-        if active_env.numel() > 0:
-            weights[active_env, active_traj] = route_ratio[active_env, active_traj] * adv[active_env, active_traj] / denom
-        route_loss = -torch.minimum(unclipped, clipped).mean()
-        clip_frac = ((r > 1.0 + route_clip_eps) | (r < 1.0 - route_clip_eps)).float().mean()
-        return weights.detach(), valid_counts.detach(), {
-            "sl_route_loss": float(route_loss.detach().cpu().item()),
-            "sl_route_ratio_mean": float(r.detach().mean().cpu().item()),
-            "sl_route_ratio_std": float(r.detach().std(unbiased=False).cpu().item()) if r.numel() > 1 else 0.0,
-            "sl_route_clip_frac": float(clip_frac.detach().cpu().item()),
-            "sl_route_adv_mean": float(a.detach().mean().cpu().item()),
-            "sl_route_adv_std": float(a.detach().std(unbiased=False).cpu().item()) if a.numel() > 1 else 0.0,
-            "sl_num_routes_used": float(route_mask.sum().detach().cpu().item()),
-        }
+        result = clipped_route_surrogate(mean_delta, route_adv[env_indices], route_mask,
+                                         clip_coef=route_clip_eps, valid_counts=valid_counts)
+        return result.weights.detach(), valid_counts.detach(), _solution_level_result_info(result)
 
 
 def _compute_solution_level_weighted_logprob_loss(
@@ -3360,37 +3416,10 @@ def _compute_sl_expert_candidate_loss(
     adv = torch.as_tensor([candidate.advantage for candidate in selected], dtype=torch.float32, device=new_mean_logprob.device).detach()
     logratio = new_mean_logprob - old_mean_logprob.detach()
     route_clip_eps = float((cfg.get("offline", {}) or {}).get("route_clip_eps", (cfg.get("offline", {}) or {}).get("sl_clip_coef", 0.20)))
-    if not 0.0 < route_clip_eps < 1.0:
-        raise ValueError("SL route clip coefficient must be between zero and one")
-    # This is algebraically the same clipped PPO surrogate, but clips the
-    # saturated branch BEFORE exp: positive advantage caps the upper ratio;
-    # negative advantage floors the lower ratio. This avoids 0 * inf backward.
-    selected_logratio = torch.where(
-        adv >= 0,
-        logratio.clamp(max=math.log1p(route_clip_eps)),
-        logratio.clamp(min=math.log1p(-route_clip_eps)),
-    )
-    max_log = math.log(torch.finfo(torch.float32).max) - 2.0
-    safe_limit = max_log - adv.abs().clamp_min(1.0).log()
-    finite = torch.isfinite(logratio) & torch.isfinite(adv) & (selected_logratio <= safe_limit)
-    safe_logratio = torch.where(finite, selected_logratio, torch.zeros_like(selected_logratio))
-    safe_adv = torch.where(finite, adv, torch.zeros_like(adv))
-    route_loss = -(safe_logratio.exp() * safe_adv).sum() / finite.sum().clamp_min(1)
-    with torch.no_grad():
-        # Bounding diagnostics does not change the loss or its gradients.
-        ratio = logratio[finite].double().clamp(-80.0, 80.0).exp()
-        kept_adv = adv[finite]
-        clip_frac = ((ratio > 1.0 + route_clip_eps) | (ratio < 1.0 - route_clip_eps)).double().mean() if ratio.numel() else ratio.new_zeros(())
-    return route_loss, {
-        "sl_candidate_expert_loss": float(route_loss.detach().cpu().item()),
-        "sl_candidate_expert_ratio_mean": float(ratio.mean().cpu().item()) if ratio.numel() else 1.0,
-        "sl_candidate_expert_ratio_std": float(ratio.std(unbiased=False).cpu().item()) if ratio.numel() > 1 else 0.0,
-        "sl_candidate_expert_clip_frac": float(clip_frac.cpu().item()),
-        "sl_candidate_expert_adv_mean": float(kept_adv.mean().cpu().item()) if kept_adv.numel() else 0.0,
-        "sl_candidate_expert_adv_std": float(kept_adv.std(unbiased=False).cpu().item()) if kept_adv.numel() > 1 else 0.0,
-        "sl_candidate_expert_num_routes": float(finite.sum().cpu().item()),
-        "sl_candidate_expert_rejected_nonfinite": float((~finite).sum().cpu().item()),
-    }
+    result = clipped_route_surrogate(logratio, adv, torch.ones_like(adv, dtype=torch.bool), clip_coef=route_clip_eps)
+    info = {f"sl_candidate_expert_{key}": value for key, value in tensors_to_floats(result.diagnostics).items()}
+    info["sl_candidate_expert_num_routes"] = info.pop("sl_candidate_expert_num_routes_used")
+    return result.loss, info
 
 
 def _compute_bafipo_preference_loss(
@@ -4102,10 +4131,18 @@ def train_from_config(
     device: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> Path:
+    # Wall clock begins before configuration, process-group initialization,
+    # model/expert loading and epoch-zero validation. A resumed process starts
+    # a new session; do not silently splice its elapsed time into the old one.
+    run_session_start = time.perf_counter()
+    run_session_id = f"{os.getpid()}-{time.time_ns()}"
     cfg = deep_update(cfg, overrides or {})
     _apply_solution_level_aliases(cfg)
-    set_seed(seed)
     train_cfg = cfg["training"]
+    distributed = DistributedContext.initialize(device, int(train_cfg.get("distributed_timeout_minutes", 30)))
+    device = distributed.device
+    sampling_seed = rank_seed(seed, distributed.rank)
+    set_seed(seed)  # New adapters start identically before rank-specific sampling.
     eval_cfg = cfg.get("evaluation", {})
     offline_cfg = cfg.get("offline", {}) or {}
     offline_method = _offline_method(cfg)
@@ -4228,6 +4265,11 @@ def train_from_config(
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
             use_residual_edge_bias=bool(model_cfg.get("use_residual_edge_bias", False)),
+            use_rdi_v2=bool(model_cfg.get("use_rdi_v2", False)),
+            rdi_hidden_dim=int(model_cfg.get("rdi_hidden_dim", 32)),
+            use_agda_v2=bool(model_cfg.get("use_agda_v2", False)),
+            agda_hidden_dim=int(model_cfg.get("agda_hidden_dim", 32)),
+            use_encoder_sdpa=bool(model_cfg.get("use_encoder_sdpa", False)),
             residual_edge_hidden_dim=int(model_cfg.get("residual_edge_hidden_dim", 32)),
             use_post_charge_adapter=bool(model_cfg.get("use_post_charge_adapter", False)),
             post_charge_adapter_hidden_dim=int(model_cfg.get("post_charge_adapter_hidden_dim", 32)),
@@ -4307,6 +4349,11 @@ def train_from_config(
         if resume_start_epoch < 1:
             raise ValueError(f"resume_start_epoch must be >= 1, got {resume_start_epoch}")
 
+    agent._distributed_context = distributed
+    distributed.broadcast_module(agent)
+    if reference_agent is not None:
+        distributed.broadcast_module(reference_agent)
+    set_seed(sampling_seed)
     gamma = float(train_cfg.get("gamma", 0.99))
     epochs = int(train_cfg.get("epochs", 500))
     if resume_start_epoch > epochs + 1:
@@ -4358,7 +4405,7 @@ def train_from_config(
             dataset_path=train_dataset_path,
             num_customers=num_customers,
             num_charging_stations=num_cs,
-            seed=seed,
+            seed=sampling_seed,
             sample_mode=str(data_cfg.get("train_sample_mode", "shuffle_cycle")),
             problem_type=problem_type,
         )
@@ -4370,7 +4417,7 @@ def train_from_config(
             base_pool,
             references,
             batch_size=num_envs_cfg,
-            seed=seed + int(offline_cfg.get("priority_seed_offset", 31_000)),
+            seed=sampling_seed + int(offline_cfg.get("priority_seed_offset", 31_000)),
             cfg=cfg,
         )
         pbrs_config = build_pbrs_config(cfg)
@@ -4387,7 +4434,7 @@ def train_from_config(
             for _ in range(num_envs_cfg)
         ]
     else:
-        envs, pool = _make_envs(cfg, seed, problem_type=problem_type)
+        envs, pool = _make_envs(cfg, sampling_seed, problem_type=problem_type)
     initial_env_pool_time_s = time.perf_counter() - initial_env_start
 
     out_root = REPO_ROOT / "results"
@@ -4395,9 +4442,14 @@ def train_from_config(
     log_dir = out_root / "logs" / f"Cus_{num_customers}_CS_{num_cs}" / run_name / f"seed_{seed}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+    if not distributed.is_primary:
+        log_dir = log_dir / f"rank_{distributed.rank}"
+        log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "train_log.csv"
     eval_log_path = log_dir / "eval_log.csv"
     debug_log_path = log_dir / "debug_log.txt"
+    monitor_dir = Path(train_cfg.get("monitor_output_dir") or log_dir)
+    monitor_path = monitor_dir / f"monitor_rank_{distributed.rank}.jsonl"
     resume_append_logs = bool(train_cfg.get("resume_append_logs", offline_cfg.get("resume_append_logs", True)))
     resume_truncate_logs = bool(train_cfg.get("resume_truncate_logs", offline_cfg.get("resume_truncate_logs", True)))
 
@@ -4847,6 +4899,10 @@ def train_from_config(
         train_fields = [field for field in train_fields if field not in median_fields]
         eval_fields = [field for field in eval_fields if field not in median_fields]
 
+    train_fields.extend(DISTRIBUTED_TRAIN_FIELDS)
+    train_fields.extend(["run_elapsed_seconds", "run_session_id", "run_elapsed_scope"])
+    train_fields.extend(["global_unique_instances_per_rollout", "global_duplicate_instances_per_rollout", "global_instance_ids_observed", "global_instance_ids_missing"])
+    train_fields.extend(["global_train_feasible_rate", "global_train_avg_best_objective_distance_km", "global_policy_loss", "global_value_loss", "global_entropy", "global_approx_kl"])
     sample_count_offset = 0
     append_existing_logs = bool(resume_checkpoint_path and resume_append_logs and resume_start_epoch > 1)
     if append_existing_logs and resume_truncate_logs:
@@ -4875,7 +4931,7 @@ def train_from_config(
             writer.writeheader()
         if write_eval_header:
             eval_writer.writeheader()
-        expert_buffer = _load_expert_buffer(cfg, seed, debug_enabled, df)
+        expert_buffer = _load_expert_buffer(cfg, sampling_seed, debug_enabled, df)
         best_eval_objective = float("inf")
         best_eval_feasible_rate = -1.0
         best_eval_epoch = 0
@@ -4901,7 +4957,7 @@ def train_from_config(
         _debug_log(
             debug_enabled,
             df,
-            f"[Init] run={run_name} seed={seed} device={device} epochs={epochs} "
+            f"[Init] run={run_name} seed={seed} rank={distributed.rank}/{distributed.world_size} sampling_seed={sampling_seed} device={device} epochs={epochs} "
             f"start_epoch={resume_start_epoch} "
             f"n_traj={train_cfg.get('n_traj', 50)} rollout_steps={rollout_steps} "
             f"num_envs={train_cfg.get('num_envs_per_gpu', 128)} minibatches={num_minibatches} "
@@ -4954,11 +5010,21 @@ def train_from_config(
             )
         if train_cfg.get("post_init_seed") is not None:
             # New zero-initialized adapters must not shift the rollout RNG stream.
-            set_seed(int(train_cfg["post_init_seed"]))
+            set_seed(rank_seed(int(train_cfg["post_init_seed"]), distributed.rank))
+        pending_training = getattr(agent, "_pending_training_resume_state", None)
+        if pending_training is not None:
+            saved_world_size = int(pending_training.get("world_size", 1))
+            if saved_world_size != distributed.world_size:
+                raise ValueError(f"Resume world size changed: {saved_world_size} -> {distributed.world_size}; initialize weights instead")
+            sample_count_offset = restore_local_training_state(
+                pending_training["ranks"][distributed.rank], distributed, pool, expert_buffer,
+                policy_route_pool, policy_best_objectives, scaler,
+            )
+            del agent._pending_training_resume_state
         initial_eval_start = time.perf_counter()
         initial_eval = _evaluate_before_training(
             agent, cfg, seed, device, resume_checkpoint_path=resume_checkpoint_path,
-        )
+        ) if distributed.is_primary else None
         if initial_eval is not None:
             # Epoch zero documents the common initialization; it is excluded from
             # training checkpoint selection and does not consume training randomness.
@@ -4973,8 +5039,20 @@ def train_from_config(
                 f"eval_wall={time.perf_counter() - initial_eval_start:.3f}s "
                 f"status={initial_eval.get('eval_status')}",
             )
+        distributed.barrier()
         for epoch in range(resume_start_epoch, epochs + 1):
             epoch_start = time.perf_counter()
+            distributed.reset_epoch()
+            epoch_schedule = apply_epoch_schedule(cfg, optimizer, epoch)
+            monitor_sampled = begin_monitor_epoch(agent, epoch, train_cfg)
+            monitor_values = {}
+            monitor_gradient_values = {}
+            monitor_route_records = []
+            monitor_expert_records = []
+            monitor_replay_records = []
+            policy_replay_info = {}
+            if str(device).startswith("cuda"):
+                torch.cuda.reset_peak_memory_stats(device)
             pbrs_scale = pbrs_scale_for_epoch(cfg, epoch, epochs)
             set_pbrs_reward_scale(envs, pbrs_scale)
             agent.train()
@@ -5130,6 +5208,10 @@ def train_from_config(
                         "route_boundary_count_mean": boundary_count / traj_count,
                         "route_boundary_step_ratio": boundary_count / max(valid_count, 1),
                     }
+                if monitor_sampled:
+                    monitor_values = tensors_to_floats(value_and_advantage_diagnostics(
+                        _value_head(batch.values, 0), _value_head(returns, 0), advantages, batch.valid,
+                    ))
                 dapg_enabled = expert_buffer is not None and _is_dapg_method(offline_method)
                 awbc_enabled = expert_buffer is not None and _is_awbc_method(offline_method)
                 partition_enabled = expert_buffer is not None and _is_partition_method(offline_method)
@@ -5393,6 +5475,7 @@ def train_from_config(
                                     env_indices,
                                     device,
                                 )
+                                monitor_route_records.append(route_info)
                                 sl_losses.append(float(route_info["sl_route_loss"]))
                                 sl_ratio_means.append(float(route_info["sl_route_ratio_mean"]))
                                 sl_ratio_stds.append(float(route_info["sl_route_ratio_std"]))
@@ -5451,6 +5534,7 @@ def train_from_config(
                                         )
                                         approx_kls.append(float(ppo_stats["approx_kl"]))
                                         clip_fracs.append(float(ppo_stats["clip_fraction"]))
+                                    ppo_loss_for_monitor = loss
                                     if shared_sl_forward:
                                         shared_route_loss = _compute_solution_level_weighted_logprob_loss(
                                             agent, batch, sl_weights, sl_valid_counts, env_indices,
@@ -5459,6 +5543,18 @@ def train_from_config(
                                         # PPO is averaged across time; the SL weights already
                                         # include the full-route length and route-count factors.
                                         loss = loss + sl_coef * shared_route_loss / chunk_weight
+                                if (monitor_sampled and not monitor_gradient_values and sl_weights is not None
+                                        and bool(train_cfg.get("monitor_gradient_components", True))):
+                                    with _autocast_context(device, amp_enabled):
+                                        monitor_sl_loss = shared_route_loss if shared_sl_forward else _compute_solution_level_weighted_logprob_loss(
+                                            agent, batch, sl_weights, sl_valid_counts, env_indices,
+                                            device, step_start, step_end,
+                                        )
+                                    common_parameters = tuple(agent.backbone.decoder.action_query_proj.parameters())[-2:]
+                                    monitor_gradient_values = tensors_to_floats(gradient_component_diagnostics(
+                                        {"ppo": ppo_loss_for_monitor * chunk_weight / group_size,
+                                         "sl": sl_coef * monitor_sl_loss / group_size}, common_parameters,
+                                    ))
                                 _backward(loss * chunk_weight / group_size, scaler, amp_enabled)
                                 weighted_policy += policy_loss.item() * chunk_weight
                                 weighted_value += value_loss.item() * chunk_weight
@@ -5543,6 +5639,7 @@ def train_from_config(
                                         device,
                                     )
                                 _backward(sl_coef * expert_loss / group_size, scaler, amp_enabled)
+                                monitor_expert_records.append(expert_info)
                                 sl_candidate_expert_losses.append(float(expert_info["sl_candidate_expert_loss"]))
                                 sl_candidate_expert_ratio_means.append(float(expert_info["sl_candidate_expert_ratio_mean"]))
                                 sl_candidate_expert_ratio_stds.append(float(expert_info["sl_candidate_expert_ratio_std"]))
@@ -5552,9 +5649,10 @@ def train_from_config(
                                 sl_candidate_expert_route_counts.append(float(expert_info["sl_candidate_expert_num_routes"]))
                             if policy_replay_candidates:
                                 with _autocast_context(device, amp_enabled):
-                                    replay_loss, _ = _compute_sl_expert_candidate_loss(
+                                    replay_loss, replay_loss_info = _compute_sl_expert_candidate_loss(
                                         agent, policy_replay_candidates, cfg, env_indices, device,
                                     )
+                                monitor_replay_records.append(replay_loss_info)
                                 _backward(sl_coef * replay_loss / group_size, scaler, amp_enabled)
                             if (
                                 bafipo_enabled
@@ -5911,10 +6009,51 @@ def train_from_config(
                     f"bc_coef={_format_float(bc_info.get('bc_coef', 0.0))}",
                 )
 
+            epoch_plugin_diagnostics = plugin_diagnostics(agent)
+            epoch_gpu_memory = {
+                "gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+                "gpu_peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+            } if str(device).startswith("cuda") else {}
             eval_row: dict[str, Any] = {}
             eval_wall_time_s = 0.0
             should_eval = eval_interval > 0 and (epoch % eval_interval == 0 or epoch == epochs)
-            if should_eval:
+            should_checkpoint = checkpoint_interval > 0 and (epoch % checkpoint_interval == 0 or epoch == epochs)
+            train_wall_time_s = time.perf_counter() - epoch_start
+            distributed_metrics = distributed.metrics(
+                num_envs=num_envs, n_traj=int(train_cfg.get("n_traj", 50)),
+                effective_instances=(num_envs / max(minibatches, 1)) * min(gradient_accumulation_steps, minibatches),
+                train_seconds=train_wall_time_s, learning_rate=optimizer.param_groups[0]["lr"],
+                samples_seen=pool.sample_count + sample_count_offset,
+            )
+            sampled_instance_ids = list(getattr(batch, "instance_ids", None) or [])
+            distributed_metrics.update(rollout_instance_coverage(distributed, sampled_instance_ids))
+            epoch_parameter_sync = parameter_sync_diagnostics(distributed, agent, scaler) if monitor_sampled else {}
+            local_fr = float(train_summary.get("train_feasible_rate", 0.0))
+            local_obj = float(train_summary.get("train_avg_best_objective_distance_km", float("nan")))
+            global_stats = torch.tensor([
+                local_fr, local_obj * local_fr if np.isfinite(local_obj) else 0.0,
+                float(loss_arr[:, 0].mean()), float(loss_arr[:, 1].mean()), float(loss_arr[:, 2].mean()),
+                float(ppo_stats_info.get("approx_kl") or 0.0),
+            ], device=device, dtype=torch.float64)
+            if distributed.enabled:
+                torch.distributed.all_reduce(global_stats)
+                global_stats /= distributed.world_size
+            global_values = global_stats.cpu().tolist()
+            distributed_metrics.update({
+                "global_train_feasible_rate": global_values[0],
+                "global_train_avg_best_objective_distance_km": global_values[1] / global_values[0] if global_values[0] > 0 else float("nan"),
+                "global_policy_loss": global_values[2], "global_value_loss": global_values[3],
+                "global_entropy": global_values[4], "global_approx_kl": global_values[5],
+            })
+            if should_eval or should_checkpoint or epoch == epochs:
+                local_state = capture_local_training_state(distributed, pool, expert_buffer, policy_route_pool, policy_best_objectives, scaler, sample_count_offset)
+                rank_states = distributed.gather_objects(local_state)
+                agent._training_resume_state = {
+                    "version": 1, "world_size": distributed.world_size, "ranks": rank_states,
+                    "sampler_state_complete": all(item["sampler"]["supported"] for item in rank_states),
+                    "resume_contract": "epoch_boundary_rng_scaler_optimizer_sampler_and_route_memory; CUDA kernel determinism not guaranteed",
+                }
+            if should_eval and distributed.is_primary:
                 eval_start = time.perf_counter()
                 eval_row = evaluate_fixed_dataset(agent, cfg, seed=seed, epoch=epoch, device=device)
                 eval_wall_time_s = time.perf_counter() - eval_start
@@ -5953,12 +6092,22 @@ def train_from_config(
                         encoding="utf-8",
                     )
 
+            if should_eval:
+                eval_payload = distributed.broadcast_object((eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s))
+                eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s = eval_payload
+                agent.train()
             epoch_wall_time_s = time.perf_counter() - epoch_start
+            distributed_metrics.update({
+                "run_elapsed_seconds": time.perf_counter() - run_session_start,
+                "run_session_id": run_session_id,
+                "run_elapsed_scope": "current_process_session_from_train_entry_to_epoch_record; includes_initialization_and_epoch0_eval; resets_on_resume",
+            })
             expert_stats = getattr(expert_buffer, "replay_stats", {}) if expert_buffer is not None else {}
             writer.writerow(
                 {
                     "epoch": epoch,
                     "samples_seen": pool.sample_count + sample_count_offset,
+                    **distributed_metrics,
                     "train_mode": offline_method,
                     "reward_mean": reward_mean,
                     "policy_loss": float(loss_arr[:, 0].mean()),
@@ -6001,6 +6150,7 @@ def train_from_config(
                     "rollout_steps": rollout_steps,
                     "num_minibatches": minibatches,
                     "gradient_accumulation_steps": gradient_accumulation_steps,
+                    "effective_instances_per_optimizer_step": (num_envs / max(minibatches, 1)) * min(gradient_accumulation_steps, minibatches),
                     "mixed_precision": amp_enabled,
                     "use_gae": use_gae,
                     "gae_lambda": gae_lambda,
@@ -6025,11 +6175,35 @@ def train_from_config(
                 }
             )
             f.flush()
-            if epoch % checkpoint_interval == 0 or epoch == epochs:
+            append_monitor_row(monitor_path, {
+                "epoch": epoch, "rank": distributed.rank, "world_size": distributed.world_size,
+                "sampling_seed": sampling_seed, "diagnostics_sampled": monitor_sampled,
+                "sampled_instance_ids": sampled_instance_ids,
+                "parameter_sync": epoch_parameter_sync,
+                "gradient_diagnostic_scope": "first_update_first_chunk_common_action_query_head; PPO includes policy/value/entropy, SL excludes experts/replay",
+                "route_diagnostic_aggregation": "local minibatch arithmetic mean; quantiles are means of local minibatch quantiles",
+                **distributed_metrics, **epoch_schedule, **epoch_gpu_memory,
+                "local_training": {**train_summary, **ppo_stats_info, **decomposed_info},
+                "advantage": adv_info, "slppo": sl_info, "replay": policy_replay_info,
+                "route_diagnostics": average_diagnostics(monitor_route_records),
+                "expert_diagnostics": average_diagnostics(monitor_expert_records),
+                "replay_loss_diagnostics": average_diagnostics(monitor_replay_records),
+                "critic_diagnostics": monitor_values,
+                "gradient_components": monitor_gradient_values,
+                "plugin_diagnostics": epoch_plugin_diagnostics,
+                "evaluation": eval_row,
+                "rollout_timing": rollout_timings, "ppo_update_time_s": ppo_update_time_s,
+                "epoch_wall_time_s": epoch_wall_time_s,
+                "alerts": {"approx_kl_above_target": float(ppo_stats_info.get("approx_kl") or 0.0) > float(train_cfg.get("monitor_target_kl", 0.02)),
+                           "amp_skipped": distributed.epoch_amp_skipped_steps > 0},
+            })
+            if should_checkpoint or epoch == epochs:
                 save_checkpoint(ckpt_dir / f"checkpoint_epoch_{epoch:04d}.pt", agent, optimizer, cfg, epoch, seed)
 
     save_checkpoint(ckpt_dir / "checkpoint_final.pt", agent, optimizer, cfg, epochs, seed)
     close_pool = getattr(pool, "close", None)
     if callable(close_pool):
         close_pool(terminate=True)
+    distributed.barrier()
+    distributed.close()
     return ckpt_dir / "checkpoint_final.pt"

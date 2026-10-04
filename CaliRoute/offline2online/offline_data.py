@@ -14,6 +14,7 @@ from .integrations.evrptw_db import configure_evrptw_db
 EVRPTW_DB_ROOT = configure_evrptw_db()
 
 from .instance_adapter import iter_adapted_instances
+from .observation_storage import snapshot_observation
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +219,7 @@ def build_expert_trajectories(
     selected = list(records[: max_records or len(records)])
     data_cfg = cfg.get("data", {}) or {}
     num_customers = int(data_cfg.get("num_customers", 0) or 0)
+    share_static = bool(cfg.get("offline", {}).get("share_expert_static_observations", False))
     trajectories: list[ExpertTrajectory] = []
     invalid_records: list[dict[str, Any]] = []
     objective_errors: list[float] = []
@@ -234,6 +236,7 @@ def build_expert_trajectories(
         route_counts.append(len(clean_routes))
         env = make_terran_env(instance=record.instance, n_traj=1, pbrs_config=None, **env_cfg)
         obs, info = env.reset()
+        static_cache = {} if share_static else None
         observations: list[dict[str, np.ndarray]] = []
         actions: list[int] = []
         invalid_step: dict[str, Any] | None = None
@@ -248,7 +251,7 @@ def build_expert_trajectories(
                     "mask_shape": tuple(mask.shape),
                 }
                 break
-            observations.append({key: np.asarray(value).copy() for key, value in obs.items()})
+            observations.append(snapshot_observation(obs, static_cache))
             actions.append(action_i)
             obs, reward, terminated, truncated, info = env.step(np.asarray([action_i], dtype=np.int64))
             if bool(np.asarray(truncated, dtype=bool)[0]):

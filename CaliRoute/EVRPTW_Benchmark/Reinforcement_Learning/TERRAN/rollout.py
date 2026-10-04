@@ -16,9 +16,25 @@ sys.path.insert(0, str(REPO_ROOT / "EVRPTW_Core"))
 from evrptw_core.schema import merge_route_sequences
 
 
-def stack_observations(observations: Sequence[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
-    keys = observations[0].keys()
-    return {key: np.stack([obs[key] for obs in observations], axis=0) for key in keys}
+# Instance arrays are invariant between reset and termination. The caller owns
+# this cache and must discard it when environments reset or instances change.
+STATIC_OBSERVATION_KEYS = frozenset({
+    "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
+    "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
+    "full_charge_time", "fixed_full_charge", "instance_mask",
+})
+
+
+def stack_observations(observations: Sequence[dict[str, np.ndarray]], static_cache=None) -> dict[str, np.ndarray]:
+    output = {}
+    for key in observations[0]:
+        if static_cache is not None and key in STATIC_OBSERVATION_KEYS:
+            if key not in static_cache:
+                static_cache[key] = np.stack([obs[key] for obs in observations], axis=0)
+            output[key] = static_cache[key]
+        else:
+            output[key] = np.stack([obs[key] for obs in observations], axis=0)
+    return output
 
 
 def tensor_from_array(value: Any, device: str | torch.device) -> torch.Tensor:
@@ -171,11 +187,12 @@ def collect_rollout(
     current_route_customer_count = np.zeros((len(envs), envs[0].unwrapped.n_traj), dtype=np.int32)
     route_boundary_steps = []
     cached_embeddings = None
+    static_obs_cache = {} if getattr(agent.backbone, "cache_static_observations", False) else None
 
     for step in range(int(rollout_steps)):
         valid = ~done
         stack_start = time.perf_counter()
-        obs_batch = stack_observations(observations)
+        obs_batch = stack_observations(observations, static_cache=static_obs_cache)
         stack_obs_time_s += time.perf_counter() - stack_start
         if expert_provider is not None:
             expert_actions_np, expert_valid_np = expert_provider.actions_for_batch(

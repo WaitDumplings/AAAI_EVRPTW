@@ -10,6 +10,7 @@ from .nets.graph_model.decoder import Decoder
 from .nets.graph_model.embedding import AutoEmbedding
 from .nets.graph_model.encoder import GraphAttentionEncoder
 from .nets.graph_model.routing_adapters import DirectedEdgeBias
+from caliroute.plugins.rdi import RoadDistanceInjection
 
 
 class Problem:
@@ -196,6 +197,11 @@ class Backbone(nn.Module):
         optimize_dynamic_projections: bool = False,
         cache_static_observations: bool = False,
         use_static_rollout_cache: bool = True,
+        use_rdi_v2: bool = False,
+        rdi_hidden_dim: int = 32,
+        use_agda_v2: bool = False,
+        agda_hidden_dim: int = 32,
+        use_encoder_sdpa: bool = False,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
@@ -209,6 +215,7 @@ class Backbone(nn.Module):
             n_heads=n_heads,
             embed_dim=embedding_dim,
             n_layers=n_encode_layers,
+            use_sdpa=use_encoder_sdpa,
         )
         self.decoder = Decoder(
             embedding_dim=embedding_dim,
@@ -225,6 +232,8 @@ class Backbone(nn.Module):
             use_post_charge_adapter=use_post_charge_adapter,
             post_charge_adapter_hidden_dim=post_charge_adapter_hidden_dim,
             optimize_dynamic_projections=optimize_dynamic_projections,
+            use_agda_v2=use_agda_v2,
+            agda_hidden_dim=agda_hidden_dim,
         )
 
         self.dist_bias_scale = nn.Parameter(torch.tensor(1.0))
@@ -235,6 +244,13 @@ class Backbone(nn.Module):
             # Optional modules must not shift initialization of shared weights.
             with torch.random.fork_rng(devices=[]):
                 self.residual_edge_bias = DirectedEdgeBias(n_heads=n_heads, hidden_dim=residual_edge_hidden_dim)
+
+        self.rdi_adapter = None
+        if use_rdi_v2:
+            if use_residual_edge_bias:
+                raise ValueError("use_rdi_v2 replaces use_residual_edge_bias; enable only one")
+            with torch.random.fork_rng(devices=[]):
+                self.rdi_adapter = RoadDistanceInjection(n_heads=n_heads, hidden_dim=rdi_hidden_dim)
 
     def _build_node_type(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
@@ -270,6 +286,15 @@ class Backbone(nn.Module):
         attn_bias = dist_bias + type_bias
         if self.residual_edge_bias is not None:
             attn_bias = attn_bias.unsqueeze(1) + self.residual_edge_bias(state.states)
+
+        if self.rdi_adapter is not None:
+            residual = self.rdi_adapter(
+                distance=dist_mat, travel_time=state.states.get("edge_time"),
+                energy=state.states.get("edge_energy"), time_windows=state.states.get("time_window"),
+                service_time=state.states.get("service_time"),
+                battery_capacity=state.states.get("battery_capacity"), base_bias=attn_bias,
+            )
+            attn_bias = attn_bias.unsqueeze(1) + residual
 
         edge_energy = state.states.get("edge_energy")
         battery_capacity = state.states.get("battery_capacity")
@@ -391,6 +416,11 @@ class Agent(nn.Module):
         optimize_dynamic_projections: bool = False,
         cache_static_observations: bool = False,
         use_static_rollout_cache: bool = True,
+        use_rdi_v2: bool = False,
+        rdi_hidden_dim: int = 32,
+        use_agda_v2: bool = False,
+        agda_hidden_dim: int = 32,
+        use_encoder_sdpa: bool = False,
         use_decomposed_critic: bool = False,
     ):
         super().__init__()
@@ -416,6 +446,11 @@ class Agent(nn.Module):
             optimize_dynamic_projections=optimize_dynamic_projections,
             cache_static_observations=cache_static_observations,
             use_static_rollout_cache=use_static_rollout_cache,
+            use_rdi_v2=use_rdi_v2,
+            rdi_hidden_dim=rdi_hidden_dim,
+            use_agda_v2=use_agda_v2,
+            agda_hidden_dim=agda_hidden_dim,
+            use_encoder_sdpa=use_encoder_sdpa,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)
