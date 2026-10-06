@@ -50,7 +50,7 @@ and are ignored by Git. No historical result files are bundled with this code.
 and `CusN` beneath each split. `--output_path` overrides the results directory.
 Explicit relative paths are relative to the caller's working directory.
 
-## Full frozen test run (two arguments)
+## Frozen test run (two arguments, optional Cus100 shard)
 
 From `AAAI_EVRPTW/CaliRoute`, activate the Python environment with Gurobi installed,
 then choose only the problem and customer scale:
@@ -70,7 +70,8 @@ Fixed settings:
 
 - Input: `AAAI_Dataset/test_release/<problem>/test/CusN/instances.pkl`.
   Each of the nine bundles has 1,000 instances. Metadata is checked before launch;
-  the whole bundle is read without filtering numeric instance-ID suffixes.
+  without a shard argument, the whole bundle is selected. Selection never relies
+  on numeric instance-ID suffixes.
 - 30 worker processes, each solving one instance at a time with one Gurobi thread.
   A separate coordinator writes results as workers finish.
 - 7,200 seconds (2 hours) of Gurobi optimization per instance, with zero target MIP
@@ -86,11 +87,11 @@ Results go to `results/gurobi/<problem>/test/CusN/`. Each launch prints its PID,
 log file, a `tail -f` command, and a command to stop that batch's process group.
 Logs and per-launch PID files are in that output directory's `logs/`; `launcher.pid`
 records the latest coordinator PID. PID files remain after completion as records.
-An inherited lock prevents concurrent launches of the same problem/scale through
-this script and releases when the batch exits. Different problem/scale pairs may
+An inherited lock prevents concurrent launches into the same output directory
+through this script and releases when the batch exits. Different problem/scale pairs may
 run concurrently, each using its own 30 workers.
 
-Resume is always enabled for this two-argument launcher. Before starting the
+Resume is always enabled for this launcher. Before starting the
 background runner, it checks that problem/scale's `gurobi_summary.csv` and prints
 the summary path and number of recorded completed IDs. The runner then matches
 actual input instance IDs against those results before submitting any worker
@@ -118,6 +119,49 @@ count shown by the shell is historical; exact counts for the current input bundl
 appear in the log. Launch settings and the exact solver command are also recorded
 there, along with any worker startup or license failures. The general range
 launchers below use these same resume rules when `--skip_completed` is enabled.
+
+## EVRPTW Cus100 across five servers
+
+An optional third argument assigns one fixed 200-instance shard to a server.
+Place the same frozen test dataset on all five servers, then run one corresponding
+command on each server from `AAAI_EVRPTW/CaliRoute`:
+
+```bash
+# Server 1: bundle entries 1-200
+bash scripts/run_gurobi_test.sh evrptw 100 1
+# Server 2: bundle entries 201-400
+bash scripts/run_gurobi_test.sh evrptw 100 2
+# Server 3: bundle entries 401-600
+bash scripts/run_gurobi_test.sh evrptw 100 3
+# Server 4: bundle entries 601-800
+bash scripts/run_gurobi_test.sh evrptw 100 4
+# Server 5: bundle entries 801-1000
+bash scripts/run_gurobi_test.sh evrptw 100 5
+```
+
+These are positions in the frozen bundle's stored order, not instance-ID numeric
+suffixes. The runner verifies 1,000 distinct instance IDs and Cus100 data before
+starting any solves. The five shards cover all 1,000 instances without overlap.
+Each server still uses 30 workers, one thread per worker, 7,200 seconds per
+instance, and 2 copies per physical charging station.
+
+Shard `N` writes to `results/gurobi/evrptw/test/Cus100/shard_N_of_5/`, including
+its own summary, solutions, log, PID, and lock. `test_shard.json` lists all 200
+assigned IDs and their position range. Keep the five directories when collecting
+results from servers so their summaries and solution files remain separate.
+
+Resume checks this shard's own `gurobi_summary.csv` after its fixed assignment is
+selected. Completed instances are skipped without taking replacement instances
+from another shard. Re-run the same command and shard number after interruption;
+if all 200 are completed, it exits without creating workers. An existing shard
+manifest must match the current assignment before a restarted run can proceed.
+Full-bundle results in the parent `Cus100/` directory remain separate from shard
+results.
+
+The third argument currently applies only to `evrptw 100` and accepts `1` through
+`5`. Omitting it preserves the full 1,000-instance run and its original output
+path. The low-level EVRPTW runner exposes the same operation as `--test_shard N`;
+it cannot be combined with index, limit, scale, or expert-refinement filters.
 
 ## Run a batch
 

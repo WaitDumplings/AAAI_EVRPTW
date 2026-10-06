@@ -241,3 +241,79 @@ def test_shell_reports_existing_results_without_modifying_summary(checkout, prob
         assert "recorded_completed=2" in message
         assert "exact skipped/pending counts appear in the log" in message
     assert summary.read_bytes() == original
+
+
+@pytest.mark.parametrize("shard", range(1, 6))
+def test_evrptw_cus100_shard_uses_own_results_and_resume(checkout, shard):
+    output = checkout.output("evrptw", 100) / f"shard_{shard}_of_5"
+    output.mkdir(parents=True)
+    summary = output / "gurobi_summary.csv"
+    summary.write_text(
+        "instance_id,status_name\nfinished,OPTIMAL\nlimited,TIME_LIMIT\nretry,ERROR\n",
+        encoding="utf-8",
+    )
+    # An existing full-bundle summary must not replace this shard's resume source.
+    parent_summary = output.parent / "gurobi_summary.csv"
+    parent_summary.write_text("instance_id,status_name\nother,OPTIMAL\n", encoding="utf-8")
+    original = summary.read_bytes()
+    result = checkout.run("evrptw", "100", str(shard), shell=True)
+    assert result.returncode == 0, result.stderr
+    record = checkout.record()
+    argv = record["argv"]
+    expected = {
+        "--test_shard": str(shard),
+        "--dataset_path": str(checkout.dataset("evrptw", 100) / "instances.pkl"),
+        "--save_path": str(output),
+        "--workers": "30", "--threads": "1", "--time_limit_s": "7200", "--cs_copies": "2",
+    }
+    for option, value in expected.items():
+        assert argv[argv.index(option) + 1] == value
+    assert "--skip_completed" in argv
+    assert "--no-tie_break_vehicle_count" in argv
+    assert not {"--start_index", "--end_index", "--limit"}.intersection(argv)
+    assert record["session"] == record["pid"]
+    assert int((output / "launcher.pid").read_text()) == record["pid"]
+    logs = list((output / "logs").glob("*.log"))
+    assert len(logs) == 1
+    for message in (result.stdout, logs[0].read_text()):
+        assert f"summary={summary}" in message
+        assert "recorded_completed=2" in message
+        assert "200" in message
+    assert summary.read_bytes() == original
+    assert not (output.parent / "launcher.pid").exists()
+
+
+@pytest.mark.parametrize("args", [
+    ("evrptw", "100", "0"), ("evrptw", "100", "6"),
+    ("evrptw", "100", "1.5"), ("evrptw", "100", "1", "2"),
+    ("evrptw", "15", "1"), ("evrptw", "50", "1"),
+    ("vrptw", "100", "1"), ("cvrp", "100", "1"),
+])
+def test_rejects_invalid_or_unsupported_shard(checkout, args):
+    result = checkout.run(*args, shell=True)
+    assert result.returncode != 0
+    assert not checkout.record_path.exists()
+    assert not (checkout.root / "results").exists()
+
+
+def test_different_shards_have_independent_background_locks(checkout):
+    first = checkout.run("evrptw", "100", "1", shell=True)
+    assert first.returncode == 0, first.stderr
+    first_record = checkout.record()
+    duplicate = checkout.run("evrptw", "100", "1", shell=True)
+    assert duplicate.returncode != 0
+    second_record_path = checkout.record_path.with_name("second_runner.json")
+    checkout.env["LAUNCHER_TEST_RECORD"] = str(second_record_path)
+    try:
+        second = checkout.run("evrptw", "100", "2", shell=True)
+        assert second.returncode == 0, second.stderr
+        wait_for_file(second_record_path)
+        second_record = json.loads(second_record_path.read_text())
+        assert first_record["pid"] != second_record["pid"]
+        for shard, record in ((1, first_record), (2, second_record)):
+            output = checkout.output("evrptw", 100) / f"shard_{shard}_of_5"
+            assert int((output / "launcher.pid").read_text()) == record["pid"]
+    finally:
+        checkout.release.touch()
+        if second_record_path.exists():
+            wait_for_file(second_record_path.with_suffix(".finished"))
