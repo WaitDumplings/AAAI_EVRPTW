@@ -1385,6 +1385,110 @@ def _validate_cvrp_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_vrptw_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
+    """Verify exported VRPTW routes independently of the environment state.
+
+    Times use the adapted instance's directed distances and effective speed,
+    exactly as EVRPTWVectorEnv does. Customer windows constrain service *start*,
+    waiting is allowed, and each vehicle starts at working_start_s. Service
+    completion and depot return must respect working_end_s. The environment's
+    direct-return feasibility check is also applied after every customer.
+    """
+    result = _validate_cvrp_eval_route(instance, row)
+    spatial_valid = result["valid"]
+    tolerance = 1e-9  # Match the actual action mask; do not relax feasibility.
+    n = int(instance.num_customers)
+    distance = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+    windows = np.asarray(instance.tw_s, dtype=np.float64)
+    service = np.asarray(instance.service_time_s, dtype=np.float64)
+    start = float(instance.working_start_s)
+    end = float(instance.working_end_s)
+    speed = float(
+        instance.speed_profile.get("effective_speed_kmh")
+        or instance.vehicle.get("design_speed_kmh")
+        or 40.0
+    )
+    inputs_valid = bool(
+        windows.shape == (n, 2) and service.shape == (n,)
+        and distance.shape == (n + 1, n + 1)
+        and np.all(np.isfinite(windows)) and np.all(windows[:, 0] <= windows[:, 1])
+        and np.all(np.isfinite(service)) and np.all(service >= 0)
+        and np.all(np.isfinite(distance)) and np.all(distance >= 0)
+        and np.isfinite(start) and np.isfinite(end) and start <= end
+        and np.isfinite(speed) and speed > 0
+        and int(getattr(instance, "num_charging_stations", 0)) == 0
+    )
+    # CVRP's distance comparison allows accumulated roundoff; capacity follows
+    # VRPTW's stricter environment tolerance independently of that comparison.
+    capacity = float(instance.vehicle["cargo_capacity_cm3"])
+    capacity_valid = bool(all(load <= capacity + tolerance for load in result["route_loads_cm3"]))
+    result.update({
+        "problem_type": "vrptw",
+        "valid": False,
+        "capacity_valid": capacity_valid,
+        "capacity_atol_cm3": tolerance,
+        "temporal_inputs_valid": inputs_valid,
+        "time_windows_valid": False,
+        "service_completion_valid": False,
+        "depot_return_valid": False,
+        "return_reachability_valid": False,
+        "time_atol_s": tolerance,
+        "time_window_semantics": "service_start_in_window; waiting_allowed; each_route_clock_resets",
+        "travel_time_source": "adapted_directed_distance_divided_by_environment_effective_speed",
+        "route_return_times_s": [],
+        "route_waiting_times_s": [],
+        "time_window_violations": [],
+        "service_completion_violations": [],
+        "depot_return_violations": [],
+        "return_reachability_violations": [],
+    })
+    if not inputs_valid or not result["indices_valid"] or not result["depot_endpoints_valid"]:
+        return result
+
+    travel = distance / max(speed / 3600.0, 1e-12)
+    for route_index, route in enumerate(row.get("routes", [])):
+        clock = start
+        waiting = 0.0
+        for previous, node in zip(route, route[1:]):
+            clock += float(travel[previous, node])
+            if node == 0:
+                if clock > end + tolerance:
+                    result["depot_return_violations"].append({
+                        "route_index": route_index, "return_time_s": clock, "deadline_s": end,
+                    })
+                continue
+            ready, due = windows[node - 1]
+            service_start = max(clock, float(ready))
+            waiting += service_start - clock
+            if service_start > float(due) + tolerance:
+                result["time_window_violations"].append({
+                    "route_index": route_index, "customer": int(node),
+                    "service_start_s": service_start, "due_s": float(due),
+                })
+            clock = service_start + float(service[node - 1])
+            if clock > end + tolerance:
+                result["service_completion_violations"].append({
+                    "route_index": route_index, "customer": int(node),
+                    "service_completion_s": clock, "deadline_s": end,
+                })
+            direct_return = clock + float(travel[node, 0])
+            if direct_return > end + tolerance:
+                result["return_reachability_violations"].append({
+                    "route_index": route_index, "customer": int(node),
+                    "earliest_direct_return_s": direct_return, "deadline_s": end,
+                })
+        result["route_return_times_s"].append(clock)
+        result["route_waiting_times_s"].append(waiting)
+    result["time_windows_valid"] = not result["time_window_violations"]
+    result["service_completion_valid"] = not result["service_completion_violations"]
+    result["depot_return_valid"] = not result["depot_return_violations"]
+    result["return_reachability_valid"] = not result["return_reachability_violations"]
+    result["valid"] = bool(spatial_valid and capacity_valid and all(result[key] for key in (
+        "time_windows_valid", "service_completion_valid", "depot_return_valid", "return_reachability_valid",
+    )))
+    return result
+
+
 def _write_eval_instances(rows: list[dict[str, Any]], cfg: dict[str, Any], seed: int, epoch: int) -> Path:
     eval_cfg = cfg.get("evaluation", {}) or {}
     data_cfg = cfg.get("data", {}) or {}
@@ -1494,9 +1598,13 @@ def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, e
                     row["route_validation"] = _validate_cvrp_eval_route(instance, row)
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_cvrp_route_validation"
+                elif problem_type == "vrptw":
+                    row["route_validation"] = _validate_vrptw_eval_route(instance, row)
+                    row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
+                    row["feasibility_source"] = "environment_success_and_independent_vrptw_route_validation"
                 else:
                     row["route_validation"] = {
-                        "checked": False, "reason": "independent_validation_implemented_for_cvrp_only",
+                        "checked": False, "reason": "independent_validation_implemented_for_cvrp_and_vrptw_only",
                     }
             reference = reference_metrics.get(str(instance.instance_id), {})
             reference_objective = reference.get("objective_distance_km", float("nan"))

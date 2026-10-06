@@ -389,3 +389,62 @@ and checkpoint provenance are recorded in its manifest. Progress reports separat
 target epochs, completed training epochs, latest validation epoch, and exit state.
 Across resumed sessions, plotted time is cumulative recorded active-session
 time; it excludes downtime, discarded work, and unrecorded session tails.
+
+### CVRP100 / VRPTW100 parameter screening and long runs
+
+`scripts/run_cus100_finetune.sh` runs CVRP100 on GPUs 0,2 and VRPTW100 on
+GPUs 1,3, independently and concurrently. Each task first trains a random,
+task-specific optimized-v2 PPO initialization for 100 epochs. This PPO phase has
+no expert, solution-level, reference, priority-sampling or replay signal. Both
+parameter-screening arms then strictly load the same validation-best PPO weights:
+
+| Phase | Epochs | PPO passes | SL coefficient | Schedule |
+|---|---:|---:|---:|---|
+| Control | 40 | 4 | 0.50 | constant LR 5e-5, entropy 0.01 |
+| Candidate | 40 | 3 | 0.35 | constant LR 5e-5, entropy 0.01 |
+| Selected long run | 1000 | selected | selected | warmup 20, cosine 5e-5 to 1e-5 |
+
+The final epoch-40 validation exports determine selection: feasible coverage
+first, then mean distance on the same jointly feasible instance IDs; distance
+ties within 1e-4 km favor fewer updates. The 1000-epoch phase starts again from
+the common PPO best weights, with a fresh optimizer and schedule. All phases
+use the existing 5000 train / 1000 val instances. Frozen test bundles and the
+new test Gurobi references are not inputs. This is a single-seed parameter
+screen, with both arms using v2; it is not an original-model comparison or an
+isolated attribution of PPO versus SL effects. The constant-schedule 40-epoch
+probe does not establish long-horizon optimality. Replay keeps its existing
+25-epoch warmup and 75-epoch ramp; this short screen cannot evaluate the full
+replay steady state.
+
+Each GPU handles 32 instances with 50 trajectories, giving global batch 64 and
+3200 trajectories. Four minibatches mean 16 global instances per optimizer
+step, with 16 update attempts per control epoch and 12 per candidate/PPO epoch.
+The LR peak 5e-5 corresponds to the reduced global batch, versus 7.071e-5 at
+128 instances in the earlier CVRP50 experiment. Chunk size 8 and eval batch 32
+limit memory. Train and evaluation allow 201 actions: the former 110/120
+limits were shorter than some Cus100 expert routes; completed rollouts still
+stop early. RDI/AGDA architecture and replay settings are unchanged from v2.
+
+The launcher writes input/config/source hashes and the full protocol to
+`manifest.json`. Top-level and task-level `status.json` separate configured
+budgets, currently running phases and actually completed epochs. Each phase
+records training/evaluation CSVs, validated route exports, per-rank monitors,
+rolling checkpoints every five epochs and validation-best weights. Hardware
+samples are stored in the top-level `hardware.jsonl`. Transient reads of
+actively written training logs must not terminate training. A failed task is
+reported as failed while the other independent task may continue. Launch from
+a committed detached snapshot, with shared result storage:
+
+```bash
+PYTHON_BIN=/absolute/path/to/.venv/bin/python bash scripts/run_cus100_finetune.sh \
+  --data-root /absolute/path/to/AAAI_Dataset/dataset \
+  --cvrp-gpus 0,2 --vrptw-gpus 1,3
+```
+
+After each selected long run finishes, its validation-best checkpoint is frozen
+and evaluated once on all 1000 task-specific test instances, using 50 samples,
+batch 32 and 201 steps. The separate `test_best/summary.json` and route exports
+compare against the matching `results/gurobi/{task}/test/Cus100` incumbents;
+TIME_LIMIT references are not claimed to be certified optima. Test metrics never
+feed back into the parameter selector or checkpoint selector. Explicit
+`--test-root` and `--gurobi-root` paths are supported for detached checkouts.
