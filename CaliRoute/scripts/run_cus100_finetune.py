@@ -91,6 +91,13 @@ def copy_csv_through_epoch(source, destination, epoch, *, require_complete=False
     if require_complete and [int(row['epoch']) for row in rows] != list(range(1, epoch + 1)):
         raise ValueError(f'Missing or duplicate completed-epoch history: {source}')
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # Non-primary ranks never evaluate. SIGTERM can leave their buffered
+    # evaluation header unflushed, while the training CSV is complete.
+    if fields is None:
+        if require_complete:
+            raise ValueError(f'Missing completed training history header: {source}')
+        destination.write_text('')
+        return 0
     with destination.open('w', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()

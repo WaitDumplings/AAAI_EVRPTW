@@ -234,3 +234,13 @@ def test_resume_accepts_recorded_dataset_normalization_runtime_alias(tmp_path):
     old['normalization']['reward_distance_scale_km'] = 123.
     with pytest.raises(ValueError):
         validate_resume_checkpoint(checkpoint, cfg, 3009)
+
+
+def test_empty_nonprimary_eval_csv_is_valid_after_signal_stop(tmp_path):
+    from run_cus100_finetune import copy_csv_through_epoch
+    source=tmp_path/'empty.csv';source.write_text('')
+    destination=tmp_path/'imported'/'eval_log.csv'
+    assert copy_csv_through_epoch(source,destination,5) == 0
+    assert destination.read_bytes() == b''
+    with pytest.raises(ValueError):
+        copy_csv_through_epoch(source,tmp_path/'train.csv',5,require_complete=True)
