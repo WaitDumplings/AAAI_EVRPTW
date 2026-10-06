@@ -448,3 +448,30 @@ compare against the matching `results/gurobi/{task}/test/Cus100` incumbents;
 TIME_LIMIT references are not claimed to be certified optima. Test metrics never
 feed back into the parameter selector or checkpoint selector. Explicit
 `--test-root` and `--gurobi-root` paths are supported for detached checkouts.
+
+#### Increasing useful GPU memory without changing the training batch
+
+The Cus100 launcher accepts `--cvrp-chunk-size` and `--vrptw-chunk-size`.
+These control the number of rollout time steps held in each backward graph.
+The PPO objective averages masked per-step losses and weights each chunk by its
+time span; the shared SL term compensates for that same chunk weight. Enlarging
+the chunk preserves that mathematical objective, the global instance batch,
+optimizer-update count and LR schedule. Floating-point accumulation and the
+unweighted averages of per-chunk diagnostic statistics can still differ.
+Memory occupancy alone is not a throughput improvement: profile real updates,
+including experts and monitoring, and record both allocated/reserved CUDA
+memory and observed device memory use. Do not allocate dummy tensors to satisfy
+a memory-utilization target.
+
+For resource changes during PPO initialization, stop the source supervisor at a
+completed rolling-checkpoint boundary, then launch a fresh experiment with
+`--resume-from-experiment /absolute/path/to/stopped/experiment`. The launcher
+copies the latest checkpoint into immutable resume inputs, checks complete
+sampler/RNG/scaler state for both ranks, and imports both rank CSV histories,
+monitor records and validation exports only through the checkpoint epoch.
+Original artifacts are preserved. Pending-validation checkpoints, changed
+batch/LR/evaluation protocols, and missing epoch history are rejected. Only the
+PPO init resumes; subsequent parameter-screening and long-run phases continue
+to initialize from the completed shared PPO best. Progress distinguishes
+imported epochs from newly completed epochs. A new source snapshot and the
+checkpoint/config/history hashes record the resource-change boundary.

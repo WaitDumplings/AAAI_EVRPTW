@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import json
 import math
 import os
 from pathlib import Path
 import signal
+import shutil
 import statistics
 import subprocess
 import sys
@@ -25,6 +27,114 @@ from run_plugin_comparison import append_hardware, latest_monitor, parse_gpu_pai
 from run_slppo_comparison import digest, now, number, read_csv, write_json
 
 PHASES = ('ppo_init', 'control', 'candidate', 'long_control', 'long_candidate')
+
+
+def validate_resume_checkpoint(checkpoint, cfg, seed):
+    """Only resource chunk changes are allowed across this exact PPO resume."""
+    old = checkpoint.get('config', {})
+    if int(checkpoint.get('seed', -1)) != seed:
+        raise ValueError('Resume seed differs from the configured seed')
+    if old.get('offline', {}).get('method') != 'ppo' or cfg['offline']['method'] != 'ppo':
+        raise ValueError('Only the PPO initialization phase can be resumed here')
+    for key in ('problem_type', 'num_customers', 'num_charging_stations'):
+        if old.get('data', {}).get(key) != cfg['data'][key]:
+            raise ValueError(f'Resume data mismatch: {key}')
+    if Path(old['data']['train_dataset_path']).resolve() != Path(cfg['data']['train_dataset_path']).resolve():
+        raise ValueError('Resume training dataset path changed')
+    for key, value in cfg['model'].items():
+        if old.get('model', {}).get(key) != value:
+            raise ValueError(f'Resume architecture mismatch: {key}')
+    for key in ('epochs', 'num_envs_per_gpu', 'n_traj', 'num_minibatches', 'ppo_update_epochs',
+                'rollout_steps', 'learning_rate', 'lr_schedule', 'lr_warmup_epochs', 'lr_min',
+                'entropy_initial_coef', 'entropy_final_coef', 'gamma', 'gae_lambda',
+                'clip_coef', 'vf_coef', 'weight_decay', 'max_grad_norm', 'mixed_precision'):
+        if old.get('training', {}).get(key) != cfg['training'][key]:
+            raise ValueError(f'Only chunk resource changes are supported on resume: training.{key}')
+    for section in ('env', 'critic', 'advantage', 'offline'):
+        for key, value in cfg[section].items():
+            saved_value = old.get(section, {}).get(key)
+            if section == 'env' and key == 'reward_distance_scale_mode' and str(value).startswith('dataset_'):
+                # The trainer resolves dataset normalization before saving;
+                # compare the recorded request, not its runtime base-mode alias.
+                normalization = old.get('normalization', {})
+                scale = old.get('env', {}).get('reward_distance_scale_km')
+                if (normalization.get('reward_distance_scale_mode') == value
+                        and saved_value == value[len('dataset_'):]
+                        and isinstance(scale, (int, float)) and math.isfinite(scale) and scale > 0
+                        and normalization.get('reward_distance_scale_km') == scale):
+                    saved_value = value
+            if saved_value != value:
+                raise ValueError(f'Resume algorithm configuration changed: {section}.{key}')
+    for key, default in (('gradient_accumulation_steps', 1), ('use_gae', True)):
+        if old.get('training', {}).get(key, default) != cfg['training'].get(key, default):
+            raise ValueError(f'Resume algorithm configuration changed: training.{key}')
+    for key in ('eval_path', 'eval_seed', 'eval_n_traj', 'eval_batch_size', 'eval_max_steps', 'eval_decode_mode'):
+        if old.get('evaluation', {}).get(key) != cfg['evaluation'][key]:
+            raise ValueError(f'Resume evaluation protocol changed: {key}')
+    epoch = int(checkpoint.get('epoch', -1))
+    state = checkpoint.get('training_resume_state', {})
+    if not 0 < epoch < cfg['training']['epochs']:
+        raise ValueError('Resume needs a partially completed PPO initialization')
+    if (state.get('world_size') != 2 or len(state.get('ranks', [])) != 2
+            or not state.get('sampler_state_complete') or state.get('completed_epoch') != epoch):
+        raise ValueError('Resume requires complete two-rank epoch-boundary training state')
+    if state.get('evaluation_pending'):
+        raise ValueError('Checkpoint has pending validation; recover that validation before changing resources')
+    return epoch
+
+
+def copy_csv_through_epoch(source, destination, epoch, *, require_complete=False):
+    with source.open(newline='') as handle:
+        reader = csv.DictReader(handle)
+        fields = reader.fieldnames
+        rows = [row for row in reader if int(row['epoch']) <= epoch]
+    if require_complete and [int(row['epoch']) for row in rows] != list(range(1, epoch + 1)):
+        raise ValueError(f'Missing or duplicate completed-epoch history: {source}')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def import_resume_history(old_spec, new_spec, epoch):
+    """Copy only checkpoint-committed history; preserve the interrupted source."""
+    old_logs, new_logs = Path(old_spec['log_dir']), Path(new_spec['log_dir'])
+    if new_logs.exists():
+        raise ValueError(f'Resume destination logs already exist: {new_logs}')
+    copied = {}
+    for rank in ('', 'rank_1'):
+        for filename in ('train_log.csv', 'eval_log.csv'):
+            source, destination = old_logs / rank / filename, new_logs / rank / filename
+            count = copy_csv_through_epoch(source, destination, epoch, require_complete=filename == 'train_log.csv')
+            copied[str(destination)] = {'source': str(source), 'rows': count,
+                                        'source_sha256': digest(source), 'copied_sha256': digest(destination)}
+    old_output, new_output = Path(old_spec['output_dir']), Path(new_spec['output_dir'])
+    for source in (old_output / 'evaluations').glob('epoch_*.jsonl'):
+        if int(source.stem.split('_')[-1]) <= epoch:
+            destination = new_output / 'evaluations' / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            copied[str(destination)] = {'source': str(source), 'copied_sha256': digest(destination)}
+    for source in (old_output / 'monitoring').glob('monitor_rank_*.jsonl'):
+        rows = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+        rows = [row for row in rows if int(row['epoch']) <= epoch]
+        destination = new_output / 'monitoring' / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        copied[str(destination)] = {'source': str(source), 'rows': len(rows), 'copied_sha256': digest(destination)}
+    old_checkpoints, new_checkpoints = Path(old_spec['checkpoint_dir']), Path(new_spec['checkpoint_dir'])
+    best_meta = old_checkpoints / 'best_checkpoint.json'
+    if best_meta.exists():
+        if int(json.loads(best_meta.read_text())['epoch']) > epoch:
+            raise ValueError('Historical best is newer than resume point; cannot safely import it')
+        new_checkpoints.mkdir(parents=True, exist_ok=True)
+        for filename in ('best_checkpoint.json', 'checkpoint_best.pt'):
+            shutil.copy2(old_checkpoints / filename, new_checkpoints / filename)
+            copied[str(new_checkpoints / filename)] = {'source': str(old_checkpoints / filename),
+                                                     'copied_sha256': digest(new_checkpoints / filename)}
+    return copied
 
 
 def select_parameters(control, candidate):
@@ -70,7 +180,10 @@ def phase_progress(spec):
              if int(row['epoch']) > 1 and number(row, 'eval_wall_time_s') == 0]
     times = [v for v in times if math.isfinite(v)]
     best_path = Path(spec['checkpoint_dir']) / 'best_checkpoint.json'
+    restored_epoch = int(spec.get('restored_through_epoch', 0))
     return {'target_epochs': spec['epochs'], 'completed_training_epochs': len(epochs),
+            'imported_training_epochs': restored_epoch,
+            'newly_completed_training_epochs': sum(epoch > restored_epoch for epoch in epochs),
             'latest_training_epoch': max(epochs, default=0),
             'latest_validation': evaluations[-1] if evaluations else None,
             'latest_train_row': rows[-1] if rows else None,
@@ -128,6 +241,10 @@ def worker(experiment, problem):
             spec = task['phases'][phase]
             if digest(Path(spec['config'])) != spec['config_sha256']:
                 raise RuntimeError(f'Phase config changed after launch: {phase}')
+            if phase == 'ppo_init' and problem in manifest.get('resumed_PPO_initializations', {}):
+                resume_record = manifest['resumed_PPO_initializations'][problem]
+                if digest(Path(resume_record['checkpoint'])) != resume_record['source_checkpoint_sha256']:
+                    raise RuntimeError('Immutable PPO resume checkpoint changed after launch')
             status['current_phase'] = phase
             phase_status = {'state': 'starting', 'started_at_utc': now(), 'config': spec['config']}
             status['phases'][phase] = phase_status
@@ -273,6 +390,9 @@ def main():
     parser.add_argument('--cvrp-gpus', default='0,2')
     parser.add_argument('--vrptw-gpus', default='1,3')
     parser.add_argument('--seed', type=int, default=3009)
+    parser.add_argument('--cvrp-chunk-size', type=int, default=8)
+    parser.add_argument('--vrptw-chunk-size', type=int, default=8)
+    parser.add_argument('--resume-from-experiment', type=Path, help='Stopped pipeline whose PPO latest checkpoints and committed history should be imported')
     parser.add_argument('--run-id')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--supervise', type=Path, help=argparse.SUPPRESS)
@@ -292,6 +412,16 @@ def main():
     experiment = args.output_root.resolve() / name
     if experiment.exists() and not args.dry_run:
         parser.error('Output exists; choose a fresh run ID')
+    source_manifest = None
+    resume_records = {}
+    if args.resume_from_experiment:
+        source_root = args.resume_from_experiment.resolve()
+        source_manifest = load_manifest(source_root)
+        source_status = json.loads((source_root / 'status.json').read_text())
+        if source_status.get('state') not in ('interrupted', 'failed'):
+            parser.error('Stop the source pipeline before importing its PPO checkpoints')
+        if source_manifest['seed'] != args.seed:
+            parser.error('Resume source seed differs')
     tasks, configs, inputs = {}, {}, []
     for problem, gpus in zip(('cvrp', 'vrptw'), pairs):
         prefix = f'{name}_{problem.upper()}'
@@ -301,7 +431,26 @@ def main():
             output = experiment / problem / phase
             cfg = build_config(problem=problem, phase=phase, run_name=f'{prefix}_{phase.upper()}',
                                output_dir=output, data_root=args.data_root.resolve(),
-                               init_checkpoint=None if phase == 'ppo_init' else init, seed=args.seed)
+                               init_checkpoint=None if phase == 'ppo_init' else init, seed=args.seed,
+                               ppo_step_chunk_size=getattr(args, problem + '_chunk_size'))
+            if phase == 'ppo_init' and source_manifest is not None:
+                import torch
+                old_spec = source_manifest['tasks'][problem]['phases']['ppo_init']
+                source_checkpoint = Path(old_spec['checkpoint_dir']) / 'checkpoint_latest.pt'
+                checkpoint = torch.load(source_checkpoint, map_location='cpu', weights_only=False)
+                epoch = validate_resume_checkpoint(checkpoint, cfg, args.seed)
+                immutable = experiment / 'resume_inputs' / problem / f'checkpoint_epoch_{epoch:04d}.pt'
+                resume_records[problem] = {'source_experiment': str(source_root),
+                    'source_checkpoint': str(source_checkpoint), 'source_checkpoint_sha256': digest(source_checkpoint),
+                    'checkpoint': str(immutable), 'restored_through_epoch': epoch,
+                    'previous_training_chunk_size': checkpoint['config']['training']['ppo_step_chunk_size'],
+                    'new_training_chunk_size': cfg['training']['ppo_step_chunk_size'],
+                    'resume_contract': checkpoint['training_resume_state']['resume_contract']}
+                cfg['offline'].update(resume_checkpoint_path=str(immutable), resume_checkpoint_strict=True)
+                cfg['training'].update(resume_append_logs=True, resume_truncate_logs=True)
+                cfg['experiment_protocol']['initialization'] = 'exact_epoch_boundary_resume_with_larger_time_chunk'
+                del checkpoint
+
             configs[(problem, phase)] = cfg
             phases[phase] = {'output_dir': str(output), 'config': str(output / 'config.yaml'),
                 'epochs': cfg['training']['epochs'],
@@ -313,7 +462,10 @@ def main():
                 'environment': {'CUDA_VISIBLE_DEVICES': ','.join(gpus), 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1',
                     'OPENBLAS_NUM_THREADS': '1', 'NUMBA_NUM_THREADS': '1', 'NUMBA_CACHE_DIR': str(experiment / problem / 'numba_cache'),
                     'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1', 'TORCH_NCCL_ASYNC_ERROR_HANDLING': '1'}}
+        if problem in resume_records:
+            phases['ppo_init']['restored_through_epoch'] = resume_records[problem]['restored_through_epoch']
         tasks[problem] = {'gpus': list(map(int, gpus)), 'init_checkpoint': str(init), 'phases': phases}
+
         for split in ('train', 'val'):
             folder = args.data_root.resolve() / problem / split / 'Cus100'
             for filename in ('metadata.json', 'instances.pkl', 'gurobi_summary.csv', 'expert_solutions.csv'):
@@ -337,6 +489,11 @@ def main():
         return
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=CODE_ROOT, text=True).strip():
         parser.error('Commit source before launching, then use a detached snapshot')
+    input_hashes = {str(path): digest(path) for path in inputs}
+    if source_manifest is not None:
+        for path, checksum in input_hashes.items():
+            if source_manifest.get('input_sha256', {}).get(path) != checksum:
+                raise ValueError(f'Resume dataset/reference contents changed: {path}')
     experiment.mkdir(parents=True)
     for (problem, phase), cfg in configs.items():
         spec = tasks[problem]['phases'][phase]
@@ -344,10 +501,20 @@ def main():
         path = Path(spec['config'])
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
         spec['config_sha256'] = digest(path)
+    for problem, record in resume_records.items():
+        destination = Path(record['checkpoint'])
+        destination.parent.mkdir(parents=True)
+        shutil.copy2(record['source_checkpoint'], destination)
+        if digest(destination) != record['source_checkpoint_sha256']:
+            raise ValueError('Resume checkpoint changed while it was being copied')
+        record['imported_history'] = import_resume_history(
+            source_manifest['tasks'][problem]['phases']['ppo_init'],
+            tasks[problem]['phases']['ppo_init'], record['restored_through_epoch'])
     import torch
     manifest = {'created_at_utc': now(), 'code_root': str(CODE_ROOT),
         'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=CODE_ROOT, text=True).strip(),
-        'input_sha256': {str(p): digest(p) for p in inputs}, 'tasks': tasks, 'seed': args.seed,
+        'input_sha256': input_hashes, 'tasks': tasks, 'seed': args.seed,
+        'resumed_PPO_initializations': resume_records,
         'test_root': str(args.test_root.resolve()), 'gurobi_root': str(args.gurobi_root.resolve()),
         'runtime': {'python': sys.version, 'torch': torch.__version__, 'cuda': torch.version.cuda},
         'protocol': {'problems': ['cvrp', 'vrptw'], 'customers': 100, 'world_size_per_task': 2,
@@ -358,7 +525,10 @@ def main():
             'global_instances_per_optimizer_step': 16, 'optimizer_steps_per_epoch': {'control': 16, 'candidate': 12, 'ppo_init': 12},
             'lr_peak': 5e-5, 'lr_min': 1e-5, 'lr_scaling': 'global instance batch128->64; previous peak7.071e-5->5e-5',
             'screen_schedule': 'constant LR5e-5, entropy.01 local probe; long stages restart warmup/cosine from the same PPO best',
-            'rollout_max_steps': 201, 'training_chunk_size': 8, 'eval_batch_size': 32, 'eval_n_traj': 50,
+            'rollout_max_steps': 201,
+            'training_chunk_size_by_task': {task: getattr(args, task + '_chunk_size') for task in tasks},
+            'chunk_semantics': 'time steps per backward graph; unchanged global batch, update count, LR, and mathematical time-averaged objective',
+            'eval_batch_size': 32, 'eval_n_traj': 50,
             'validation_instances': 1000, 'checkpoint_selection': 'validation only', 'test_used_for_training_or_selection': False,
             'final_test': 'after selected long training, evaluate its validation-best checkpoint once on all 1000 frozen test instances',
             'model': 'optimized_v2 RDI/AGDA/SLPPO; hyperparameter screening, not original-vs-v2 comparison',

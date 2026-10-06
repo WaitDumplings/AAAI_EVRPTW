@@ -32,6 +32,8 @@ def build_config(
     data_root: str | Path,
     init_checkpoint: str | Path | None = None,
     seed: int = 3009,
+    ppo_step_chunk_size: int = 8,
+    eval_batch_size: int = 32,
 ) -> dict[str, Any]:
     """Return a config without creating files or reading datasets/checkpoints.
 
@@ -39,11 +41,18 @@ def build_config(
     and monitoring outputs are isolated there. Checkpoint existence and model
     compatibility are checked when the launcher loads it, allowing configs to
     be prepared before the shared PPO initialization has finished.
+    Chunk size and evaluation batch size control execution memory; they do not
+    change rollout batch size, optimizer minibatches, update passes, or schedules.
     """
     if problem not in {"cvrp", "vrptw"}:
         raise ValueError("problem must be cvrp or vrptw")
     if phase not in {"ppo_init", "control", "candidate", "long_control", "long_candidate"}:
         raise ValueError("unsupported Cus100 finetuning phase")
+    if (isinstance(ppo_step_chunk_size, bool) or not isinstance(ppo_step_chunk_size, int)
+            or not 1 <= ppo_step_chunk_size <= 201):
+        raise ValueError("ppo_step_chunk_size must be a positive integer no greater than 201")
+    if isinstance(eval_batch_size, bool) or not isinstance(eval_batch_size, int) or eval_batch_size < 1:
+        raise ValueError("eval_batch_size must be a positive integer")
     if not isinstance(run_name, str) or not run_name.strip() or Path(run_name).name != run_name:
         raise ValueError("run_name must be a nonempty directory name")
     root = Path(data_root).expanduser().resolve()
@@ -66,7 +75,7 @@ def build_config(
         problem=problem, customers=100, data_root=root,
         init_checkpoint=init_checkpoint if init_checkpoint is not None else output,
         epochs=epochs, num_envs=32, n_traj=50, learning_rate=5e-5,
-        eval_interval=20, eval_batch_size=32, seed=int(seed),
+        eval_interval=20, eval_batch_size=eval_batch_size, seed=int(seed),
         eval_limit=None, expert_limit=None,
     )
     cfg = apply_optimization_profile(build_configs(args, output)["optimized"], "optimized_v2")
@@ -74,7 +83,7 @@ def build_config(
     cfg["training"].update({
         "epochs": epochs,
         "rollout_steps": 201,
-        "ppo_step_chunk_size": 8,
+        "ppo_step_chunk_size": ppo_step_chunk_size,
         "ppo_update_epochs": method_preset("ppo").ppo_update_epochs if is_init else 3 if is_candidate else 4,
         "checkpoint_interval": 50 if is_init or is_long else 40,
         "latest_checkpoint_interval": 5,
@@ -129,6 +138,8 @@ def build_config(
         "global_instances_per_rollout": 64,
         "global_trajectories_per_rollout": 3200,
         "global_instances_per_optimizer_step": 16,
+        "ppo_step_chunk_size": ppo_step_chunk_size,
+        "eval_batch_size": eval_batch_size,
         "initialization": "random" if is_init else "shared_task_PPO_init_weights_only",
         "schedule_scope": (
             "full_horizon_warmup_cosine" if is_init or is_long else

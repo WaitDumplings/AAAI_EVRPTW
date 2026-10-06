@@ -15,11 +15,12 @@ _spec.loader.exec_module(_module)
 build_config = _module.build_config
 
 
-def config(tmp_path, problem="cvrp", phase="control"):
+def config(tmp_path, problem="cvrp", phase="control", **execution_settings):
     return build_config(
         problem=problem, phase=phase, run_name=f"{problem}_{phase}",
         output_dir=tmp_path / problem / phase, data_root=tmp_path / "dataset",
         init_checkpoint=None if phase == "ppo_init" else tmp_path / problem / "ppo_init.pt",
+        **execution_settings,
     )
 
 
@@ -68,6 +69,8 @@ def test_only_task_matched_train_and_full_validation_are_configured(tmp_path, pr
     assert evaluation["eval_before_training"] and evaluation["eval_save_routes"]
     assert evaluation["eval_max_steps"] == cfg["training"]["rollout_steps"] == 201
     assert cfg["training"]["ppo_step_chunk_size"] == 8
+    assert cfg["experiment_protocol"]["ppo_step_chunk_size"] == 8
+    assert cfg["experiment_protocol"]["eval_batch_size"] == 32
     if phase != "ppo_init":
         assert cfg["offline"]["expert_dataset_path"] == str(train)
         assert cfg["offline"]["expert_solution_path"] == str(train / "expert_solutions.csv")
@@ -75,6 +78,48 @@ def test_only_task_matched_train_and_full_validation_are_configured(tmp_path, pr
         assert "resume_checkpoint_path" not in cfg["offline"]
     assert evaluation["eval_output_dir"] == str(tmp_path / problem / phase / "evaluations")
     assert cfg["training"]["monitor_output_dir"] == str(tmp_path / problem / phase / "monitoring")
+
+
+@pytest.mark.parametrize("problem", ["cvrp", "vrptw"])
+@pytest.mark.parametrize("phase", ["ppo_init", "control", "candidate", "long_control", "long_candidate"])
+def test_memory_settings_apply_to_every_phase_without_changing_algorithm(tmp_path, problem, phase):
+    original = config(tmp_path, problem, phase)
+    expanded = config(tmp_path, problem, phase, ppo_step_chunk_size=32, eval_batch_size=64)
+    assert expanded["training"]["ppo_step_chunk_size"] == 32
+    assert expanded["evaluation"]["eval_batch_size"] == 64
+    assert expanded["experiment_protocol"]["ppo_step_chunk_size"] == 32
+    assert expanded["experiment_protocol"]["eval_batch_size"] == 64
+    for cfg in (original, expanded):
+        assert cfg["experiment_protocol"]["global_instances_per_rollout"] == 64
+        assert cfg["experiment_protocol"]["global_trajectories_per_rollout"] == 3200
+        assert cfg["training"]["num_envs_per_gpu"] == 32
+        assert cfg["training"]["num_minibatches"] == 4
+        assert cfg["training"]["n_traj"] == 50
+        assert cfg["training"]["learning_rate"] == 5e-5
+        cfg["training"].pop("ppo_step_chunk_size")
+        cfg["evaluation"].pop("eval_batch_size")
+        cfg["experiment_protocol"].pop("ppo_step_chunk_size")
+        cfg["experiment_protocol"].pop("eval_batch_size")
+    # Includes update passes, SL coefficients, all schedule settings and model
+    # flags, so memory tuning cannot silently alter the experiment budget.
+    assert original == expanded
+
+
+@pytest.mark.parametrize("chunk", [1, 201])
+def test_chunk_boundary_values_are_accepted(tmp_path, chunk):
+    cfg = config(tmp_path, ppo_step_chunk_size=chunk, eval_batch_size=1)
+    assert cfg["training"]["ppo_step_chunk_size"] == chunk
+    assert cfg["evaluation"]["eval_batch_size"] == 1
+
+
+@pytest.mark.parametrize("key,value", [
+    ("ppo_step_chunk_size", value) for value in (False, True, 0, -1, 202, 8.0, "8", None)
+] + [
+    ("eval_batch_size", value) for value in (False, True, 0, -1, 32.0, "32", None)
+])
+def test_execution_settings_require_bounded_positive_integers(tmp_path, key, value):
+    with pytest.raises(ValueError, match=key):
+        config(tmp_path, **{key: value})
 
 
 @pytest.mark.parametrize("prefix", ["", "long_"])
