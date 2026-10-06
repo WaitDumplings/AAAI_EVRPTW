@@ -276,3 +276,17 @@ that task/scale's `gurobi_summary.csv`. `TIME_LIMIT` results count as completed;
 errors, interrupted runs, and missing results retry. The shell shows the checked
 summary path; the background log reports exact skipped/pending counts before
 solving. If no instances remain, the runner exits without creating workers.
+
+To split EVRPTW Cus100 across five servers, add that server's shard number:
+
+```bash
+bash scripts/run_gurobi_test.sh evrptw 100 1  # Use 1, 2, 3, 4, or 5 on each server.
+```
+
+Each shard owns 200 consecutive entries in the same frozen bundle, selected before
+resume. Shards cover all 1,000 instances without overlap and keep the 30-worker,
+2-hour, 2-CS-copy settings. Outputs and resume state are separate under
+`results/gurobi/evrptw/test/Cus100/shard_N_of_5/`; `test_shard.json` records the
+assigned IDs. Reuse the same shard number when resuming. Without the third
+argument, the command still runs the full bundle. See the benchmark guide for
+all five commands.

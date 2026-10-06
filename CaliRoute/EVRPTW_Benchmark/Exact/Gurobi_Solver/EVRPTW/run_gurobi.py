@@ -60,6 +60,47 @@ def discover_instance_files(dataset_path: Path) -> list[Path]:
     return sorted(paths)
 
 
+def select_test_shard(instance_files: list[Path], shard_id: int) -> list[tuple[Path, Any]]:
+    """Select a fixed 200-record slice of the 1000-instance Cus100 bundle."""
+    if shard_id not in range(1, 6):
+        raise ValueError("Test shard must be between 1 and 5")
+    start_offset, end_offset = (shard_id - 1) * 200, shard_id * 200
+    selected: list[tuple[Path, Any]] = []
+    seen_ids: set[str] = set()
+    for instance_file in instance_files:
+        for instance in iter_instances(instance_file):
+            if instance.num_customers != 100:
+                raise ValueError("Test sharding requires only Cus100 instances")
+            instance_id = str(instance.instance_id).strip()
+            if not instance_id or instance_id in seen_ids:
+                raise ValueError(f"Test sharding requires unique non-empty instance IDs: {instance_id!r}")
+            position = len(seen_ids)
+            seen_ids.add(instance_id)
+            if start_offset <= position < end_offset:
+                selected.append((instance_file, instance))
+    if len(seen_ids) != 1000:
+        raise ValueError(f"Test sharding requires exactly 1000 instances, found {len(seen_ids)}")
+    return selected
+
+
+def save_test_shard_manifest(save_path: Path, shard_id: int, selected: list[tuple[Path, Any]]) -> None:
+    """Record assignments before resume and reject a changed assignment on restart."""
+    manifest = {
+        "shard_id": shard_id, "num_shards": 5,
+        "start_offset": (shard_id - 1) * 200, "end_offset": shard_id * 200,
+        "num_instances": len(selected), "total_instances": 1000,
+        "instance_ids": [str(instance.instance_id) for _, instance in selected],
+    }
+    manifest_path = save_path / "test_shard.json"
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
+            raise ValueError(f"Test shard assignment differs from existing manifest: {manifest_path}")
+        return
+    temporary = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(manifest_path)
+
+
 def parse_checkpoints(raw: str) -> tuple[float, ...]:
     if not raw.strip():
         return tuple()
@@ -599,6 +640,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--start_index", type=int, default=None, help="Optional inclusive lower bound for the numeric instance id suffix.")
     parser.add_argument("--end_index", type=int, default=None, help="Optional exclusive upper bound for the numeric instance id suffix.")
     parser.add_argument("--scales", default="", help="Optional comma-separated scale filter, e.g. Cus5,Cus15.")
+    parser.add_argument("--test_shard", type=int, choices=range(1, 6), default=None,
+                        help="Fixed Cus100 test shard 1-5: 200 of 1000 instances by bundle position, before resume.")
     parser.add_argument("--skip_completed", action="store_true", help="Skip finished summary results, including TIME_LIMIT; retry errors and interrupted runs.")
     parser.add_argument("--expert_summary_path", default="", help="Optional existing gurobi_summary.csv used as warm-start experts for refine runs.")
     parser.add_argument("--reference_save_path", default="", help="Optional reference_solutions root for split/Cus*/solutions.csv and routes/*.json.")
@@ -610,6 +653,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--save_traceback", action="store_true", help="Store Python tracebacks in the summary CSV.")
     parser.add_argument("--verbose", action="store_true", help="Print per-instance progress.")
     args = parser.parse_args(argv)
+    if args.test_shard is not None and (
+        args.start_index is not None or args.end_index is not None
+        or args.limit is not None or args.scales.strip() or args.expert_summary_path
+    ):
+        parser.error("--test_shard cannot be combined with index, limit, scale, or expert-refinement filters.")
 
     requested_checkpoints_s = parse_checkpoints(args.checkpoints_s)
     checkpoints_s, time_limit_s = resolve_time_schedule(requested_checkpoints_s, args.time_limit_s)
@@ -675,46 +723,58 @@ def main(argv: list[str] | None = None) -> None:
     skipped_refine_optimal = 0
     skipped_refine_no_incumbent = 0
     skipped_refine_status = 0
-    for instance_file in instance_files:
-        for instance in iter_instances(instance_file):
-            if limit is not None and len(records) >= limit:
-                break
-            if scale_filter and scale_for_instance(instance) not in scale_filter:
-                continue
-            idx = instance_index(instance.instance_id)
-            if args.start_index is not None and (idx is None or idx < args.start_index):
-                skipped_range_count += 1
-                continue
-            if args.end_index is not None and (idx is None or idx >= args.end_index):
-                skipped_range_count += 1
-                continue
-            if args.skip_completed and instance.instance_id in completed_ids:
-                skipped_completed_count += 1
-                continue
-
-            warm_start_routes = None
-            if expert_index is not None and expert_summary_path is not None:
-                expert_row = expert_index.get(str(instance.instance_id))
-                if expert_row is None:
-                    skipped_refine_no_expert += 1
-                    continue
-
-                expert_status = normalize_status_name(expert_row)
-                if expert_status == "OPTIMAL":
-                    skipped_refine_optimal += 1
-                    continue
-                if expert_status != "TIME_LIMIT":
-                    skipped_refine_status += 1
-                    continue
-
-                warm_start_routes = load_expert_routes(expert_row)
-                if not warm_start_routes or not row_has_objective(expert_row):
-                    skipped_refine_no_incumbent += 1
-                    continue
-
-            records.append((instance_file, instance, warm_start_routes))
+    if args.test_shard is not None:
+        selected = select_test_shard(instance_files, args.test_shard)
+        save_test_shard_manifest(save_path, args.test_shard, selected)
+        source_records = iter(selected)
+        print(
+            f"Test shard: {args.test_shard}/5 assigned={len(selected)} "
+            f"positions=[{(args.test_shard - 1) * 200},{args.test_shard * 200}) before resume; "
+            f"manifest={save_path / 'test_shard.json'}"
+        )
+    else:
+        source_records = (
+            (instance_file, instance)
+            for instance_file in instance_files
+            for instance in iter_instances(instance_file)
+        )
+    for instance_file, instance in source_records:
         if limit is not None and len(records) >= limit:
             break
+        if scale_filter and scale_for_instance(instance) not in scale_filter:
+            continue
+        idx = instance_index(instance.instance_id)
+        if args.start_index is not None and (idx is None or idx < args.start_index):
+            skipped_range_count += 1
+            continue
+        if args.end_index is not None and (idx is None or idx >= args.end_index):
+            skipped_range_count += 1
+            continue
+        if args.skip_completed and instance.instance_id in completed_ids:
+            skipped_completed_count += 1
+            continue
+
+        warm_start_routes = None
+        if expert_index is not None and expert_summary_path is not None:
+            expert_row = expert_index.get(str(instance.instance_id))
+            if expert_row is None:
+                skipped_refine_no_expert += 1
+                continue
+
+            expert_status = normalize_status_name(expert_row)
+            if expert_status == "OPTIMAL":
+                skipped_refine_optimal += 1
+                continue
+            if expert_status != "TIME_LIMIT":
+                skipped_refine_status += 1
+                continue
+
+            warm_start_routes = load_expert_routes(expert_row)
+            if not warm_start_routes or not row_has_objective(expert_row):
+                skipped_refine_no_incumbent += 1
+                continue
+
+        records.append((instance_file, instance, warm_start_routes))
 
     instance_infos = {
         instance.instance_id: instance_info(instance, reference_split)
