@@ -316,10 +316,10 @@ def comparison_report(manifest, status):
             checks[key] = (abs(a['distance_km'] - b['distance_km']) <= 1e-4
                 and abs(a['feasible_rate'] - b['feasible_rate']) <= 1e-8
                 and a['num_instances'] == b['num_instances'] == expected_count) if a and b else None
-        report.update(initial_evaluation_consistency_scope='within_coordinate_mode_pairs_only',
+        report.update(initial_evaluation_consistency_scope=manifest['protocol'].get('initial_evaluation_consistency_scope', 'within_coordinate_mode_pairs_only'),
             initial_evaluation_pairs=checks, initial_validation_by_arm=initial,
             initial_evaluation_consistent=all(checks.values()) if checks and all(v is not None for v in checks.values()) else None,
-            initialization_caveat='Different coordinate modes may have different epoch-zero quality despite shared weights; compare absolute results and report migration cost.')
+            initialization_caveat=manifest['protocol'].get('initialization_caveat', 'Different coordinate modes may have different epoch-zero quality despite shared weights; compare absolute results and report migration cost.'))
         if 'legacy' in initial:
             base_distance = initial['legacy']['distance_km']
             report['initial_distance_delta_from_legacy_km'] = {arm: row['distance_km'] - base_distance for arm, row in initial.items()}
@@ -485,7 +485,7 @@ def supervise(experiment, *, stop_requested=None):
 
 
 def prepare(args, *, arm_definitions=None, arm_builder=None, default_checkpoint=None,
-            protocol_overrides=None, prerequisite_source_run=SOURCE_RUN):
+            protocol_overrides=None, prerequisite_source_run=SOURCE_RUN, preflight_builder=None):
     """Prepare one frozen experiment; optional hooks support input-only screens.
 
     Default arguments preserve the historical reward/norm launcher protocol.
@@ -493,6 +493,7 @@ def prepare(args, *, arm_definitions=None, arm_builder=None, default_checkpoint=
     """
     definitions = ARMS if arm_definitions is None else arm_definitions
     builder = build_arm if arm_builder is None else arm_builder
+    preflight_factory = build_preflight if preflight_builder is None else preflight_builder
     bundled_checkpoint = DEFAULT_CHECKPOINT if default_checkpoint is None else default_checkpoint
     arms = args.arms.split(',')
     if len(set(arms)) != len(arms) or not arms or any(arm not in definitions for arm in arms):
@@ -553,7 +554,7 @@ def prepare(args, *, arm_definitions=None, arm_builder=None, default_checkpoint=
             command=[sys.executable, '-B', '-u', '-m', 'offline2online.train', '--config', str(path), '--seed', str(args.seed), '--device', 'cuda:0'])
         preflight_output = output / 'preflight'
         preflight_output.mkdir()
-        preflight_cfg = build_preflight(cfg, preflight_output)
+        preflight_cfg = preflight_factory(cfg, preflight_output)
         preflight_path = preflight_output / 'config.yaml'
         preflight_path.write_text(yaml.safe_dump(preflight_cfg, sort_keys=False))
         specs[arm]['preflight'] = dict(config=str(preflight_path), config_sha256=digest(preflight_path),

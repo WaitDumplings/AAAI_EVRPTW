@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from caliroute.plugins.physical_static import EdgeRelationLayerAdapter
 from ...nets.graph_model.multi_head_attention import MultiHeadAttentionProj
 
 class GraphBiasBuilder(nn.Module):
@@ -52,6 +53,10 @@ class MultiHeadAttentionLayer(nn.Module):
         embedding_dim: int,
         feed_forward_hidden: int = 512,
         use_sdpa: bool = False,
+        use_edge_relation_encoder: bool = False,
+        edge_relation_dim: int = 16,
+        use_edge_value_messages: bool = False,
+        use_edge_state_updates: bool = False,
     ):
         super().__init__()
 
@@ -69,11 +74,31 @@ class MultiHeadAttentionLayer(nn.Module):
             hidden_dim=feed_forward_hidden,
         )
 
-    def forward(self, x, attn_bias=None):
-        # Attention block (Pre-LN)
+        self.edge_relation_adapter = None
+        if use_edge_relation_encoder:
+            # Preserve initialization of every preexisting host parameter.
+            with torch.random.fork_rng(devices=[]):
+                self.edge_relation_adapter = EdgeRelationLayerAdapter(
+                    edge_relation_dim, embedding_dim, n_heads,
+                    use_values=use_edge_value_messages, use_updates=use_edge_state_updates,
+                )
+
+    def forward(self, x, attn_bias=None, edge_relations=None):
+        # Attention block (Pre-LN); old path executes unchanged when disabled.
         h = self.norm1(x)
-        h = self.attn(h, mask=None, attn_bias=attn_bias)
-        x = x + h
+        effective_bias = attn_bias
+        adapter = self.edge_relation_adapter
+        if adapter is not None:
+            if edge_relations is None:
+                raise ValueError('Edge relation encoder requires edge_relations')
+            relation_bias = adapter.attention_bias(edge_relations)
+            if effective_bias is not None and effective_bias.dim() == 3:
+                effective_bias = effective_bias.unsqueeze(1)
+            effective_bias = relation_bias if effective_bias is None else effective_bias + relation_bias
+        attention_output = self.attn(h, mask=None, attn_bias=effective_bias)
+        if adapter is not None and adapter.value_out is not None:
+            attention_output = attention_output + adapter.value_message(edge_relations, h, self.attn, effective_bias)
+        x = x + attention_output
 
         # FFN block (Pre-LN)
         h = self.norm2(x)
@@ -98,6 +123,10 @@ class GraphAttentionEncoder(nn.Module):
         n_layers: int,
         feed_forward_hidden: int = 512,
         use_sdpa: bool = False,
+        use_edge_relation_encoder: bool = False,
+        edge_relation_dim: int = 16,
+        use_edge_value_messages: bool = False,
+        use_edge_state_updates: bool = False,
     ):
         super().__init__()
 
@@ -113,6 +142,10 @@ class GraphAttentionEncoder(nn.Module):
                     embedding_dim=embed_dim,
                     feed_forward_hidden=feed_forward_hidden,
                     use_sdpa=use_sdpa,
+                    use_edge_relation_encoder=use_edge_relation_encoder,
+                    edge_relation_dim=edge_relation_dim,
+                    use_edge_value_messages=use_edge_value_messages,
+                    use_edge_state_updates=use_edge_state_updates,
                 )
                 for _ in range(n_layers)
             ]
@@ -120,13 +153,17 @@ class GraphAttentionEncoder(nn.Module):
 
         self.final_norm = nn.LayerNorm(embed_dim)
 
-    def _prepend_graph_token(self, x, attn_bias=None):
+    def _prepend_graph_token(self, x, attn_bias=None, graph_context=None):
         """
         x: [B, N, D]
         attn_bias: [B, N, N] or [B, 1, N, N] or None
         """
         B, _, D = x.shape
         graph_token = self.graph_token.expand(B, 1, D)   # [B,1,D]
+        if graph_context is not None:
+            if graph_context.shape != (B, 1, D):
+                raise ValueError('graph_context must have shape [B,1,D]')
+            graph_token = graph_token + graph_context
         x = torch.cat([graph_token, x], dim=1)           # [B,N+1,D]
 
         if attn_bias is not None:
@@ -157,18 +194,21 @@ class GraphAttentionEncoder(nn.Module):
 
         return x, attn_bias
 
-    def forward(self, x, mask=None, attn_bias=None):
+    def forward(self, x, mask=None, attn_bias=None, graph_context=None,
+                edge_relations=None, return_edge_relations=False):
         """
         x: [B, N, D]
         mask: ignored by design in current graph-token-only setup
         attn_bias: [B, N, N] or [B, H, N, N]
         """
-        x, attn_bias = self._prepend_graph_token(x, attn_bias=attn_bias)
+        x, attn_bias = self._prepend_graph_token(x, attn_bias=attn_bias, graph_context=graph_context)
         for layer in self.layers:
-            x = layer(x, attn_bias=attn_bias)
+            x = layer(x, attn_bias=attn_bias, edge_relations=edge_relations)
+            if layer.edge_relation_adapter is not None:
+                edge_relations = layer.edge_relation_adapter.update_relations(edge_relations, x)
 
         x = self.final_norm(x)   # [B, N+1, D]
-        return x
+        return (x, edge_relations) if return_edge_relations else x
 
     @staticmethod
     def _mean_without_graph_token(x):

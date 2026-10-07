@@ -78,6 +78,12 @@ def render(experiment, output_dir=None):
                'context': ('Physical context', '#059669', '^'),
                'combined': ('Depot + context', '#7C3AED', 'D')} if input_screen else STYLES)
     title = 'VRPTW100 | Physical input normalization' if input_screen else 'VRPTW100 | Reward and normalization'
+    if protocol.get('phase') == 'physical_model_integration_2x2':
+        styles = {'baseline': ('Fixed input baseline', '#475569', 'o'),
+                  'static': ('Static fusion + edges', '#D97706', 's'),
+                  'dynamic': ('Resource decoder', '#059669', '^'),
+                  'combined': ('Static + dynamic', '#7C3AED', 'D')}
+        title = 'VRPTW100 | Physical model integration'
     fig, ax = plt.subplots(figsize=(12.8, 7.5))
     fig.subplots_adjust(left=.09, right=.97, bottom=.20, top=.76)
     fig.patch.set_facecolor('white')

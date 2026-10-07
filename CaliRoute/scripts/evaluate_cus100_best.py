@@ -25,6 +25,8 @@ sys.path.insert(0, str(CODE_ROOT))
 from offline2online.input_normalization import (checkpoint_profile, signature as input_normalization_signature,
                                              configure as configure_input_normalization)
 
+from offline2online.model_integration import (checkpoint_profile as integration_checkpoint_profile,
+    signature as model_integration_signature, configure as configure_model_integration)
 EVAL_SEED = 17_003_009
 NUM_INSTANCES = 1000
 
@@ -72,6 +74,7 @@ def prepare_output(path):
 def validate_checkpoint(checkpoint, problem, seed, selection):
     cfg = checkpoint.get('config', {})
     checkpoint_profile(checkpoint)
+    integration_checkpoint_profile(checkpoint)
     data = cfg.get('data', {})
     if data.get('problem_type') != problem or int(data.get('num_customers', -1)) != 100:
         raise ValueError(f'Checkpoint must be {problem} Cus100; got {data.get("problem_type")}, {data.get("num_customers")}')
@@ -125,6 +128,7 @@ def build_eval_config(original, dataset, reference, output):
 def constructor_kwargs(cfg, agent_class, device='cuda:0'):
     """Preserve all supported model kwargs and the training factory's aliases."""
     input_normalization_signature(cfg)
+    model_integration_signature(cfg)
     model = cfg['model']
     parameters = inspect.signature(agent_class.__init__).parameters
     result = {key: model[key] for key in parameters if key in model and key not in {'self', 'device', 'name'}}
@@ -260,6 +264,7 @@ def main(argv=None):
                 'gurobi_summary_sha256': digest(reference), 'instance_ids': instance_ids,
                 'source': source_provenance(), 'model_constructor': kwargs,
                 'input_normalization_signature': input_normalization_signature(cfg),
+                'model_integration_signature': model_integration_signature(cfg),
                 'protocol': {'problem': args.problem, 'customers': 100, 'num_instances': NUM_INSTANCES,
                              'split': 'frozen test', 'selection': 'validation-selected checkpoint fixed before this evaluation',
                              'training_or_tuning': False, 'strict_checkpoint_load': True, 'decode': 'sample',
@@ -275,6 +280,7 @@ def main(argv=None):
             raise RuntimeError('A visible CUDA GPU is required; set CUDA_VISIBLE_DEVICES in the caller')
         agent = Agent(**kwargs).to('cuda:0')
         configure_input_normalization(agent, cfg)
+        configure_model_integration(agent, cfg)
         agent.load_state_dict(checkpoint['model_state_dict'], strict=True)
         agent.eval()
         del checkpoint

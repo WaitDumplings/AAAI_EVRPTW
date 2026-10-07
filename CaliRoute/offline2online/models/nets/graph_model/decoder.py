@@ -3,6 +3,7 @@ from torch import nn
 
 from .routing_adapters import PostChargeAdapter
 from caliroute.plugins.agda import AdaptiveGraphAttention
+from caliroute.plugins.physical_decision import ResourceDecisionAdapter
 
 from ...nets.graph_model.multi_head_attention import (
     AttentionScore,
@@ -698,6 +699,10 @@ class Decoder(nn.Module):
         optimize_dynamic_projections=False,
         use_agda_v2=False,
         agda_hidden_dim=32,
+        use_resource_decoder=False,
+        decoder_observation_mode="feasible",
+        edge_relation_dim=16,
+        use_edge_relation_encoder=False,
     ):
         super().__init__()
 
@@ -753,6 +758,17 @@ class Decoder(nn.Module):
         if use_post_charge_adapter:
             with torch.random.fork_rng(devices=[]):
                 self.post_charge_adapter = PostChargeAdapter(post_charge_adapter_hidden_dim)
+        self.resource_decoder = None
+        if use_resource_decoder or use_edge_relation_encoder:
+            # New branches must neither alter shared initial weights nor consume
+            # the sampling RNG, and their output heads start at exactly zero.
+            with torch.random.fork_rng(devices=[]):
+                self.resource_decoder = ResourceDecisionAdapter(
+                    embedding_dim, observation_mode=decoder_observation_mode,
+                    use_resources=use_resource_decoder,
+                    use_edge_relations=use_edge_relation_encoder,
+                    edge_relation_dim=edge_relation_dim,
+                )
         self.decode_type = None
 
     # ------------------------------------------------------------------
@@ -796,8 +812,13 @@ class Decoder(nn.Module):
 
         cache = (node_embed, graph_context, glimpse_key, glimpse_val, action_key)
         node_projections = self.dynamic_graph_kv_encoder.precompute_node_projections(node_embed)
+        extra = {}
         if node_projections is not None:
-            cache = (*cache, {"node_projections": node_projections})
+            extra["node_projections"] = node_projections
+        if self.resource_decoder is not None:
+            extra["resource_readout"] = self.resource_decoder.precompute(node_embed)
+        if extra:
+            cache = (*cache, extra)
         return cache
 
     # ------------------------------------------------------------------
@@ -823,6 +844,20 @@ class Decoder(nn.Module):
         )
         if self.post_charge_adapter is not None:
             action_bias = action_bias + self.post_charge_adapter(state, node_embeddings)
+        if self.resource_decoder is not None:
+            extra = cached_embeddings[5] if len(cached_embeddings) > 5 else {}
+            query_delta, physical_key_delta, physical_bias_delta = self.resource_decoder(
+                node_embeddings, query, state,
+                cached_readout=extra.get("resource_readout"),
+                edge_relations=extra.get("edge_relations"),
+                edge_relation_valid=extra.get("edge_relation_valid"),
+                node_mask=node_mask,
+            )
+            query = query + query_delta
+            if torch.is_tensor(action_key_delta) and action_key_delta.dim() == 3:
+                action_key_delta = action_key_delta.unsqueeze(1)
+            action_key_delta = action_key_delta + physical_key_delta
+            action_bias = action_bias + physical_bias_delta
 
         tensor_deltas = [
             delta
@@ -868,6 +903,8 @@ class Decoder(nn.Module):
         if node_mask is not None:
             # optional extra mask from outside (e.g., padded nodes)
             node_mask = node_mask.to(mask.device)
+            if mask.dim() == 3 and node_mask.dim() == 2:
+                node_mask = node_mask.unsqueeze(1)
             mask = mask | node_mask
 
         logits, glimpse = self.calc_logits(
@@ -879,6 +916,15 @@ class Decoder(nn.Module):
             action_bias=action_bias,
         )
         return logits, glimpse
+
+    def _safe_glimpse_mask(self, mask):
+        if self.resource_decoder is None:
+            return mask
+        # Completed/padded trajectories can contain no feasible actions. The
+        # auxiliary information readout is finite, while final action masking is
+        # left untouched (there is no valid distribution over an empty action set).
+        first = torch.arange(mask.size(-1), device=mask.device) == 0
+        return mask & ~(mask.all(-1, keepdim=True) & first)
 
     def calc_logits(self, query, glimpse_K, glimpse_V, action_key, mask, action_bias=0):
         """
@@ -895,11 +941,12 @@ class Decoder(nn.Module):
             action_key_flat = action_key.reshape(B * T, N, D)
             mask_flat = mask.reshape(B * T, N)
 
+            glimpse_mask = self._safe_glimpse_mask(mask_flat)
             glimpse_flat = self.glimpse(
                 query_flat,
                 glimpse_K_flat,
                 glimpse_V_flat,
-                mask_flat,
+                glimpse_mask,
             )
             action_query_flat = self.action_query_proj(torch.cat([query_flat, glimpse_flat], dim=-1))
             logits_flat = self.pointer(action_query_flat, action_key_flat, mask_flat)
@@ -908,7 +955,7 @@ class Decoder(nn.Module):
                 logits_flat = logits_flat + bias_flat
             return logits_flat.reshape(B, T, N), glimpse_flat.reshape(B, T, D)
 
-        glimpse = self.glimpse(query, glimpse_K, glimpse_V, mask)  # [B,1,D]
+        glimpse = self.glimpse(query, glimpse_K, glimpse_V, self._safe_glimpse_mask(mask))  # [B,1,D]
         action_query = self.action_query_proj(torch.cat([query, glimpse], dim=-1))
         logits = self.pointer(action_query, action_key, mask)      # [B,1,N]
         if torch.is_tensor(action_bias):

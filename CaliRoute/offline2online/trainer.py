@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import time
 from typing import Any, Sequence
 
@@ -51,6 +52,10 @@ from .input_normalization import (configure as configure_input_normalization,
                                   checkpoint_metadata as input_checkpoint_metadata,
                                   load_checkpoint_profile as load_input_checkpoint_profile,
                                   signature as input_normalization_signature)
+from .model_integration import (configure as configure_model_integration,
+                                checkpoint_metadata as model_integration_checkpoint_metadata,
+                                load_checkpoint_profile as load_model_integration_profile,
+                                signature as model_integration_signature)
 from .training_schedule import apply_epoch_schedule
 from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
 from .slppo_diagnostics import (tensors_to_floats, value_and_advantage_diagnostics,
@@ -208,6 +213,7 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "config": cfg,
             "model_state_dict": inference_model_state(agent),
             **input_checkpoint_metadata(agent, cfg),
+            **model_integration_checkpoint_metadata(agent, cfg),
             **({"reward_normalization_state": agent._reward_normalization.checkpoint_state(agent.critic)}
                if getattr(agent, "_reward_normalization", None) is not None else {}),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -947,6 +953,9 @@ def _make_envs(cfg: dict[str, Any], seed: int, *, problem_type: str):
 
 
 _INIT_CHECKPOINT_NEW_MODULE_PREFIXES = (
+    "backbone.static_fusion.",
+    "backbone.edge_relation_encoder.",
+    "backbone.decoder.resource_decoder.",
     "backbone.physical_input_adapter.",
     "backbone.residual_edge_bias.",
     "backbone.rdi_adapter.",
@@ -963,7 +972,8 @@ def _load_initial_model_state(agent: Agent, state_dict: dict[str, Any], *, stric
     missing = set(expected) - set(state_dict)
     unexpected = set(state_dict) - set(expected)
     forbidden_missing = sorted(
-        key for key in missing if not key.startswith(_INIT_CHECKPOINT_NEW_MODULE_PREFIXES)
+        key for key in missing if not (key.startswith(_INIT_CHECKPOINT_NEW_MODULE_PREFIXES)
+            or re.fullmatch(r"backbone\.encoder\.layers\.\d+\.edge_relation_adapter\..+", key))
     )
     if forbidden_missing or unexpected:
         raise RuntimeError(
@@ -1001,10 +1011,14 @@ def _load_agent_checkpoint(
     input_profile_info = load_input_checkpoint_profile(
         agent, checkpoint, resume=False, checkpoint_path=ckpt_path,
     )
+    model_profile_info = load_model_integration_profile(
+        agent, checkpoint, resume=False, checkpoint_path=ckpt_path,
+    )
     result = _load_initial_model_state(agent, state_dict, strict=strict)
     return {
         "checkpoint_path": str(ckpt_path),
         "input_normalization": input_profile_info,
+        "model_integration": model_profile_info,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "seed": checkpoint.get("seed") if isinstance(checkpoint, dict) else None,
         "missing_keys": list(getattr(result, "missing_keys", [])),
@@ -1039,6 +1053,9 @@ def _load_training_checkpoint(
     input_profile_info = load_input_checkpoint_profile(
         agent, checkpoint, resume=True, checkpoint_path=ckpt_path,
     )
+    model_profile_info = load_model_integration_profile(
+        agent, checkpoint, resume=True, checkpoint_path=ckpt_path,
+    )
     result = agent.load_state_dict(state_dict, strict=strict)
     agent._pending_reward_normalization_state = checkpoint.get("reward_normalization_state")
     optimizer_loaded = False
@@ -1057,6 +1074,7 @@ def _load_training_checkpoint(
     return {
         "checkpoint_path": str(ckpt_path),
         "input_normalization": input_profile_info,
+        "model_integration": model_profile_info,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "seed": checkpoint.get("seed") if isinstance(checkpoint, dict) else None,
         "optimizer_loaded": optimizer_loaded,
@@ -4274,6 +4292,7 @@ def train_from_config(
     run_session_id = f"{os.getpid()}-{time.time_ns()}"
     cfg = deep_update(cfg, overrides or {})
     _apply_solution_level_aliases(cfg)
+    model_integration_signature(cfg)
     input_normalization_signature(cfg)  # Fail before creating devices, datasets or optimizers.
     train_cfg = cfg["training"]
     distributed = DistributedContext.initialize(device, int(train_cfg.get("distributed_timeout_minutes", 30)))
@@ -4409,6 +4428,13 @@ def train_from_config(
             use_encoder_sdpa=bool(model_cfg.get("use_encoder_sdpa", False)),
             use_physical_input_context=bool(model_cfg.get("use_physical_input_context", False)),
             physical_input_context_hidden_dim=int(model_cfg.get("physical_input_context_hidden_dim", 32)),
+            use_typed_static_fusion=bool(model_cfg.get("use_typed_static_fusion", False)),
+            use_edge_relation_encoder=bool(model_cfg.get("use_edge_relation_encoder", False)),
+            edge_relation_dim=int(model_cfg.get("edge_relation_dim", 16)),
+            use_edge_value_messages=bool(model_cfg.get("use_edge_value_messages", False)),
+            use_edge_state_updates=bool(model_cfg.get("use_edge_state_updates", False)),
+            use_resource_decoder=bool(model_cfg.get("use_resource_decoder", False)),
+            decoder_observation_mode=str(model_cfg.get("decoder_observation_mode", "feasible")),
             residual_edge_hidden_dim=int(model_cfg.get("residual_edge_hidden_dim", 32)),
             use_post_charge_adapter=bool(model_cfg.get("use_post_charge_adapter", False)),
             post_charge_adapter_hidden_dim=int(model_cfg.get("post_charge_adapter_hidden_dim", 32)),
@@ -4420,6 +4446,7 @@ def train_from_config(
 
     agent = _make_agent()
     input_profile = configure_input_normalization(agent, cfg)
+    model_profile = configure_model_integration(agent, cfg)
     init_checkpoint_info: dict[str, Any] = {}
     resume_checkpoint_info: dict[str, Any] = {}
     resume_checkpoint_path = (
@@ -4447,6 +4474,7 @@ def train_from_config(
     if hard_ref_kl_requested:
         reference_agent = _make_agent()
         configure_input_normalization(reference_agent, cfg)
+        configure_model_integration(reference_agent, cfg)
         reference_checkpoint_path = offline_cfg.get("reference_checkpoint_path") or init_checkpoint_path or resume_checkpoint_path
         if reference_checkpoint_path:
             reference_checkpoint_info = _load_agent_checkpoint(
@@ -6397,6 +6425,7 @@ def train_from_config(
                 "replay_loss_diagnostics": average_diagnostics(monitor_replay_records),
                 "critic_diagnostics": monitor_values,
                 "input_normalization": input_profile,
+                "model_integration": model_profile,
                 "input_initialization": getattr(agent, "_input_normalization_initialization", None),
                 "reward_normalization": dict(reward_normalization.diagnostics) if reward_normalization is not None else {"mode": "legacy"},
                 "gradient_components": monitor_gradient_values,

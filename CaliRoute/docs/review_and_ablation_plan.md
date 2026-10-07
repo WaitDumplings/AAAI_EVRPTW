@@ -819,3 +819,185 @@ Implementation checks completed on 2026-10-07 (before the formal GPU run):
 
 These checks establish implementation consistency, not improved policy quality.
 The matched four-arm validation screen and repeat-seed confirmation remain pending.
+
+## Physical model-integration screen (2026-10-07)
+
+This second stage holds the first stage's **combined input** fixed by design.
+It does not assert that combined is the winning input normalization. The task is
+how to expose physically consistent node, edge and vehicle-state information to
+embedding, encoder and decoder, without changing objective or learning loss.
+Input units, physical transitions and the environment's final feasible-action
+mask remain authoritative. Learned latent vectors need not themselves satisfy a
+physical equation such as time=distance/speed.
+
+### Literature and adaptation boundaries
+
+- [FiLM, AAAI 2018](https://arxiv.org/abs/1709.07871) conditions neural features
+  through feature-wise affine transformations. Here global vehicle/horizon
+  context modulates grouped physical node features with a zero-output residual.
+  Its visual-reasoning evidence motivates a mechanism, not a routing improvement
+  guarantee.
+- [Relational Attention, ICLR 2023](https://arxiv.org/abs/2210.05062) explicitly
+  represents and updates edge vectors. We adapt the node/edge distinction to
+  directed normalized distance, time and energy, and cache small edge latents.
+  A low-dimensional relation head augments the existing encoder bias; a shared
+  current-node row can inform decoding. Optional edge-value messages and edge
+  updates are separate heavier settings, not a reproduction of the full paper.
+- [RRNCO](https://arxiv.org/html/2503.16159v2) motivates retaining real road
+  matrices rather than treating coordinates as the whole routing relation. Its
+  coordinate/road fusion and the new static integration overlap conceptually;
+  implementation, task and controlled comparison here differ.
+- [Chain-of-Context Learning, ICLR 2026](https://arxiv.org/abs/2603.01667) builds
+  changing constraint context and uses trajectory-shared node re-embedding.
+  We borrow resource-conditioned reading, not its cross-trajectory recurrent
+  re-embedding. Avoiding dependence on other trajectories keeps stored PPO
+  observations sufficient for repeatable policy evaluation.
+- [CARM, 2026 preprint](https://arxiv.org/abs/2605.10122) analyzes observation
+  restrictions in state embedding and proposes constraint-aware residual
+  modulation. We retain the existing feasible-action read and add a separate,
+  zero-output resource-conditioned observation read. The environment mask still
+  controls the final action distribution. This is an adaptation, not an exact
+  CARM reproduction or proof of benefit for our time windows and charging rules.
+
+All five references supply architectural motivation. The exact combination,
+initialization strategy and task-specific feature definitions are ours and must
+be evaluated rather than attributed to the papers as established conclusions.
+
+### Integration contracts
+
+Static typed fusion separates geometry, temporal/service, demand and physical
+road/context information before resource-conditioned residual fusion. Existing
+embedding parameters remain shared with the baseline. Directed relation encoding
+retains distinct i-to-j and j-to-i costs; scalar attention bias alone need not be
+the only consumer. Static relations are cached per instance, and decoder reading
+uses the current-node row rather than recomputing all pairs per action. Optional
+edge-value messages and edge updates can increase cost and are off in the first
+screen; measure actual runtime/memory before claiming a speed improvement.
+
+Dynamic candidate features distinguish arriving at a node from leaving it after
+service, charging or depot handling. Customer time-window feasibility is based on
+start-of-service, matching the environment; completion slack is a separate
+quantity. The candidate representation must distinguish customer, depot and
+charging-station semantics, including the charging mode. Depot resource resets
+and charging-station post-charge state must not be misrepresented as ordinary
+customer transitions. Inactive constraints must not introduce dummy capacities
+or battery scales as active decision signals.
+
+The decoder has separate observation and action roles. Currently unavailable
+customers can still matter for the decision to return to the depot, so the new
+read may observe them. However, already served customers, padding, depot and
+revisitable stations require explicit semantics; a broad read must not silently
+make infeasible actions selectable. The original feasible read remains the
+initial behavior because the new readout head is zero initialized.
+
+Output heads of the new residual branches initialize to zero, and constructing
+new branches must not perturb initialization of shared parameters. This gives a
+meaningful epoch-zero equivalence check for the second-stage four arms. It does
+not imply that all internal features are zero or that all module layers receive
+nonzero gradient on the very first step. New parameters and input/model profiles
+are recorded with checkpoints; weights-only migration allows only named new
+modules, while full training resume must retain compatible architecture and input
+semantics.
+
+### Frozen four-arm protocol
+
+| Arm | Static integration | Dynamic integration |
+|---|---|---|
+| `baseline` | No new static modules; combined input remains enabled | Existing decoder |
+| `static` | Typed fusion plus directed relation encoder and current-edge reader | No resource decoder |
+| `dynamic` | No new static modules | Resource decoder with dual observation |
+| `combined` | Static integration | Dynamic integration |
+
+The static current-edge reader is included whenever the relation encoder is
+active, including the `static` arm. Thus this arm evaluates useful shared static
+relations across encoder and decoder, not only an encoder modification. The
+optional `--edge-messages` and `--edge-updates` switches affect the static-enabled
+arms only and are recorded separately. To isolate individual static changes,
+subsequent fine-grained ablations should split typed fusion from relations.
+
+```bash
+bash scripts/run_model_integration_comparison.sh --seed 3010 --gpus 0,1,2,3
+```
+
+The portable bundled initialization remains
+`assets/input_norm/vrptw100_norm_epoch0300.pt`: the completed prior Norm model's
+epoch-300 raw-unit inference weights, **not** a trained combined-input winner.
+It removes any dependency on another server's private results. All arms apply
+the same coordinate/context migration and start fresh optimizer, replay,
+actor-RMS and PopArt state. The new physical-input adapter is enabled in all arms
+and learns during this screen. Epoch-zero policy/critic equivalence therefore
+compares second-stage structures under the same input shift.
+
+Protocol: VRPTW100, seed 3010 by default, 300 additional epochs, four independent
+single-GPU arms, 64 instances x 50 trajectories, update5, four minibatches,
+chunk12, LR 1e-5, gamma .99, GAE .95, entropy .002, SL coefficient .35 and expert
+weight .6. Replay schedule, `physical_shared_popart` and all reward/SL-PPO
+semantics stay unchanged. Full 1,000-instance validation uses best-of-50 at epoch
+0, every 50 epochs and final epoch. Each formal run starts after its separate
+two-epoch GPU preflight with the same 64-instance x 50-trajectory training
+shape, PPO update count, minibatches and chunk size. Preflight validation alone
+is reduced to four instances and best-of-four; learned weights are discarded.
+This checks actual training memory rather than only a tiny rollout. It cannot
+prove every later replay/evaluation peak will fit. If it fails with OOM, rerun
+a fresh whole comparison using `--chunk-size 8`, keeping batch and trajectories
+unchanged across arms. Tests are
+reserved for final selection; no running jobs on the preparation machine need
+to be interrupted.
+
+Source, initialization, data references and generated configs are hashed and
+frozen by the shared supervisor. Fewer than four matching GPUs queue the arms;
+idle checking and cooperative GPU locks avoid taking active cards. Compare
+quality at matching epochs and matching elapsed training time, reporting
+feasibility and GPU model. The optional heavier arms should be treated as a new
+experiment block, not silently added to one arm mid-run.
+
+### Checks before interpreting quality
+
+- Check default-disabled compatibility, shared-parameter/RNG preservation and
+  zero-initial policy/critic equivalence across all four arms. At epoch zero the
+  measured raw distance, feasibility and coverage must agree; missing or partial
+  validation is pending, not a successful equivalence check.
+- Verify candidate arrivals, waiting, start-of-service, departure, capacity and
+  charging/depot handling against physical environment transitions. Cover
+  capacity-only, time-window and battery-active cases and inactive constraints.
+- Check directed-edge/node permutation behavior, static-cache versus direct
+  execution, PPO replay and expert paths, old-weight migration and full-resume
+  signature checks. All-padded or no-newly-observable cases must remain finite.
+- Check gradient flow and finite optimizer steps, recording module output,
+  gradient and update norms together with KL, clipping, entropy, raw critic
+  error, normalization statistics, feasibility, timing and GPU memory. A
+  zero-output module that stays disconnected is not a valid ablation.
+- Interpret this as a single-scale migration screen. Repeat seeds, matched
+  pretraining/from-scratch tests and cross-size/city validation are still needed
+  before claiming broad plugin improvements. Preserve reward until this stage
+  is assessed to avoid mixing architectural and reward effects.
+
+
+### Implementation validation (2026-10-07)
+
+The non-Gurobi test suite passed **628 tests**. This covers the new typed/static
+and dynamic modules, physical transitions, mixed-precision tensor paths,
+permutation/direction behavior, PPO chunk/trajectory equivalence, old-weight
+migration, resume contracts and launcher behavior. The four unrelated Gurobi
+integration/resume/sharding/launcher test files were excluded from this run.
+After the comparison-report metadata adjustment, both affected launcher test
+files passed again (54 tests).
+
+A real-data CPU pipeline check used four training and four validation VRPTW100
+instances, the actual 256-wide two-layer model and bundled initialization. Each
+of the four arms completed two epochs with PPO, expert/replay paths, evaluation
+and checkpoint saving. All four produced identical epoch-zero selected routes
+and distances; every selected validation route at epochs zero and two passed
+independent physical validation. Added module groups had nonzero gradients and
+parameter updates, with no nonfinite gradients or skipped optimizer steps.
+The optional combined edge-value/edge-update configuration also completed two
+CPU epochs. A separate combined run loaded its epoch-two model and optimizer
+with no missing/unexpected keys and completed epoch three.
+
+These CPU checks used a reduced batch/trajectory/update count and are pipeline
+verification, not quality, speed or CUDA-memory evidence. Their local artifacts
+are in `results/optimization/MODEL_INTEGRATION_CPU_SMOKE_20261007T220246Z/`
+and are deliberately not committed. A prepare-only four-card check verified
+frozen source/config hashes and the full-shape GPU preflight settings without
+launching or interrupting GPU work. Actual CUDA allocation and long-run results
+remain for the destination server to verify.

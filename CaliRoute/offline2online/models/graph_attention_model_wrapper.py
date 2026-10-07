@@ -12,6 +12,7 @@ from .nets.graph_model.encoder import GraphAttentionEncoder
 from .nets.graph_model.routing_adapters import DirectedEdgeBias
 from caliroute.plugins.rdi import RoadDistanceInjection
 from caliroute.plugins.input_encoding import PhysicalInputContextAdapter
+from caliroute.plugins.physical_static import TypedStaticFusion, DirectedPhysicalRelationEncoder
 
 
 class Problem:
@@ -208,11 +209,37 @@ class Backbone(nn.Module):
         use_encoder_sdpa: bool = False,
         use_physical_input_context: bool = False,
         physical_input_context_hidden_dim: int = 32,
+        use_typed_static_fusion: bool = False,
+        use_edge_relation_encoder: bool = False,
+        edge_relation_dim: int = 16,
+        use_edge_value_messages: bool = False,
+        use_edge_state_updates: bool = False,
+        use_resource_decoder: bool = False,
+        decoder_observation_mode: str = "feasible",
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
         self.device = device
         self.problem = Problem(problem_name)
+        if (use_typed_static_fusion or use_edge_relation_encoder or use_resource_decoder) and not use_physical_input_context:
+            raise ValueError('Stage-2 integration requires use_physical_input_context=True')
+        if (use_edge_value_messages or use_edge_state_updates) and not use_edge_relation_encoder:
+            raise ValueError('Edge value messages/updates require use_edge_relation_encoder=True')
+        if isinstance(edge_relation_dim, bool) or not isinstance(edge_relation_dim, int) or edge_relation_dim < 1:
+            raise ValueError('edge_relation_dim must be a positive integer')
+        if decoder_observation_mode not in {'feasible', 'dual'}:
+            raise ValueError('decoder_observation_mode must be feasible or dual')
+        if decoder_observation_mode != 'feasible' and not use_resource_decoder:
+            raise ValueError('dual observation requires use_resource_decoder=True')
+        self.model_integration_settings = {
+            'use_typed_static_fusion': bool(use_typed_static_fusion),
+            'use_edge_relation_encoder': bool(use_edge_relation_encoder),
+            'edge_relation_dim': int(edge_relation_dim),
+            'use_edge_value_messages': bool(use_edge_value_messages),
+            'use_edge_state_updates': bool(use_edge_state_updates),
+            'use_resource_decoder': bool(use_resource_decoder),
+            'decoder_observation_mode': decoder_observation_mode,
+        }
         self.use_encoder_distance_bias = bool(use_encoder_distance_bias)
         self.supports_static_rollout_cache = bool(use_static_rollout_cache)
         self.cache_static_observations = bool(cache_static_observations)
@@ -222,6 +249,10 @@ class Backbone(nn.Module):
             embed_dim=embedding_dim,
             n_layers=n_encode_layers,
             use_sdpa=use_encoder_sdpa,
+            use_edge_relation_encoder=use_edge_relation_encoder,
+            edge_relation_dim=edge_relation_dim,
+            use_edge_value_messages=use_edge_value_messages,
+            use_edge_state_updates=use_edge_state_updates,
         )
         self.decoder = Decoder(
             embedding_dim=embedding_dim,
@@ -240,6 +271,10 @@ class Backbone(nn.Module):
             optimize_dynamic_projections=optimize_dynamic_projections,
             use_agda_v2=use_agda_v2,
             agda_hidden_dim=agda_hidden_dim,
+            use_resource_decoder=use_resource_decoder,
+            decoder_observation_mode=decoder_observation_mode,
+            use_edge_relation_encoder=use_edge_relation_encoder,
+            edge_relation_dim=edge_relation_dim,
         )
 
         self.dist_bias_scale = nn.Parameter(torch.tensor(1.0))
@@ -266,6 +301,15 @@ class Backbone(nn.Module):
                     embedding_dim=embedding_dim,
                     hidden_dim=physical_input_context_hidden_dim,
                 )
+
+        self.static_fusion = None
+        if use_typed_static_fusion:
+            with torch.random.fork_rng(devices=[]):
+                self.static_fusion = TypedStaticFusion(embedding_dim)
+        self.edge_relation_encoder = None
+        if use_edge_relation_encoder:
+            with torch.random.fork_rng(devices=[]):
+                self.edge_relation_encoder = DirectedPhysicalRelationEncoder(edge_relation_dim)
 
     def _build_node_type(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
@@ -360,12 +404,30 @@ class Backbone(nn.Module):
             node_embeddings = node_embeddings + self.physical_input_adapter(
                 node_context, state.states["graph_input_context"]
             )
-        encoded_nodes = self.encoder(
+        graph_context = None
+        if self.static_fusion is not None:
+            node_embeddings, graph_context = self.static_fusion(
+                node_embeddings, state.observations, state.states, self._build_node_type(state.observations)
+            )
+        edge_relations = edge_valid = None
+        if self.edge_relation_encoder is not None:
+            edge_relations, edge_valid = self.edge_relation_encoder(
+                state.states, self._build_node_type(state.observations)
+            )
+        encoded_nodes, edge_relations = self.encoder(
             node_embeddings,
             mask=None,
             attn_bias=self._build_attn_bias(state),
+            graph_context=graph_context,
+            edge_relations=edge_relations,
+            return_edge_relations=True,
         )
         cached = self.decoder._precompute(encoded_nodes, mask=node_mask)
+        if edge_relations is not None:
+            auxiliary = dict(cached[5]) if len(cached) > 5 else {}
+            auxiliary['edge_relations'] = edge_relations
+            auxiliary['edge_relation_valid'] = edge_valid
+            cached = (*cached[:5], auxiliary)
         if self.cache_static_observations:
             static_keys = {
                 "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
@@ -458,6 +520,13 @@ class Agent(nn.Module):
         use_decomposed_critic: bool = False,
         use_physical_input_context: bool = False,
         physical_input_context_hidden_dim: int = 32,
+        use_typed_static_fusion: bool = False,
+        use_edge_relation_encoder: bool = False,
+        edge_relation_dim: int = 16,
+        use_edge_value_messages: bool = False,
+        use_edge_state_updates: bool = False,
+        use_resource_decoder: bool = False,
+        decoder_observation_mode: str = "feasible",
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -489,6 +558,13 @@ class Agent(nn.Module):
             use_encoder_sdpa=use_encoder_sdpa,
             use_physical_input_context=use_physical_input_context,
             physical_input_context_hidden_dim=physical_input_context_hidden_dim,
+            use_typed_static_fusion=use_typed_static_fusion,
+            use_edge_relation_encoder=use_edge_relation_encoder,
+            edge_relation_dim=edge_relation_dim,
+            use_edge_value_messages=use_edge_value_messages,
+            use_edge_state_updates=use_edge_state_updates,
+            use_resource_decoder=use_resource_decoder,
+            decoder_observation_mode=decoder_observation_mode,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

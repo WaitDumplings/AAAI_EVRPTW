@@ -476,3 +476,82 @@ python scripts/plot_reward_norm_eval.py results/optimization/<input-run-director
 The input configuration remains opt-in until matched validation and repeat-seed
 results justify fixing it. Literature rationale and acceptance criteria are in
 [the design and ablation notes](docs/review_and_ablation_plan.md#physical-input-normalization-and-representation-screen-2026-10-07).
+
+## Physical model-integration comparison
+
+The second-stage screen fixes **combined physical input in all four arms** and
+compares how the embedding, encoder and decoder use that input. Combined is a
+controlled assumption here, not a claim that the preceding input screen has
+already selected a winner. Reward, gamma, PopArt, actor RMS and SL-PPO stay fixed.
+
+On the other four-card server, from the repository root:
+
+```bash
+git fetch origin
+git switch opt/model-integration-20261007
+git pull --ff-only
+cd CaliRoute
+bash scripts/run_model_integration_comparison.sh --seed 3010 --gpus 0,1,2,3
+```
+
+| Arm | Static fusion and directed relations | Resource-aware decoder |
+|---|---|---|
+| `baseline` | Current model with combined input | Current decoder |
+| `static` | Grouped physical embedding, resource conditioning, cached directed-edge encoding | Current decoder plus the static relation reader |
+| `dynamic` | Current model with combined input | Candidate transition features, resource conditioning, separate observation/action masks |
+| `combined` | Static changes | Dynamic changes plus the static relation reader |
+
+New output heads start at zero. All arms share weights and the same combined
+input, so their epoch-zero policy/critic behavior should match; full-split
+validation checks are recorded in `comparison.json`. Unlike the first-stage
+input screen, there is no coordinate-mode difference between arms.
+
+The source initialization is the **bundled prior Norm epoch-300 checkpoint**
+`assets/input_norm/vrptw100_norm_epoch0300.pt`, not a trained combined-input best
+checkpoint. No checkpoint from another server's `results` directory is needed.
+Every arm starts with fresh optimizer, replay, actor RMS and PopArt state; each
+preflight is discarded before the formal run. Initialization allows only the
+explicitly named new modules to be absent from the older weights.
+
+Defaults are 300 additional epochs, one GPU per arm, 64 instances x 50
+trajectories, PPO update=5, four minibatches, PPO chunk=12 and LR=1e-5. Each arm
+first passes a two-epoch GPU preflight using the **same training batch, trajectory
+count, update count and chunk size**. Only preflight duration and validation
+size (four instances, best-of-four) are reduced, so it checks actual training
+memory before starting the long run. Formal validation covers all 1,000 validation instances,
+best-of-50, at epochs 0, 50, 100, 150, 200, 250 and 300. Test data are not used for
+selection. The shell detaches the supervisor; it waits for idle GPUs and queues
+arms when fewer cards are supplied. `--prepare-only` writes frozen inputs,
+source and configs without starting jobs. Existing jobs are not stopped.
+
+The lightweight screen leaves the optional edge-value messages and edge-state
+updates off. To run the heavier structure as a separate experiment:
+
+```bash
+bash scripts/run_model_integration_comparison.sh --seed 3010 --gpus 0,1,2,3 \
+  --edge-messages --edge-updates
+```
+
+These flags affect only `static` and `combined` and are recorded in the manifest.
+They may increase memory/runtime; compare their own matched baseline and report
+same-time as well as same-epoch quality. They do not change the reward or the
+physical feasibility mask. For a different data mount, pass
+`--data-root /path/to/AAAI_Dataset`. To change PPO memory chunking consistently
+across arms, pass `--chunk-size N` and keep that choice in the experiment record.
+If full-shape preflight runs out of memory, start a fresh comparison with
+`--chunk-size 8` for all arms; do not silently reduce one arm's batch or trajectory
+count. A two-epoch pass checks the exercised allocation, not every possible
+later replay/evaluation peak.
+
+Results are written beneath
+`results/optimization/MODEL_INTEGRATION_VRPTW100_S3010_E300_<UTC>/`.
+Inspect `status.json`, `comparison.json`, `supervisor.log` and each arm's monitor
+output for feasibility, KL, clipping, entropy, module gradient/update magnitudes,
+normalization statistics, runtime and GPU memory. Plot observed validation:
+
+```bash
+python scripts/plot_reward_norm_eval.py results/optimization/<model-integration-run>
+```
+
+The [design notes](docs/review_and_ablation_plan.md#physical-model-integration-screen-2026-10-07)
+distinguish paper mechanisms, our adaptations and validation requirements.
