@@ -129,7 +129,7 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
         demand_norm = (self.demand_cm3 / max(self.cargo_capacity_cm3, 1e-12)).astype(np.float32)
         tw_norm = ((self.tw_s - self.working_start_s) / self.horizon_s).astype(np.float32)
         service_norm = (self.service_time_s / self.horizon_s).astype(np.float32)
-        edge_distance = (self.distance_km / max(self.reward_distance_scale_km, 1e-12)).astype(np.float32)
+        edge_distance = (self.distance_km / self.observation_distance_scale_km).astype(np.float32)
         edge_time = (self.travel_time_s / max(self.horizon_s, 1e-12)).astype(np.float32)
         edge_energy = (self.energy_kwh / max(self.battery_capacity_kwh, 1e-12)).astype(np.float32)
         self._static_obs_cache = {

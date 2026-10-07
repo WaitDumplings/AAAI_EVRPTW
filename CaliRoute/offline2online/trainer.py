@@ -46,6 +46,7 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.trainer import (
 
 from .models import Agent
 from .checkpoint_schedule import epoch_checkpoint_plan
+from .reward_normalization import (configure as configure_reward_normalization, inference_model_state)
 from .training_schedule import apply_epoch_schedule
 from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
 from .slppo_diagnostics import (tensors_to_floats, value_and_advantage_diagnostics,
@@ -201,7 +202,9 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "epoch": int(epoch),
             "seed": int(seed),
             "config": cfg,
-            "model_state_dict": agent.state_dict(),
+            "model_state_dict": inference_model_state(agent),
+            **({"reward_normalization_state": agent._reward_normalization.checkpoint_state(agent.critic)}
+               if getattr(agent, "_reward_normalization", None) is not None else {}),
             "optimizer_state_dict": optimizer.state_dict(),
             **({"training_resume_state": agent._training_resume_state}
                if hasattr(agent, "_training_resume_state") else {}),
@@ -1024,6 +1027,7 @@ def _load_training_checkpoint(
         state_dict = checkpoint
         checkpoint = {}
     result = agent.load_state_dict(state_dict, strict=strict)
+    agent._pending_reward_normalization_state = checkpoint.get("reward_normalization_state")
     optimizer_loaded = False
     if isinstance(checkpoint, dict) and checkpoint.get("training_resume_state") is not None:
         agent._pending_training_resume_state = checkpoint["training_resume_state"]
@@ -2523,7 +2527,14 @@ def _evaluate_policy_loss_with_stats(
         clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * adv
         valid = batch.valid[step, env_indices]
         policy_losses.append(-_masked_mean(torch.minimum(unclipped, clipped), valid))
-        value_losses.append(_masked_mean(F.mse_loss(value, returns[step, env_indices], reduction="none"), valid))
+        normalization = getattr(agent, "_reward_normalization", None)
+        if normalization is None:
+            value_error = F.mse_loss(value, returns[step, env_indices], reduction="none")
+        else:
+            # Both predictions and rollout targets stay in original reward units.
+            scale = normalization.critic.std.to(device=value.device, dtype=torch.float32)
+            value_error = ((value.float() - returns[step, env_indices].float()) / scale).square()
+        value_losses.append(_masked_mean(value_error, valid))
         entropy_losses.append(_masked_mean(entropy, valid))
         with torch.no_grad():
             approx_kls.append(_masked_mean((ratio - 1.0) - logratio, valid))
@@ -4546,6 +4557,9 @@ def train_from_config(
         ]
     else:
         envs, pool = _make_envs(cfg, sampling_seed, problem_type=problem_type)
+    reward_normalization = configure_reward_normalization(
+        agent, cfg, resume=bool(resume_checkpoint_path), distributed=distributed,
+    )
     initial_env_pool_time_s = time.perf_counter() - initial_env_start
 
     out_root = REPO_ROOT / "results"
@@ -5304,12 +5318,31 @@ def train_from_config(
                         gae_lambda=gae_lambda,
                         route_segmented=use_route_segmented_gae,
                     )
-                    advantages = _normalize_valid(advantages, batch.valid)
+                    if reward_normalization is None:
+                        advantages = _normalize_valid(advantages, batch.valid)
                 else:
                     returns = compute_returns(batch.rewards, batch.dones, gamma=gamma)
                     values = _value_head(batch.values, 0)
                     advantages = returns - values
                     advantages = _normalize_valid(advantages, batch.valid)
+                if reward_normalization is not None:
+                    physical_objectives, physical_success, _ = _final_info_arrays(
+                        batch.final_infos, int(batch.actions.size(1)), int(batch.actions.size(2)),
+                    )
+                    # This first controlled release supports completed routing
+                    # episodes only. Do not silently equate truncation/failure
+                    # with a cheap feasible solution or a zero-value terminal.
+                    if not np.all(physical_success & np.isfinite(physical_objectives)):
+                        raise RuntimeError("physical_shared_popart requires complete feasible rollouts; inspect failure/truncation before updating")
+                    physical_costs = torch.as_tensor(physical_objectives, device=device, dtype=torch.float32)
+                    unit = reward_normalization.signature["reward_unit_km"]
+                    reward_identity_error = (torch.where(batch.valid, batch.rewards, 0.).sum(0) + physical_costs / unit).abs().max()
+                    if float(reward_identity_error) > 1e-4:
+                        raise RuntimeError(f"Rollout rewards disagree with physical distance: {float(reward_identity_error)}")
+                    advantages = reward_normalization.begin_rollout_update(
+                        returns, advantages, batch.valid, agent.critic, optimizer,
+                    )
+                    reward_normalization.diagnostics["reward_identity_max_abs_error"] = float(reward_identity_error)
                 if getattr(batch, "route_boundaries", None) is not None:
                     valid_boundary = batch.route_boundaries & batch.valid
                     valid_count = int(batch.valid.sum().detach().cpu().item())
@@ -5343,14 +5376,18 @@ def train_from_config(
                 gcbpo_pairs: list[GcbpoPreferencePair] = []
                 gcbpo_candidates: list[GcbpoBranchCandidate] = []
                 if sl_enabled:
-                    route_adv_tensor, route_success_tensor, adv_info = _solution_level_advantage_tensors(
-                        batch,
-                        cfg,
-                        envs,
-                        expert_buffer,
-                        device,
-                        policy_best_objectives=policy_best_objectives,
-                    )
+                    if reward_normalization is None:
+                        route_adv_tensor, route_success_tensor, adv_info = _solution_level_advantage_tensors(
+                            batch, cfg, envs, expert_buffer, device,
+                            policy_best_objectives=policy_best_objectives,
+                        )
+                    else:
+                        route_success_tensor = torch.as_tensor(physical_success, device=device, dtype=torch.bool)
+                        route_adv_tensor = reward_normalization.route_advantages(physical_costs, route_success_tensor)
+                        adv_info = {"route_adv_mean": float(route_adv_tensor.mean()),
+                                    "route_adv_std": float(route_adv_tensor.std(unbiased=False)),
+                                    "sl_advantage_mode": "leave_one_out_physical_cost_shared_RMS",
+                                    "sl_group_reference_count": 0.0}
                     sl_expert_candidates, sl_candidate_expert_info = _prepare_sl_expert_candidates(
                         agent,
                         batch,
@@ -6339,6 +6376,7 @@ def train_from_config(
                 "expert_diagnostics": average_diagnostics(monitor_expert_records),
                 "replay_loss_diagnostics": average_diagnostics(monitor_replay_records),
                 "critic_diagnostics": monitor_values,
+                "reward_normalization": dict(reward_normalization.diagnostics) if reward_normalization is not None else {"mode": "legacy"},
                 "gradient_components": monitor_gradient_values,
                 "plugin_diagnostics": epoch_plugin_diagnostics,
                 "evaluation": eval_row,

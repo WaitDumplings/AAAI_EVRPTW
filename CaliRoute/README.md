@@ -290,3 +290,59 @@ resume. Shards cover all 1,000 instances without overlap and keep the 30-worker,
 assigned IDs. Reuse the same shard number when resuming. Without the third
 argument, the command still runs the full bundle. See the benchmark guide for
 all five commands.
+
+
+## Reward and normalization fine-tuning comparison
+
+Run from `CaliRoute/` after pulling the same source branch on each machine.
+The launcher uses repository-relative defaults, snapshots source/config/weights,
+and starts a detached supervisor. It waits for unused GPUs; each arm first runs
+an isolated two-epoch GPU preflight, then starts its full training from the
+shared initialization. Preflight epochs are never counted as training progress.
+
+```bash
+# First 4 x 2080 Ti server: four single-GPU arms, seed 3009.
+bash scripts/run_reward_norm_comparison.sh --seed 3009 --gpus 0,1,2,3
+
+# Second 4 x 2080 Ti server: repeat all four arms with seed 3010.
+bash scripts/run_reward_norm_comparison.sh --seed 3010 --gpus 0,1,2,3
+```
+
+Use `--prepare-only` to inspect configs without launching. Use `--gpus 0,1,2`
+on a three-card server or `--gpus 0,1` on a two-card server; the four arms queue
+on those devices. One GPU is used per arm, including on A6000 hardware. Compare
+runtime within the same GPU model. `PYTHON_BIN` can select your Python environment;
+`--data-root` and `--init-checkpoint` override relocated data/weights.
+
+The default initialization must exist on every server:
+
+```text
+results/checkpoints/Cus_100_CS_0/VRPTW100_UPDATES3456_S3009_E500_20261006_UPDATE_5/seed_3009/checkpoint_epoch_0300.pt
+```
+
+Checkpoints and datasets are not in Git. They must be copied separately, with
+the same content hashes across machines. The launcher validates the saved epoch
+and freezes the checkpoint's reward and observation distance units.
+
+| Arm | gamma | Normalization |
+|---|---:|---|
+| baseline | 0.99 | existing |
+| reward | 1.0 | existing |
+| normalization | 0.99 | shared actor RMS, physical-cost LOO SL advantage, PopArt |
+| combined | 1.0 | shared actor RMS, physical-cost LOO SL advantage, PopArt |
+
+All arms fine-tune VRPTW100 for 80 additional epochs: 64 instances x 50
+trajectories per rollout, 5 PPO passes, 4 minibatches, LR 1e-5, entropy 0.002,
+and SL coefficient 0.35. They use fresh optimizers/replay and uniform shuffled
+training instances. These common fine-tuning settings differ from the earlier
+500-epoch sweep. Validation uses all 1,000 instances, best-of-50, at epoch 0 and
+every 20 epochs. Test is reserved for final selection and is not run here.
+
+The printed experiment directory contains `status.json`, `comparison.json`,
+`manifest.json`, `hardware.jsonl`, each arm's `preflight/` and `monitoring/`, and
+independently validated routes. `comparison.json` aligns completed validation
+epochs and checks the common initial evaluation. The new host mode currently
+requires a scalar critic, complete feasible rollouts, no reward shaping, and a
+single GPU; it fails explicitly for unsupported settings. See
+[the design and ablation notes](docs/review_and_ablation_plan.md#reward-and-normalization-screen-2026-10-07)
+for objective semantics and scope.

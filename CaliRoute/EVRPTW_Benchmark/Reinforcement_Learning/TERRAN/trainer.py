@@ -186,22 +186,35 @@ def build_pbrs_config(cfg: dict[str, Any]) -> PotentialRewardConfig | None:
 def _configure_dataset_reward_scale(cfg: dict[str, Any], pool: Any) -> None:
     env_cfg = cfg.setdefault("env", {})
     mode = str(env_cfg.get("reward_distance_scale_mode", "single_customer_repair_median"))
+    explicit_scale = env_cfg.get("reward_distance_scale_km")
+    if explicit_scale is not None:
+        explicit_scale = float(explicit_scale)
+        if not math.isfinite(explicit_scale) or explicit_scale <= 0.0:
+            raise ValueError("reward_distance_scale_km must be finite and positive")
     if not mode.startswith("dataset_"):
         return
     base_mode = mode[len("dataset_") :]
-    scale_fn = getattr(pool, "reward_distance_scale_km", None)
-    if not callable(scale_fn):
-        raise ValueError(
-            "reward_distance_scale_mode uses dataset_ prefix, but the training pool "
-            "does not provide dataset-level reward scale statistics."
-        )
-    scale = float(scale_fn(base_mode))
+    if explicit_scale is not None:
+        # Frozen physical reward units take precedence over dataset fitting.
+        scale = explicit_scale
+        source = "explicit"
+    else:
+        scale_fn = getattr(pool, "reward_distance_scale_km", None)
+        if not callable(scale_fn):
+            raise ValueError(
+                "reward_distance_scale_mode uses dataset_ prefix, but the training pool "
+                "does not provide dataset-level reward scale statistics."
+            )
+        scale = float(scale_fn(base_mode))
+        source = getattr(pool, "region_pool_status", "dataset")
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("reward_distance_scale_km must be finite and positive")
     env_cfg["reward_distance_scale_mode"] = base_mode
     env_cfg["reward_distance_scale_km"] = scale
     cfg.setdefault("normalization", {})["reward_distance_scale_km"] = scale
     cfg["normalization"]["reward_distance_scale_mode"] = mode
     cfg["normalization"]["reward_distance_scale_base_mode"] = base_mode
-    cfg["normalization"]["reward_distance_scale_source"] = getattr(pool, "region_pool_status", "dataset")
+    cfg["normalization"]["reward_distance_scale_source"] = source
 
 
 def make_envs(cfg: dict[str, Any], seed: int):

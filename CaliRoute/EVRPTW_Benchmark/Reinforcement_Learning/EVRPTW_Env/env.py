@@ -57,6 +57,7 @@ class EVRPTWVectorEnv(Env):
         normalize_reward: bool = True,
         reward_distance_scale_km: float | None = None,
         reward_distance_scale_mode: str = "single_customer_repair_median",
+        observation_distance_scale_km: float | None = None,
     ) -> None:
         super().__init__()
         if reward_mode not in {"distance", "distance_success"}:
@@ -73,6 +74,13 @@ class EVRPTWVectorEnv(Env):
         self.charging_mode = charging_mode
         self.normalize_reward = bool(normalize_reward)
         self.reward_distance_scale_km_override = reward_distance_scale_km
+        self.observation_distance_scale_km_override = observation_distance_scale_km
+        for name, scale in (
+            ("reward_distance_scale_km", reward_distance_scale_km),
+            ("observation_distance_scale_km", observation_distance_scale_km),
+        ):
+            if scale is not None and (not math.isfinite(float(scale)) or float(scale) <= 0.0):
+                raise ValueError(f"{name} must be finite and positive")
         self.reward_distance_scale_mode = str(reward_distance_scale_mode)
         valid_scale_modes = {
             "max_edge",
@@ -83,6 +91,7 @@ class EVRPTWVectorEnv(Env):
         if self.reward_distance_scale_mode not in valid_scale_modes:
             raise ValueError(f"reward_distance_scale_mode must be one of {sorted(valid_scale_modes)}")
         self.reward_distance_scale_km = 1.0
+        self.observation_distance_scale_km = 1.0
 
         self._rng = np.random.default_rng()
         if instance is not None:
@@ -105,6 +114,13 @@ class EVRPTWVectorEnv(Env):
 
         self.distance_km = np.asarray(instance.distance_matrix_km, dtype=np.float64)
         self.reward_distance_scale_km = self._compute_reward_distance_scale_km()
+        # Preserve legacy observations unless their distance unit is explicit.
+        # The observation unit never changes rewards or physical feasibility.
+        self.observation_distance_scale_km = (
+            self.reward_distance_scale_km
+            if self.observation_distance_scale_km_override is None
+            else float(self.observation_distance_scale_km_override)
+        )
         self.coords_raw = np.vstack(
             [
                 np.asarray(instance.depot, dtype=np.float64).reshape(1, 2),
@@ -152,7 +168,7 @@ class EVRPTWVectorEnv(Env):
 
     def _compute_reward_distance_scale_km(self) -> float:
         if self.reward_distance_scale_km_override is not None:
-            return max(float(self.reward_distance_scale_km_override), 1e-9)
+            return float(self.reward_distance_scale_km_override)
         finite_dist = self.distance_km[np.isfinite(self.distance_km)]
         if finite_dist.size == 0:
             return 1.0
@@ -515,7 +531,7 @@ class EVRPTWVectorEnv(Env):
         remaining = (1.0 - current_battery).astype(np.float32)
         current_load = (self.load_cm3 / max(self.cargo_capacity_cm3, 1e-12)).astype(np.float32)
         current_time = ((self.current_time_s - self.working_start_s) / self.horizon_s).astype(np.float32)
-        edge_distance = (self.distance_km / max(self.reward_distance_scale_km, 1e-12)).astype(np.float32)
+        edge_distance = (self.distance_km / self.observation_distance_scale_km).astype(np.float32)
         edge_time = (self.travel_time_s / max(self.horizon_s, 1e-12)).astype(np.float32)
         edge_energy = (self.energy_kwh / max(self.battery_capacity_kwh, 1e-12)).astype(np.float32)
 

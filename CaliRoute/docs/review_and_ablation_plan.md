@@ -475,3 +475,82 @@ PPO init resumes; subsequent parameter-screening and long-run phases continue
 to initialize from the completed shared PPO best. Progress distinguishes
 imported epochs from newly completed epochs. A new source snapshot and the
 checkpoint/config/history hashes record the resource-change boundary.
+
+
+## Reward and normalization screen (2026-10-07)
+
+The current hypothesis is that physical-unit advantages and stable critic target
+scaling improve short fine-tuning. This is a controlled screen, not an established
+accuracy improvement or a replacement for a full multi-task training comparison.
+The fixed starting point is update5 epoch300 from the VRPTW100 sweep, shared by
+all four arms and both fine-tuning seeds (3009, 3010). Seeds do not represent
+independently pretrained models.
+
+The distance reward is `-edge_km / d0`. Freeze `d0` to the source checkpoint's
+training unit (43.638668060302734 km here); do not refit it separately for each
+customer count. Observation distance scaling is now independent via
+`env.observation_distance_scale_km`; its default preserves legacy behavior and
+this screen explicitly preserves the checkpoint's input unit. Demand/capacity,
+time/horizon and energy/battery features remain unchanged. With gamma1 and a
+complete feasible rollout, accumulated reward equals negative total route cost
+in this fixed unit. Reward-identity checks execute before each new-mode update.
+
+`training.reward_norm_mode=physical_shared_popart` enables a bundle:
+
+- Scalar PopArt keeps value predictions in original reward units at the rollout
+  interface. It updates target moments once per complete rollout and compensates
+  the final linear head to preserve its raw predictions. Normalized MSE is used
+  for critic learning. Adam head moments are scaled by old_std/new_std (and its
+  square for second moments); this is a gradient-unit conversion, not a claim of
+  optimizer-trajectory invariance.
+- One actor EMA RMS normalizes all PPO step advantages. The first training
+  rollout calibrates it before optimization; subsequent rollouts use the previous
+  historical snapshot, frozen for every minibatch and PPO pass. No customer count,
+  per-instance standard deviation, or validation/test statistics enter the RMS.
+- On-policy solution advantages use leave-one-out sampled cost differences,
+  converted from km to the same fixed reward unit and divided by the same actor
+  snapshot. Experts do not participate in the on-policy group moments. Expert
+  and replay losses remain separate, dimensionless auxiliary objectives with
+  their existing weights and gates.
+
+The four-arm factorial separates gamma .99/1 from this entire bundle; it does
+not isolate the bundle's three components. Original length-normalized SL ratios,
+step-loss reduction, expert/replay denominators, and RDI/AGDA architectures remain
+in this screen. Changing those requires a further ablation. In particular the
+existing SL ratio is a geometric-mean surrogate, not a joint trajectory importance
+ratio. The scalar critic/complete-episode/single-GPU restrictions are enforced;
+new failure penalties, truncation bootstrapping and multi-GPU host integration
+are not claimed implemented. Portable normalizer primitives do have CPU Gloo
+checks for global moments and empty ranks.
+
+Checkpoints store inference-ready raw-unit critic weights under the existing
+model_state_dict keys, plus the normalized head and normalization statistics for
+exact epoch-boundary training resume. Thus existing evaluator loading remains
+compatible. Weights-only initialization resets optimizer and normalizers; full
+resume rejects changed normalization semantics, reward unit or gamma. Mid-PPO-pass
+resume is outside the supported checkpoint protocol.
+
+Monitor every rollout's reward identity, raw advantage moments, actor scale used
+and next scale, critic mean/std, SL advantage spread, normalization update count,
+plus existing raw critic explained variance, PPO KL/clip, entropy, gradient norms,
+AMP skips, plugin diagnostics and epoch runtime. Hardware samples continue while
+jobs are active. Existing gradient-component probes cover only the first update's
+first chunk at the common action-query head, excluding expert/replay gradients;
+they must not be described as whole-model gradient conflict measurements.
+
+Resource plan: two homogeneous 4 x 2080 Ti servers run the same factorial with
+different fine-tuning seeds. Keep the third 4-card server, the 3-card server and
+the 2 x A6000 server available for follow-up once validation identifies a useful
+direction. A next three-card experiment can isolate LR 5e-6 / 1e-5 / 2e-5 from a
+common selected checkpoint, rather than mixing that sweep into the normalization
+comparison. A6000 can later test larger memory footprints; its speed is a separate
+hardware result. Existing 500-epoch jobs and their final test retain their GPUs
+until completion. Copied stale status files from another machine do not claim
+local devices; explicit wait prerequisites still apply.
+
+Validation includes normalizer output preservation, checkpoint and optimizer
+resume, CPU global moments, mask/padding handling, legacy behavior, fixed-edge
+rewards across Cus15/50/100/1000 synthetic instances, and real VRPTW100 CPU
+end-to-end smoke runs for all four arms. Large-N learning quality and an 80-epoch
+validation improvement remain experimental outcomes, not consequences of those
+invariance checks.

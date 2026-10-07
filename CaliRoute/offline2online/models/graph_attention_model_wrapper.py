@@ -390,7 +390,9 @@ class Critic(nn.Module):
         orthogonal_init(self.head, gain=0.01)
 
     def forward(self, backbone_output):
-        return self.head(self.trunk(backbone_output[1]))
+        value = self.head(self.trunk(backbone_output[1]))
+        normalizer = getattr(self, "_value_normalizer", None)
+        return normalizer.denormalize(value) if normalizer is not None else value
 
 
 class Agent(nn.Module):
