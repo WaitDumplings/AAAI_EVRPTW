@@ -109,7 +109,7 @@ offline:
   priority_mix_rho: 0.5
   priority_alpha: 0.7
   method: sl_ppo
-  init_checkpoint_path: results/checkpoints/Cus_100_CS_0/VRPTW100_UPDATES3456_S3009_E500_20261006_UPDATE_5/seed_3009/checkpoint_epoch_0300.pt
+  init_checkpoint_path: assets/reward_norm/vrptw100_update5_epoch0300.pt
   expert_solution_path: AAAI_Dataset/dataset/vrptw/train/Cus100/expert_solutions.csv
   expert_dataset_path: AAAI_Dataset/dataset/vrptw/train/Cus100
   policy_replay_enabled: true

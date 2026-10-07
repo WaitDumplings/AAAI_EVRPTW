@@ -50,6 +50,9 @@ python train.py --problem evrptw --customers 50 --charging-stations 10 \
 
 See [CaliRoute documentation](CaliRoute/README.md) for method settings, launch
 scripts, and ablations. Generated logs and checkpoints are excluded from Git.
+The reward/normalization experiment branch includes one fixed, compact
+initialization under `CaliRoute/assets/reward_norm/` so its launcher works on a
+fresh checkout with the local dataset; see the CaliRoute guide for details.
 
 ## Gurobi benchmarks
 

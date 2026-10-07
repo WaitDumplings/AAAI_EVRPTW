@@ -314,15 +314,45 @@ on those devices. One GPU is used per arm, including on A6000 hardware. Compare
 runtime within the same GPU model. `PYTHON_BIN` can select your Python environment;
 `--data-root` and `--init-checkpoint` override relocated data/weights.
 
-The default initialization must exist on every server:
+The experiment branch includes one fixed weights-only initialization (about
+19 MB), so `git pull --ff-only` also supplies the required model:
 
 ```text
-results/checkpoints/Cus_100_CS_0/VRPTW100_UPDATES3456_S3009_E500_20261006_UPDATE_5/seed_3009/checkpoint_epoch_0300.pt
+assets/reward_norm/vrptw100_update5_epoch0300.pt
+assets/reward_norm/vrptw100_update5_epoch0300.json
 ```
 
-Checkpoints and datasets are not in Git. They must be copied separately, with
-the same content hashes across machines. The launcher validates the saved epoch
-and freezes the checkpoint's reward and observation distance units.
+It contains the exact actor/critic tensors from update5 epoch300, the source
+seed, and model/environment units. Optimizer, sampler and replay state are
+excluded because this experiment initializes them afresh. This is an
+initialization artifact, not a resumable checkpoint. The adjacent JSON records
+both the original checkpoint SHA256 and the exported artifact/tensor SHA256.
+The launcher checks the bundled hash and epoch before preparing any experiment;
+all machines therefore start from the same weights. Generated training
+checkpoints and datasets remain excluded from Git.
+
+Place these four dataset/reference files on each server (or set `--data-root`):
+
+```text
+../AAAI_Dataset/dataset/vrptw/train/Cus100/instances.pkl
+../AAAI_Dataset/dataset/vrptw/train/Cus100/expert_solutions.csv
+../AAAI_Dataset/dataset/vrptw/val/Cus100/instances.pkl
+../AAAI_Dataset/dataset/vrptw/val/Cus100/gurobi_summary.csv
+```
+
+The launcher reports all missing required files together and records their
+hashes, including optional per-split metadata when present. No old `results/`
+directory is required. An explicit `--init-checkpoint` remains available for the
+original full checkpoint; compare `initialization_provenance.model_state_sha256`
+in manifests to establish identical weights across differently packaged files.
+
+To reproduce the export from the trusted original checkpoint:
+
+```bash
+python scripts/reward_norm_initialization.py \
+  --source /path/to/checkpoint_epoch_0300.pt \
+  --output /tmp/vrptw100_update5_epoch0300.pt
+```
 
 | Arm | gamma | Normalization |
 |---|---:|---|

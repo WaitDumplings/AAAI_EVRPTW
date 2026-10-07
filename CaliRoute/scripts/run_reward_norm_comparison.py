@@ -32,9 +32,10 @@ sys.path.insert(0, str(CODE_ROOT / 'scripts'))
 from run_cus100_finetune import refresh_progress
 from run_plugin_comparison import terminate_group
 from run_slppo_comparison import digest, now, read_csv, write_json
+from reward_norm_initialization import load_initialization
 
 SOURCE_RUN = 'VRPTW100_UPDATES3456_S3009_E500_20261006'
-DEFAULT_CHECKPOINT = Path('results/checkpoints/Cus_100_CS_0') / (SOURCE_RUN + '_UPDATE_5') / 'seed_3009/checkpoint_epoch_0300.pt'
+DEFAULT_CHECKPOINT = Path('assets/reward_norm/vrptw100_update5_epoch0300.pt')
 ARMS = {
     'baseline': (.99, 'legacy'),
     'reward': (1., 'legacy'),
@@ -460,25 +461,31 @@ def prepare(args):
         raise ValueError('run-id must be a fresh directory name')
     base = yaml.safe_load(args.base_config.resolve().read_text())
     checkpoint = args.init_checkpoint.resolve()
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f'Missing fixed initialization: {checkpoint}. Copy the same epoch-300 checkpoint to every machine or pass --init-checkpoint.')
-    import torch
-    payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
-    if int(payload.get('epoch', -1)) != args.expected_init_epoch:
-        raise ValueError(f'Checkpoint epoch must equal {args.expected_init_epoch}; got {payload.get("epoch")}')
+    bundled = checkpoint == (CODE_ROOT / DEFAULT_CHECKPOINT).resolve()
+    payload, initialization = load_initialization(checkpoint, args.expected_init_epoch,
+        metadata_path=checkpoint.with_suffix('.json') if bundled else None)
     units = checkpoint_units(payload)
     del payload
     data_root = args.data_root.resolve()
-    inputs = {}
+    required_inputs = {}
     for split, names in [('train', ('instances.pkl', 'expert_solutions.csv')), ('val', ('instances.pkl', 'gurobi_summary.csv'))]:
         for name in names:
             path = data_root / 'dataset/vrptw' / split / 'Cus100' / name
-            inputs[f'vrptw/{split}/Cus100/{name}'] = dict(path=str(path), sha256=digest(path))
+            required_inputs[f'vrptw/{split}/Cus100/{name}'] = path
+    missing = [str(path) for path in required_inputs.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError('Missing local VRPTW100 data/reference files (datasets are not in Git):\n  '
+            + '\n  '.join(missing) + '\nPlace AAAI_Dataset beside CaliRoute or pass --data-root /path/to/AAAI_Dataset.')
+    for split in ('train', 'val'):
+        path = data_root / 'dataset/vrptw' / split / 'Cus100/metadata.json'
+        if path.is_file():
+            required_inputs[f'vrptw/{split}/Cus100/metadata.json'] = path
+    inputs = {key: dict(path=str(path), sha256=digest(path)) for key, path in required_inputs.items()}
     experiment = CODE_ROOT / 'results/optimization' / args.run_id
     experiment.mkdir(parents=True, exist_ok=False)
     shared = experiment / f'inputs/init_epoch_{args.expected_init_epoch:04d}.pt'
     shared.parent.mkdir()
-    before = digest(checkpoint)
+    before = initialization['sha256']
     shutil.copy2(checkpoint, shared)
     if digest(checkpoint) != before or digest(shared) != before:
         raise ValueError('Initialization changed while copying; use a fixed archive')
@@ -513,6 +520,7 @@ def prepare(args):
         prerequisites.append(str(previous.resolve()))
     manifest = dict(created_at_utc=now(), code_root=str(frozen), source=source,
         init_checkpoint=str(shared), init_checkpoint_sha256=before, source_init_checkpoint=str(checkpoint),
+        initialization_provenance=initialization,
         source_init_epoch=args.expected_init_epoch, frozen_units=units, inputs=inputs, arms=specs, gpus=gpus,
         hardware_at_prepare=list(hardware_at_prepare.values()) if hardware_at_prepare is not None else None,
         wait_for_experiments=prerequisites, idle_checks=args.idle_checks, poll_seconds=args.poll_seconds,
@@ -542,7 +550,8 @@ def prepare(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-config', type=Path, default=CODE_ROOT / 'configs/experiments/reward_norm_vrptw100.yaml')
-    parser.add_argument('--init-checkpoint', type=Path, default=CODE_ROOT / DEFAULT_CHECKPOINT)
+    parser.add_argument('--init-checkpoint', type=Path, default=CODE_ROOT / DEFAULT_CHECKPOINT,
+        help='Defaults to the shared epoch-300 weights included in this experiment branch')
     parser.add_argument('--expected-init-epoch', type=int, default=300)
     parser.add_argument('--data-root', type=Path, default=CODE_ROOT.parent / 'AAAI_Dataset')
     parser.add_argument('--run-id')

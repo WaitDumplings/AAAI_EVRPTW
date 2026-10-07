@@ -486,6 +486,13 @@ The fixed starting point is update5 epoch300 from the VRPTW100 sweep, shared by
 all four arms and both fine-tuning seeds (3009, 3010). Seeds do not represent
 independently pretrained models.
 
+The experiment branch distributes the exact source weights as a compact
+`assets/reward_norm/vrptw100_update5_epoch0300.pt` initialization. Its manifest
+records the source archive hash separately from the compact artifact and tensor
+hashes. Optimizer/sampler/replay state is excluded; this screen creates those
+states afresh. New servers only need Git plus the local train/val dataset and
+reference files, not a copy of the old sweep's results directory.
+
 The distance reward is `-edge_km / d0`. Freeze `d0` to the source checkpoint's
 training unit (43.638668060302734 km here); do not refit it separately for each
 customer count. Observation distance scaling is now independent via
