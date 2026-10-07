@@ -58,7 +58,7 @@ def test_resume_and_partial_evaluation_do_not_leak_from_source(tmp_path):
         init_checkpoint=tmp_path / 'shared.pt', data_root=tmp_path / 'data', seed=3009, units=UNITS)
     assert not any(k.startswith('resume_') for section in ('training', 'offline') for k in cfg[section])
     assert 'eval_limit' not in cfg['evaluation'] and 'eval_num_batches' not in cfg['evaluation']
-    assert cfg['evaluation']['eval_interval'] == 20
+    assert cfg['evaluation']['eval_interval'] == 50
     assert cfg['evaluation']['eval_before_training'] is True
     assert cfg['experiment_protocol']['test_enabled'] is False
     assert all('/data/Maojie' not in str(v) for section in ('data', 'offline', 'evaluation') for v in cfg[section].values())
@@ -287,3 +287,38 @@ def test_extension_cancellation_during_manifest_verification_prevents_launch(tmp
     status=json.loads((tmp_path/'status.json').read_text())
     assert status['state']=='interrupted'
     assert status['arms']['baseline']['state']=='interrupted'
+
+
+@pytest.mark.parametrize('epochs,interval,expected', [
+    (80, 50, [0, 50, 80]), (80, 20, [0, 20, 40, 60, 80]),
+    (301, 50, [0, 50, 100, 150, 200, 250, 300, 301]), (3, 50, [0, 3]),
+])
+def test_periodic_and_final_validation_schedule(tmp_path, epochs, interval, expected):
+    from offline2online.checkpoint_schedule import epoch_checkpoint_plan
+    cfg = launch.build_arm(source_config(), arm='baseline', output=tmp_path, run_name='probe',
+        init_checkpoint=tmp_path/'shared.pt', data_root=tmp_path/'data', seed=3009, units=UNITS,
+        epochs=epochs, eval_interval=interval)
+    assert cfg['evaluation']['eval_interval'] == interval
+    assert cfg['experiment_protocol']['eval_interval'] == interval
+    scheduled = [0] + [e for e in range(1, epochs + 1) if epoch_checkpoint_plan(e, epochs,
+        eval_interval=interval, checkpoint_interval=50).evaluate]
+    assert launch.validation_epochs(epochs, interval) == scheduled == expected
+
+
+@pytest.mark.parametrize('key,value', [('epochs', 0), ('epochs', -1), ('epochs', True),
+    ('epochs', 80.5), ('eval_interval', 0), ('eval_interval', -20), ('eval_interval', 2.5),
+    ('eval_interval', True)])
+def test_invalid_training_or_evaluation_budget(tmp_path, key, value):
+    with pytest.raises(ValueError, match='positive integer'):
+        launch.build_arm(source_config(), arm='baseline', output=tmp_path, run_name='probe',
+            init_checkpoint=tmp_path/'shared.pt', data_root=tmp_path/'data', seed=3009, units=UNITS,
+            **{key: value})
+
+
+@pytest.mark.parametrize('options,expected', [([], 50), (['--eval-interval', '20'], 20)])
+def test_cli_propagates_evaluation_interval(monkeypatch, options, expected):
+    seen = []
+    monkeypatch.setattr(sys, 'argv', ['run_reward_norm_comparison.py', '--prepare-only', *options])
+    monkeypatch.setattr(launch, 'prepare', lambda args: seen.append(args.eval_interval))
+    launch.main()
+    assert seen == [expected]

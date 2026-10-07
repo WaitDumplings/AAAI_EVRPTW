@@ -33,6 +33,7 @@ from run_cus100_finetune import refresh_progress
 from run_plugin_comparison import terminate_group
 from run_slppo_comparison import digest, now, read_csv, write_json
 from reward_norm_initialization import load_initialization
+from reward_norm_extension import positive_integer, validation_epochs
 
 SOURCE_RUN = 'VRPTW100_UPDATES3456_S3009_E500_20261006'
 DEFAULT_CHECKPOINT = Path('assets/reward_norm/vrptw100_update5_epoch0300.pt')
@@ -64,13 +65,13 @@ def checkpoint_units(payload):
     return dict(reward_distance_scale_km=float(reward), observation_distance_scale_km=float(observation))
 
 
-def build_arm(base, *, arm, output, run_name, init_checkpoint, data_root, seed, units, epochs=80, chunk_size=18):
+def build_arm(base, *, arm, output, run_name, init_checkpoint, data_root, seed, units, epochs=80, chunk_size=18, eval_interval=50):
     if arm not in ARMS:
         raise ValueError(f'Unknown arm: {arm}')
     if base['data']['problem_type'] != 'vrptw' or int(base['data']['num_customers']) != 100:
         raise ValueError('This comparison requires a VRPTW100 source configuration')
-    if epochs < 20 or epochs % 20:
-        raise ValueError('epochs must be a positive multiple of 20, at least 20')
+    positive_integer(epochs, 'epochs')
+    positive_integer(eval_interval, 'eval_interval')
     if not 1 <= chunk_size <= 201:
         raise ValueError('chunk_size must be between 1 and 201')
     cfg = copy.deepcopy(base)
@@ -101,14 +102,14 @@ def build_arm(base, *, arm, output, run_name, init_checkpoint, data_root, seed, 
         expert_dataset_path=str(train_path), expert_solution_path=str(train_path / 'expert_solutions.csv'),
         sl_coef=.35, use_priority_sampler=False)
     cfg['evaluation'].update(eval_path=str(val_path), gurobi_summary_path=str(val_path / 'gurobi_summary.csv'),
-        eval_interval=20, eval_before_training=True, eval_n_traj=50, eval_batch_size=32,
+        eval_interval=eval_interval, eval_before_training=True, eval_n_traj=50, eval_batch_size=32,
         eval_max_steps=201, eval_decode_mode='sample', eval_save_routes=True,
         eval_seed=17000000 + seed, eval_output_dir=str(output / 'evaluations'))
     # A partial validation limit inherited from another launch must not survive.
     for key in ('eval_limit', 'eval_num_batches'):
         cfg['evaluation'].pop(key, None)
     cfg['experiment_protocol'] = dict(phase='reward_normalization_2x2', arm=arm,
-        seed=seed, epochs=epochs, world_size=1, global_instances_per_rollout=64,
+        seed=seed, epochs=epochs, eval_interval=eval_interval, world_size=1, global_instances_per_rollout=64,
         global_trajectories_per_rollout=3200, global_instances_per_optimizer_step=16,
         ppo_update_epochs=5, attempted_optimizer_steps_per_epoch=20,
         initialization='shared mature checkpoint weights; fresh optimizer and replay',
@@ -126,7 +127,7 @@ def build_preflight(cfg, output):
         monitor_interval=1, monitor_output_dir=str(output / 'monitoring'))
     result['evaluation'].update(eval_before_training=False, eval_interval=2, eval_n_traj=4,
         eval_batch_size=4, eval_limit=4, eval_output_dir=str(output / 'evaluations'))
-    result['experiment_protocol'].update(phase='gpu_preflight', epochs=2,
+    result['experiment_protocol'].update(phase='gpu_preflight', epochs=2, eval_interval=2,
         global_instances_per_rollout=4, global_trajectories_per_rollout=16,
         global_instances_per_optimizer_step=1, validation_instances=4,
         comparison_scope='Pipeline and GPU smoke check only; excluded from formal comparison')
@@ -460,6 +461,8 @@ def prepare(args):
         raise ValueError('arms must be distinct names from: '+','.join(ARMS))
     gpus = parse_gpus(args.gpus)
     hardware_at_prepare = probe_requested_gpus(gpus)
+    positive_integer(args.epochs, 'epochs')
+    positive_integer(args.eval_interval, 'eval_interval')
     if not 1 <= args.poll_seconds <= 60 or not 2 <= args.idle_checks <= 10:
         raise ValueError('poll_seconds must be 1..60 and idle_checks 2..10')
     if Path(args.run_id).name != args.run_id or args.run_id in {'.', '..'}:
@@ -502,10 +505,11 @@ def prepare(args):
         output.mkdir()
         name = args.run_id + '_' + arm.upper()
         cfg = build_arm(base, arm=arm, output=output, run_name=name, init_checkpoint=shared,
-            data_root=data_root, seed=args.seed, units=units, epochs=args.epochs, chunk_size=args.chunk_size)
+            data_root=data_root, seed=args.seed, units=units, epochs=args.epochs, chunk_size=args.chunk_size, eval_interval=args.eval_interval)
         path = output / 'config.yaml'
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
         specs[arm] = dict(config=str(path), config_sha256=digest(path), output_dir=str(output), epochs=args.epochs,
+            required_validation_epochs=validation_epochs(args.epochs, args.eval_interval),
             log_dir=str(CODE_ROOT / 'results/logs/Cus_100_CS_0' / name / f'seed_{args.seed}'),
             checkpoint_dir=str(CODE_ROOT / 'results/checkpoints/Cus_100_CS_0' / name / f'seed_{args.seed}'),
             command=[sys.executable, '-B', '-u', '-m', 'offline2online.train', '--config', str(path), '--seed', str(args.seed), '--device', 'cuda:0'])
@@ -535,7 +539,7 @@ def prepare(args):
             lr_schedule='constant', entropy_coef=.002, sl_coef=.35,
             initialization='same fixed epoch checkpoint weights, fresh optimizer/replay; preflight weights discarded',
             gpu_preflight=dict(epochs=2, instances_per_rollout=4, n_traj=4, chunk_size=4, validation_instances=4),
-            validation_instances=1000, eval_interval=20, eval_n_traj=50, eval_seed=17000000+args.seed,
+            validation_instances=1000, eval_interval=args.eval_interval, eval_n_traj=50, eval_seed=17000000+args.seed,
             eval_batch_size=32, test_enabled=False, objective='raw mean distance km among feasible solutions; report coverage separately',
             hardware_comparison='one GPU model per block; do not compare A6000 and 2080Ti timing as an algorithm effect',
             sampling='uniform shuffle_cycle, no priority sampler; common new fine-tuning protocol',
@@ -562,6 +566,8 @@ def main():
     parser.add_argument('--run-id')
     parser.add_argument('--seed', type=int, default=3009)
     parser.add_argument('--epochs', type=int, default=80)
+    parser.add_argument('--eval-interval', type=int, default=50,
+        help='Validate every N epochs, plus epoch 0 and the final epoch (default: 50)')
     parser.add_argument('--chunk-size', type=int, default=18)
     parser.add_argument('--arms', default=','.join(ARMS))
     parser.add_argument('--gpus', default='0,1,2,3')

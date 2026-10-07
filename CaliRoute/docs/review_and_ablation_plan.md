@@ -561,3 +561,12 @@ rewards across Cus15/50/100/1000 synthetic instances, and real VRPTW100 CPU
 end-to-end smoke runs for all four arms. Large-N learning quality and an 80-epoch
 validation improvement remain experimental outcomes, not consequences of those
 invariance checks.
+
+
+Evaluation cadence update: new reward/norm launches default to validation every
+50 epochs, with epoch-zero and final-epoch evaluation retained. The recorded
+seed3009 E80/E300 experiment keeps its frozen 20-epoch schedule. Continuations
+inherit their source interval and preserve intermediate source-final validation
+points. Raw validation curves can be exported with
+`scripts/plot_reward_norm_eval.py`; they are validation observations, not test
+results or independent pretraining-seed evidence.

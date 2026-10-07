@@ -85,7 +85,7 @@ pbrs:
   use_feasible_ratio_pbrs: false
   use_terminal_heuristic: false
 evaluation:
-  eval_interval: 20
+  eval_interval: 50
   eval_path: AAAI_Dataset/dataset/vrptw/val/Cus100
   eval_n_traj: 50
   eval_decode_mode: sample

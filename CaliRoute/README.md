@@ -365,8 +365,11 @@ All arms fine-tune VRPTW100 for 80 additional epochs: 64 instances x 50
 trajectories per rollout, 5 PPO passes, 4 minibatches, LR 1e-5, entropy 0.002,
 and SL coefficient 0.35. They use fresh optimizers/replay and uniform shuffled
 training instances. These common fine-tuning settings differ from the earlier
-500-epoch sweep. Validation uses all 1,000 instances, best-of-50, at epoch 0 and
-every 20 epochs. Test is reserved for final selection and is not run here.
+500-epoch sweep. New runs validate all 1,000 instances, best-of-50, at epoch 0,
+every 50 epochs, and the final epoch (even if it is not a multiple of 50).
+Use `--eval-interval 20` to reproduce the earlier evaluation cadence. Existing
+frozen runs retain their recorded interval. Test is reserved for final selection
+and is not run here.
 
 To extend an already running comparison to **300 total fine-tuning epochs**:
 
@@ -388,12 +391,24 @@ preserved; only orchestration code changes in the continuation snapshot.
 
 Optimizer moments, AMP scaler, RNG, sampler cursor, replay, actor RMS, PopArt and
 historical best are restored. The same seed, batches, five PPO passes, constant
-LR/entropy, and full validation every 20 epochs continue; no second preflight or
-epoch-zero evaluation is run. This extension supports completed single-GPU
-reward/norm source horizons divisible by 20 with unchanged constant schedules.
+LR/entropy, and the source validation interval continue; no second preflight or
+epoch-zero evaluation is run. Final-epoch validation is always retained, including
+nonmultiple source boundaries. This extension supports completed single-GPU
+reward/norm source horizons with unchanged constant schedules.
 A failed/interrupted source stops the extension queue with an error, rather than
 silently restarting training from weights. Stop the extension supervisor if you
 want to cancel the continuation; the source run is not stopped by cancellation.
+
+To view the four validation curves at any point during training:
+
+```bash
+python scripts/plot_reward_norm_eval.py results/optimization/<run-directory>
+```
+
+This writes `plots/validation_curves.png`, `.svg`, `.pdf`, raw `.csv`, and a
+`.json` with snapshot time and source hashes. Curves show raw completed validation
+points without smoothing or extrapolation; the latest common evaluation epoch
+is marked to distinguish comparisons at the same epoch from partial newer data.
 
 The printed experiment directory contains `status.json`, `comparison.json`,
 `manifest.json`, `hardware.jsonl`, each arm's `preflight/` and `monitoring/`, and

@@ -26,7 +26,8 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'scripts'))
 from run_reward_norm_comparison import verify_manifest, supervise
 from run_slppo_comparison import digest, now, write_json
-from reward_norm_extension import validate_extension_checkpoint, import_single_gpu_history
+from reward_norm_extension import (validate_extension_checkpoint, import_single_gpu_history,
+    positive_integer, validation_epochs, required_validation_epochs)
 
 
 def select_source(experiment, seed):
@@ -49,14 +50,17 @@ def select_source(experiment, seed):
 
 
 def validate_plan(manifest, target):
-    old_target = int(manifest['protocol']['epochs'])
-    if target <= old_target or target % 20:
-        raise ValueError('Total epochs must exceed the source budget and be divisible by 20')
+    old_target = positive_integer(manifest['protocol']['epochs'], 'source epochs')
+    if positive_integer(target, 'total epochs') <= old_target:
+        raise ValueError('Total epochs must exceed the source budget')
     if int(manifest['protocol']['world_size_per_arm']) != 1:
         raise ValueError('This extension supports the single-GPU-per-arm reward/norm protocol')
     for spec in manifest['arms'].values():
         cfg = yaml.safe_load(Path(spec['config']).read_text())
         train = cfg['training']
+        interval = positive_integer(cfg['evaluation']['eval_interval'], 'eval_interval')
+        if manifest['protocol'].get('eval_interval', interval) != interval:
+            raise ValueError('Source arm evaluation intervals differ from the protocol')
         if int(spec['epochs']) != old_target or int(train['epochs']) != old_target:
             raise ValueError('Source arm budgets differ')
         if train.get('lr_schedule') != 'constant' or train.get('lr_warmup_epochs', 0) != 0:
@@ -162,13 +166,16 @@ def prepare_continuation(experiment, plan, old):
             monitor_output_dir=str(output / 'monitoring'))
         cfg['offline'].update(resume_checkpoint_path=str(checkpoint), resume_checkpoint_strict=True)
         cfg['evaluation']['eval_output_dir'] = str(output / 'evaluations')
+        inherited_evals = required_validation_epochs(old_spec, epoch)
         cfg['experiment_protocol'].update(epochs=plan['target_epochs'], continuation_from_epoch=epoch,
+            inherited_validation_epochs=inherited_evals,
             initialization='full-state continuation of the original shared-initialization comparison')
         config_path = output / 'config.yaml'
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
         root = Path(plan['output_root'])
         spec = dict(config=str(config_path), config_sha256=digest(config_path), output_dir=str(output),
             epochs=plan['target_epochs'], restored_through_epoch=epoch, validation_instances=1000,
+            required_validation_epochs=validation_epochs(plan['target_epochs'], cfg['evaluation']['eval_interval'], inherited_evals),
             log_dir=str(root / 'results/logs/Cus_100_CS_0' / run_name / f'seed_{plan["seed"]}'),
             checkpoint_dir=str(root / 'results/checkpoints/Cus_100_CS_0' / run_name / f'seed_{plan["seed"]}'),
             resume_checkpoint=str(checkpoint), resume_checkpoint_sha256=before,

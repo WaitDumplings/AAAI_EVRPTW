@@ -17,13 +17,14 @@ def write(path, value):
 
 def test_source_budget_extension_rejects_schedule_changes_and_shorter_horizon(tmp_path, monkeypatch):
     cfg = dict(training=dict(epochs=80, lr_schedule='constant', lr_warmup_epochs=0,
-        entropy_initial_coef=.002, entropy_final_coef=.002))
+        entropy_initial_coef=.002, entropy_final_coef=.002), evaluation=dict(eval_interval=50))
     path = tmp_path/'config.yaml'
     path.write_text(yaml.safe_dump(cfg))
     manifest = dict(protocol=dict(epochs=80, world_size_per_arm=1), arms={'baseline':dict(epochs=80,config=str(path))})
     monkeypatch.setattr(extension,'verify_manifest', lambda _:None)
     extension.validate_plan(manifest,300)
-    for epochs in (40,80,301):
+    extension.validate_plan(manifest,301)
+    for epochs in (40,80,0,300.5,True):
         with pytest.raises(ValueError):extension.validate_plan(manifest,epochs)
     cfg['training']['entropy_final_coef']=.001
     path.write_text(yaml.safe_dump(cfg))
@@ -104,12 +105,14 @@ def test_source_manifest_drift_rejected_before_resume(tmp_path,monkeypatch):
 
 
 @pytest.mark.parametrize('arm',['baseline','reward','normalization','combined'])
-def test_prepare_continuation_imports_full_state_and_preserves_training_protocol(tmp_path,arm):
+@pytest.mark.parametrize('interval', [20, 50])
+def test_prepare_continuation_imports_full_state_and_preserves_training_protocol(tmp_path,arm,interval):
     import copy
     import torch
     from test_reward_norm_extension import fixture_checkpoint, fixture_history
     payload,cfg=fixture_checkpoint(tmp_path,arm)
     cfg['training']['epochs']=40
+    cfg['evaluation']['eval_interval']=interval
     payload['config']=copy.deepcopy(cfg)
     payload['epoch']=40
     payload['training_resume_state'].update(completed_epoch=40,next_training_epoch=41)
@@ -117,6 +120,11 @@ def test_prepare_continuation_imports_full_state_and_preserves_training_protocol
         for name in ('actor','critic'):
             payload['reward_normalization_state'][name]['update_count']=torch.tensor(40)
     source_spec,_=fixture_history(tmp_path)
+    expected_source = [0,20,40] if interval == 20 else [0,40]
+    if interval == 50:
+        logs = Path(source_spec['log_dir'])
+        (logs/'eval_log.csv').write_text('epoch,eval_status,eval_num_instances\n0,ok,1000\n40,ok,1000\n')
+        (Path(source_spec['checkpoint_dir'])/'best_checkpoint.json').write_text('{"epoch":40}')
     config_path=tmp_path/'old_config.yaml'
     config_path.write_text(yaml.safe_dump(cfg))
     source_spec.update(config=str(config_path),config_sha256=extension.digest(config_path),epochs=40)
@@ -131,9 +139,12 @@ def test_prepare_continuation_imports_full_state_and_preserves_training_protocol
     result=extension.prepare_continuation(experiment,plan,old)
     spec=result['arms'][arm]
     assert spec['restored_through_epoch']==40 and spec['epochs']==300
+    assert spec['required_validation_epochs']==sorted(set(expected_source + list(range(interval,301,interval))))
     assert 'preflight' not in spec
     resumed=yaml.safe_load(Path(spec['config']).read_text())
     assert resumed['training']['epochs']==300
+    assert resumed['evaluation']['eval_interval']==interval
+    assert resumed['experiment_protocol']['inherited_validation_epochs']==expected_source
     for key in ('gamma','learning_rate','ppo_update_epochs','n_traj','reward_norm_mode'):
         assert resumed['training'][key]==cfg['training'][key]
     assert resumed['offline']['init_checkpoint_path']==cfg['offline']['init_checkpoint_path']

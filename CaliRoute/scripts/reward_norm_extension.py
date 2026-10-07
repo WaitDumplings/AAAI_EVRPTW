@@ -13,6 +13,48 @@ import math
 from pathlib import Path
 import shutil
 
+import yaml
+
+
+def positive_integer(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f'{name} must be a positive integer')
+    return value
+
+
+def validation_epochs(epochs, eval_interval, inherited=()):
+    """Initial, periodic, terminal and already-committed resume evaluations."""
+    positive_integer(epochs, 'epochs')
+    positive_integer(eval_interval, 'eval_interval')
+    inherited = list(inherited)
+    if any(isinstance(e, bool) or not isinstance(e, int) or not 0 <= e <= epochs for e in inherited):
+        raise ValueError('Inherited validation epochs must lie within the training horizon')
+    return sorted({0, epochs, *range(eval_interval, epochs + 1, eval_interval), *inherited})
+
+
+def required_validation_epochs(spec, epoch):
+    """Read the frozen schedule, retaining nonperiodic predecessor end points.
+
+    Older manifests did not store an explicit schedule; their configuration
+    still records the interval and (for extensions) the predecessor horizon.
+    """
+    cfg = yaml.safe_load(Path(spec['config']).read_text())
+    interval = positive_integer(cfg['evaluation']['eval_interval'], 'eval_interval')
+    protocol = cfg.get('experiment_protocol', {})
+    inherited = list(protocol.get('inherited_validation_epochs', []))
+    boundary = protocol.get('continuation_from_epoch', spec.get('restored_through_epoch'))
+    if boundary is not None:
+        inherited.append(positive_integer(boundary, 'continuation_from_epoch'))
+    expected = validation_epochs(epoch, interval, inherited)
+    declared = spec.get('required_validation_epochs')
+    if declared is not None:
+        if (not isinstance(declared, list)
+                or any(isinstance(e, bool) or not isinstance(e, int) or not 0 <= e <= epoch for e in declared)
+                or declared != sorted(set(declared)) or not set(expected).issubset(declared)):
+            raise ValueError('Declared validation schedule is incomplete or invalid')
+        return declared
+    return expected
+
 
 def _canonical_sections(cfg):
     result = copy.deepcopy(cfg)
@@ -40,12 +82,13 @@ def validate_extension_checkpoint(checkpoint, cfg, target_epochs, seed):
     import torch
     from offline2online.reward_normalization import MODE, signature
 
-    epoch = int(checkpoint.get('epoch', -1))
-    horizon = int(cfg.get('training', {}).get('epochs', -1))
-    if epoch != horizon or epoch < 20 or epoch % 20:
-        raise ValueError('Extension requires a completed previous horizon divisible by 20')
-    if isinstance(target_epochs, bool) or int(target_epochs) != target_epochs or target_epochs <= epoch or target_epochs % 20:
-        raise ValueError('Target epochs must be a larger multiple of 20')
+    epoch = positive_integer(checkpoint.get('epoch', -1), 'checkpoint epoch')
+    horizon = positive_integer(cfg.get('training', {}).get('epochs', -1), 'source epochs')
+    positive_integer(cfg.get('evaluation', {}).get('eval_interval'), 'eval_interval')
+    if epoch != horizon:
+        raise ValueError('Extension requires a completed previous horizon')
+    if positive_integer(target_epochs, 'target epochs') <= epoch:
+        raise ValueError('Target epochs must exceed the completed previous horizon')
     if int(checkpoint.get('seed', -1)) != int(seed):
         raise ValueError('Extension seed changed')
     original, saved = _canonical_sections(cfg), _canonical_sections(checkpoint.get('config', {}))
@@ -135,6 +178,7 @@ def import_single_gpu_history(old_spec, new_spec, epoch):
     old_checkpoints, new_checkpoints = Path(old_spec['checkpoint_dir']), Path(new_spec['checkpoint_dir'])
     if new_logs.exists() or new_checkpoints.exists():
         raise ValueError('Resume destination logs/checkpoints already exist')
+    eval_epochs = required_validation_epochs(old_spec, epoch)
     planned = []
     for filename in ('train_log.csv', 'eval_log.csv'):
         source = old_logs / filename
@@ -143,13 +187,13 @@ def import_single_gpu_history(old_spec, new_spec, epoch):
             fields = reader.fieldnames
             rows = [row for row in reader if int(row['epoch']) <= epoch]
         epochs = [int(row['epoch']) for row in rows]
-        expected = list(range(1, epoch + 1)) if filename == 'train_log.csv' else [0, *range(20, epoch + 1, 20)]
+        expected = list(range(1, epoch + 1)) if filename == 'train_log.csv' else eval_epochs
         if not fields or epochs != expected:
             raise ValueError(f'Missing or duplicate committed epoch history: {source}')
         if filename == 'eval_log.csv' and any(row.get('eval_status') != 'ok' or int(row.get('eval_num_instances', 0)) != 1000 for row in rows):
             raise ValueError('Every imported validation must be successful on all 1000 instances')
         planned.append((source, new_logs / filename, ('csv', fields, rows)))
-    for e in [0, *range(20, epoch + 1, 20)]:
+    for e in eval_epochs:
         source = old_output / 'evaluations' / f'epoch_{e:04d}.jsonl'
         if not source.is_file():
             raise ValueError(f'Missing committed validation routes: {source}')
@@ -162,7 +206,7 @@ def import_single_gpu_history(old_spec, new_spec, epoch):
     planned.append((source, new_output / 'monitoring' / source.name, ('jsonl', rows)))
     meta_source = old_checkpoints / 'best_checkpoint.json'
     meta = json.loads(meta_source.read_text())
-    if not 0 < int(meta['epoch']) <= epoch or int(meta['epoch']) % 20:
+    if int(meta['epoch']) <= 0 or int(meta['epoch']) not in eval_epochs:
         raise ValueError('Historical best lies outside the committed validation history')
     for filename in ('best_checkpoint.json', 'checkpoint_best.pt'):
         source = old_checkpoints / filename

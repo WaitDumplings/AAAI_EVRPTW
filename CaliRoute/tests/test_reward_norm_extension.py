@@ -10,7 +10,8 @@ import torch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from reward_norm_extension import validate_extension_checkpoint, import_single_gpu_history
+from reward_norm_extension import (validate_extension_checkpoint, import_single_gpu_history,
+    required_validation_epochs)
 from run_reward_norm_comparison import build_arm
 from offline2online.reward_normalization import signature
 
@@ -58,7 +59,7 @@ def test_runtime_solution_aliases_are_allowed(tmp_path):
         validate_extension_checkpoint(checkpoint,cfg,300,3009)
 
 
-@pytest.mark.parametrize('target',[80,60,301,300.5,True])
+@pytest.mark.parametrize('target',[80,60,0,-1,300.5,True])
 def test_invalid_new_horizon_rejected(tmp_path,target):
     checkpoint,cfg=fixture_checkpoint(tmp_path)
     with pytest.raises(ValueError):
@@ -147,6 +148,9 @@ def fixture_history(tmp_path):
     (output/'monitoring/monitor_rank_0.jsonl').write_text(''.join(json.dumps({'epoch':e,'rank':0,'reward_normalization':{'updates':e}})+'\n' for e in range(1,42)))
     (checkpoints/'best_checkpoint.json').write_text(json.dumps({'epoch':20,'eval_avg_objective_distance_km':250.}))
     (checkpoints/'checkpoint_best.pt').write_bytes(b'preserve exact bytes')
+    config = tmp_path/'old_config.yaml'
+    config.write_text(yaml.safe_dump(dict(training=dict(epochs=40), evaluation=dict(eval_interval=20))))
+    old['config'] = str(config)
     return old,new
 
 
@@ -167,7 +171,7 @@ def test_imports_single_rank_complete_history_and_historical_best(tmp_path):
         import_single_gpu_history(old,new,40)
 
 
-@pytest.mark.parametrize('fault',['missing_train','duplicate_train','missing_eval','partial_eval','failed_eval','missing_routes','newer_best','missing_best','duplicate_monitor','existing_routes'])
+@pytest.mark.parametrize('fault',['missing_train','duplicate_train','missing_eval','partial_eval','failed_eval','missing_routes','newer_best','missing_best','initial_best','duplicate_monitor','existing_routes'])
 def test_import_rejects_incomplete_or_overwritten_history_before_copying(tmp_path,fault):
     old,new=fixture_history(tmp_path)
     logs=Path(old['log_dir']); output=Path(old['output_dir']); checkpoints=Path(old['checkpoint_dir'])
@@ -184,6 +188,7 @@ def test_import_rejects_incomplete_or_overwritten_history_before_copying(tmp_pat
     elif fault=='missing_routes': (output/'evaluations/epoch_0040.jsonl').unlink()
     elif fault=='newer_best': (checkpoints/'best_checkpoint.json').write_text('{"epoch":60}')
     elif fault=='missing_best': (checkpoints/'checkpoint_best.pt').unlink()
+    elif fault=='initial_best': (checkpoints/'best_checkpoint.json').write_text('{"epoch":0}')
     elif fault=='duplicate_monitor':
         p=output/'monitoring/monitor_rank_0.jsonl';p.write_text(p.read_text()+'{"epoch":1,"rank":0}\n')
     else:
@@ -192,3 +197,65 @@ def test_import_rejects_incomplete_or_overwritten_history_before_copying(tmp_pat
         import_single_gpu_history(old,new,40)
     assert not Path(new['log_dir']).exists()
     assert not Path(new['checkpoint_dir']).exists()
+
+
+@pytest.mark.parametrize('horizon,interval,target', [(80, 50, 301), (37, 50, 81), (80, 20, 300)])
+def test_completed_nonmultiple_horizon_can_resume(tmp_path, horizon, interval, target):
+    checkpoint, cfg = fixture_checkpoint(tmp_path)
+    cfg['training']['epochs'] = horizon
+    cfg['evaluation']['eval_interval'] = interval
+    checkpoint['config'] = copy.deepcopy(cfg)
+    checkpoint['epoch'] = horizon
+    checkpoint['training_resume_state'].update(completed_epoch=horizon, next_training_epoch=horizon + 1)
+    assert validate_extension_checkpoint(checkpoint, cfg, target, 3009) == horizon
+
+
+@pytest.mark.parametrize('interval', [0, -1, True, 2.5])
+def test_resume_rejects_invalid_eval_interval(tmp_path, interval):
+    checkpoint, cfg = fixture_checkpoint(tmp_path)
+    cfg['evaluation']['eval_interval'] = checkpoint['config']['evaluation']['eval_interval'] = interval
+    with pytest.raises(ValueError, match='eval_interval'):
+        validate_extension_checkpoint(checkpoint, cfg, 300, 3009)
+
+
+@pytest.mark.parametrize('horizon,interval,inherited,expected', [
+    (80, 50, [], [0, 50, 80]),
+    (301, 50, [0, 50, 80], [0, 50, 80, 100, 150, 200, 250, 300, 301]),
+    (301, 20, [0, 20, 40, 60, 80], [0, *range(20, 301, 20), 301]),
+])
+def test_import_preserves_terminal_and_inherited_evaluations(tmp_path, horizon, interval, inherited, expected):
+    old, new = fixture_history(tmp_path)
+    cfg = dict(training=dict(epochs=horizon), evaluation=dict(eval_interval=interval),
+        experiment_protocol=dict(inherited_validation_epochs=inherited))
+    if inherited:
+        cfg['experiment_protocol']['continuation_from_epoch'] = inherited[-1]
+    Path(old['config']).write_text(yaml.safe_dump(cfg))
+    logs, output, checkpoints = (Path(old[k]) for k in ('log_dir', 'output_dir', 'checkpoint_dir'))
+    (logs/'train_log.csv').write_text('epoch,loss\n' + ''.join(f'{e},0\n' for e in range(1, horizon + 1)))
+    (logs/'eval_log.csv').write_text('epoch,eval_status,eval_num_instances\n' +
+        ''.join(f'{e},ok,1000\n' for e in expected))
+    for e in expected:
+        (output/'evaluations'/f'epoch_{e:04d}.jsonl').write_text(json.dumps({'instance_id': 1, 'epoch': e})+'\n')
+    (checkpoints/'best_checkpoint.json').write_text(json.dumps({'epoch': horizon}))
+    assert required_validation_epochs(old, horizon) == expected
+    old['required_validation_epochs'] = expected
+    assert required_validation_epochs(old, horizon) == expected
+    import_single_gpu_history(old, new, horizon)
+    with (Path(new['log_dir'])/'eval_log.csv').open() as handle:
+        assert [int(row['epoch']) for row in csv.DictReader(handle)] == expected
+    assert json.loads((Path(new['checkpoint_dir'])/'best_checkpoint.json').read_text())['epoch'] == horizon
+
+
+def test_legacy_extension_configuration_retains_nonperiodic_source_final(tmp_path):
+    old, _ = fixture_history(tmp_path)
+    Path(old['config']).write_text(yaml.safe_dump(dict(training=dict(epochs=300),
+        evaluation=dict(eval_interval=50), experiment_protocol=dict(continuation_from_epoch=80))))
+    assert required_validation_epochs(old, 300) == [0, 50, 80, 100, 150, 200, 250, 300]
+
+
+def test_declared_schedule_cannot_drop_required_evaluations(tmp_path):
+    old, new = fixture_history(tmp_path)
+    old['required_validation_epochs'] = [0, 40]
+    with pytest.raises(ValueError, match='schedule'):
+        import_single_gpu_history(old, new, 40)
+    assert not Path(new['log_dir']).exists()
