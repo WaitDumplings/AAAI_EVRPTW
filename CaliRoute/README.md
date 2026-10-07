@@ -555,3 +555,22 @@ python scripts/plot_reward_norm_eval.py results/optimization/<model-integration-
 
 The [design notes](docs/review_and_ablation_plan.md#physical-model-integration-screen-2026-10-07)
 distinguish paper mechanisms, our adaptations and validation requirements.
+
+
+## Track experiment snapshots
+
+The standard-library-only reader prints progress, latest validation, best selected
+checkpoint, KL, clipping and LR, followed by validation at the latest complete
+common epoch. From `CaliRoute`:
+
+```bash
+python scripts/watch_comparison.py --watch 30
+python scripts/watch_comparison.py results/optimization/<run>
+```
+
+With no path, it selects the most recently modified `comparison.json` once and
+keeps watching that experiment. Pass a run directory or a JSON file to select
+one explicitly; omit `--watch` for one snapshot and press Ctrl-C to stop watching.
+A directory falls back to `status.json` before `comparison.json` exists. It reads
+formal metrics only and shows missing values as `--`. Snapshot timestamps expose
+stale reports; this command does not check live GPU utilization or process liveness.
