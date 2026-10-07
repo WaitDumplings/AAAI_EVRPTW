@@ -263,6 +263,8 @@ def verify_manifest(manifest):
         if digest(Path(item['path'])) != item['sha256']:
             raise ValueError(f'Dataset/reference changed: {key}')
     for arm, spec in manifest['arms'].items():
+        if spec.get('resume_checkpoint') and digest(Path(spec['resume_checkpoint'])) != spec['resume_checkpoint_sha256']:
+            raise ValueError(f'Frozen resume checkpoint changed: {arm}')
         for stage in (spec, spec.get('preflight', {})):
             if stage and digest(Path(stage['config'])) != stage['config_sha256']:
                 raise ValueError(f'Configuration changed: {arm}')
@@ -294,7 +296,7 @@ def comparison_report(manifest, status):
         scope='Compare raw mean km and feasibility at matching epochs; timing only within the same GPU model.')
 
 
-def supervise(experiment):
+def supervise(experiment, *, stop_requested=None):
     manifest = json.loads((experiment / 'manifest.json').read_text())
     # Prevent launching two supervisors for one prepared experiment.
     supervisor_lock = (experiment / 'supervisor.lock').open('a+')
@@ -341,6 +343,8 @@ def supervise(experiment):
     signal.signal(signal.SIGINT, stop)
     try:
         while True:
+            if stop_requested is not None and stop_requested():
+                stopped = True
             for arm, process in list(active.items()):
                 detail, formal = status['arms'][arm], manifest['arms'][arm]
                 is_preflight = detail['stage'] == 'preflight'
@@ -416,7 +420,8 @@ def supervise(experiment):
                         arm = queued.pop(0)
                         locks[arm] = lock
                         try:
-                            spawn_stage(arm, 'preflight', gpu, cards[gpu])
+                            stage = 'training' if manifest['arms'][arm].get('restored_through_epoch') else 'preflight'
+                            spawn_stage(arm, stage, gpu, cards[gpu])
                         except BaseException:
                             locks.pop(arm).close()
                             raise

@@ -194,12 +194,17 @@ def test_partial_eval_csv_does_not_crash_reporting(tmp_path):
     assert report['initial_evaluation_consistent'] is None
 
 
-def test_supervisor_keeps_preflight_epochs_separate_and_starts_formal_from_manifest(tmp_path, monkeypatch):
+@pytest.mark.parametrize('resume', [False, True])
+def test_supervisor_keeps_preflight_epochs_separate_and_starts_formal_from_manifest(tmp_path, monkeypatch, resume):
     def spec(name, epochs, count):
         folder=tmp_path/name;folder.mkdir()
         return dict(epochs=epochs, validation_instances=count, output_dir=str(folder),
             log_dir=str(folder),checkpoint_dir=str(folder),command=[name])
-    formal=spec('formal',80,1000);formal['preflight']=spec('preflight',2,4)
+    formal=spec('formal',80,1000)
+    if resume:
+        formal['restored_through_epoch']=20
+    else:
+        formal['preflight']=spec('preflight',2,4)
     manifest=dict(code_root=str(tmp_path),arms={'baseline':formal},gpus=[0],idle_checks=2,
         poll_seconds=1,wait_for_experiments=[],protocol={})
     (tmp_path/'manifest.json').write_text(json.dumps(manifest))
@@ -220,7 +225,10 @@ def test_supervisor_keeps_preflight_epochs_separate_and_starts_formal_from_manif
             (folder/'train_log.csv').write_text('epoch\n'+''.join(f'{e}\n' for e in range(1,item['epochs']+1)))
             (folder/'checkpoint_final.pt').touch()
             self.pid=100+len(commands)
-        def poll(self):return 0
+            self.poll_count=0
+        def poll(self):
+            self.poll_count+=1
+            return None if self.poll_count==1 else 0
     monkeypatch.setattr(launch.subprocess,'Popen',FinishedProcess)
     def progress(spec,detail,**kwargs):
         detail.update(target_epochs=spec['epochs'],completed_training_epochs=spec['epochs'],
@@ -229,12 +237,15 @@ def test_supervisor_keeps_preflight_epochs_separate_and_starts_formal_from_manif
     launch.supervise(tmp_path)
     status=json.loads((tmp_path/'status.json').read_text())
     assert status['state']=='completed'
-    assert commands==[['preflight'],['formal']]
+    assert commands==([['formal']] if resume else [['preflight'],['formal']])
     detail=status['arms']['baseline']
     assert detail['completed_training_epochs']==80
     assert detail['target_epochs']==80
-    assert detail['preflight_progress']['completed_training_epochs']==2
-    assert detail['preflight_progress']['state']=='completed'
+    if resume:
+        assert 'preflight_progress' not in detail
+    else:
+        assert detail['preflight_progress']['completed_training_epochs']==2
+        assert detail['preflight_progress']['state']=='completed'
     hardware=[json.loads(line) for line in (tmp_path/'hardware.jsonl').read_text().splitlines()]
     assert any(row['active_stages']=={'baseline':'training'} for row in hardware)
     assert all('used_mib' in row['gpus'][0] and 'utilization' in row['gpus'][0] for row in hardware)
@@ -258,3 +269,21 @@ def test_mixed_hardware_block_is_rejected_when_readable(monkeypatch):
     monkeypatch.setattr(launch,'gpu_snapshot',lambda:{0:dict(name='2080 Ti'),1:dict(name='A6000')})
     with pytest.raises(ValueError,match='one model'):
         launch.probe_requested_gpus([0,1])
+
+
+def test_extension_cancellation_during_manifest_verification_prevents_launch(tmp_path, monkeypatch):
+    manifest=dict(code_root=str(tmp_path),arms={'baseline':dict(epochs=300)},gpus=[0],
+        idle_checks=2,poll_seconds=1,wait_for_experiments=[],protocol={})
+    (tmp_path/'manifest.json').write_text(json.dumps(manifest))
+    (tmp_path/'status.json').write_text(json.dumps({'state':'prepared'}))
+    canceled=[False]
+    def verify(_):canceled[0]=True
+    monkeypatch.setattr(launch,'verify_manifest',verify)
+    monkeypatch.setattr(launch,'comparison_report',lambda m,s:{'state':s['state']})
+    monkeypatch.setattr(launch.signal,'signal',lambda *a:None)
+    monkeypatch.setattr(launch,'gpu_snapshot',lambda:{0:dict(name='2080 Ti')})
+    monkeypatch.setattr(launch.subprocess,'Popen',lambda *a,**k:pytest.fail('Canceled extension launched a worker'))
+    launch.supervise(tmp_path,stop_requested=lambda:canceled[0])
+    status=json.loads((tmp_path/'status.json').read_text())
+    assert status['state']=='interrupted'
+    assert status['arms']['baseline']['state']=='interrupted'

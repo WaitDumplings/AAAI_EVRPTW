@@ -368,6 +368,33 @@ training instances. These common fine-tuning settings differ from the earlier
 500-epoch sweep. Validation uses all 1,000 instances, best-of-50, at epoch 0 and
 every 20 epochs. Test is reserved for final selection and is not run here.
 
+To extend an already running comparison to **300 total fine-tuning epochs**:
+
+```bash
+# On this host, select its one active seed-3009 comparison.
+bash scripts/extend_reward_norm_comparison.sh --seed 3009 --epochs 300
+# On the other host, use --seed 3010 instead.
+```
+
+Alternatively pass `--experiment results/optimization/<source-run>` explicitly
+(required if more than one run for that seed is active, or the source already
+completed). The extension controller detaches and prints a new `E300` directory.
+It waits for the original 80-epoch run to finish, copies each final full
+checkpoint and all committed history, then trains epochs 81–300 automatically.
+The new status reports target 300 and shows source progress while waiting;
+`extension.json` in the original run links to it. There is no interruption or
+loss of the current training work. The original run and its frozen source are
+preserved; only orchestration code changes in the continuation snapshot.
+
+Optimizer moments, AMP scaler, RNG, sampler cursor, replay, actor RMS, PopArt and
+historical best are restored. The same seed, batches, five PPO passes, constant
+LR/entropy, and full validation every 20 epochs continue; no second preflight or
+epoch-zero evaluation is run. This extension supports completed single-GPU
+reward/norm source horizons divisible by 20 with unchanged constant schedules.
+A failed/interrupted source stops the extension queue with an error, rather than
+silently restarting training from weights. Stop the extension supervisor if you
+want to cancel the continuation; the source run is not stopped by cancellation.
+
 The printed experiment directory contains `status.json`, `comparison.json`,
 `manifest.json`, `hardware.jsonl`, each arm's `preflight/` and `monitoring/`, and
 independently validated routes. `comparison.json` aligns completed validation
