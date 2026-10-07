@@ -11,6 +11,7 @@ from .nets.graph_model.embedding import AutoEmbedding
 from .nets.graph_model.encoder import GraphAttentionEncoder
 from .nets.graph_model.routing_adapters import DirectedEdgeBias
 from caliroute.plugins.rdi import RoadDistanceInjection
+from caliroute.plugins.input_encoding import PhysicalInputContextAdapter
 
 
 class Problem:
@@ -42,8 +43,11 @@ def prepare_observation_batch(obs: dict[str, Any]) -> dict[str, Any]:
             "cs_visited_current_route",
             "route_membership_current",
             "route_order_rank",
+            "node_input_context",
         }:
             out[key] = arr[None, ...] if arr.ndim == 2 else value
+        elif key == "graph_input_context":
+            out[key] = arr[None, ...] if arr.ndim == 1 else value
         elif key == "depot_loc":
             out[key] = arr[None, ...] if arr.ndim == 2 else value
         elif key in {
@@ -202,6 +206,8 @@ class Backbone(nn.Module):
         use_agda_v2: bool = False,
         agda_hidden_dim: int = 32,
         use_encoder_sdpa: bool = False,
+        use_physical_input_context: bool = False,
+        physical_input_context_hidden_dim: int = 32,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
@@ -251,6 +257,15 @@ class Backbone(nn.Module):
                 raise ValueError("use_rdi_v2 replaces use_residual_edge_bias; enable only one")
             with torch.random.fork_rng(devices=[]):
                 self.rdi_adapter = RoadDistanceInjection(n_heads=n_heads, hidden_dim=rdi_hidden_dim)
+
+        self.physical_input_adapter = None
+        if use_physical_input_context:
+            # Keep both existing model initialization and the caller RNG unchanged.
+            with torch.random.fork_rng(devices=[]):
+                self.physical_input_adapter = PhysicalInputContextAdapter(
+                    embedding_dim=embedding_dim,
+                    hidden_dim=physical_input_context_hidden_dim,
+                )
 
     def _build_node_type(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
@@ -329,6 +344,22 @@ class Backbone(nn.Module):
         if node_mask is not None:
             node_mask = node_mask.bool()
         node_embeddings = self.embedding(state.observations)
+        if self.physical_input_adapter is not None:
+            for key in ("node_input_context", "graph_input_context"):
+                if key not in state.states:
+                    raise KeyError(
+                        f"Physical input context is enabled, but observation is missing {key!r}. "
+                        "Use the matching physical input normalization schema."
+                    )
+            node_context = state.states["node_input_context"]
+            if node_context.ndim != 3 or node_context.shape[:2] != node_embeddings.shape[:2]:
+                raise ValueError(
+                    "node_input_context batch/node dimensions must match embeddings "
+                    f"{tuple(node_embeddings.shape[:2])}, got {tuple(node_context.shape)}"
+                )
+            node_embeddings = node_embeddings + self.physical_input_adapter(
+                node_context, state.states["graph_input_context"]
+            )
         encoded_nodes = self.encoder(
             node_embeddings,
             mask=None,
@@ -340,6 +371,7 @@ class Backbone(nn.Module):
                 "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
                 "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
                 "full_charge_time", "fixed_full_charge",
+                "node_input_context", "graph_input_context",
             }
             auxiliary = dict(cached[5]) if len(cached) > 5 else {}
             auxiliary["static_state"] = {key: state.states[key] for key in static_keys if key in state.states}
@@ -424,6 +456,8 @@ class Agent(nn.Module):
         agda_hidden_dim: int = 32,
         use_encoder_sdpa: bool = False,
         use_decomposed_critic: bool = False,
+        use_physical_input_context: bool = False,
+        physical_input_context_hidden_dim: int = 32,
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -453,6 +487,8 @@ class Agent(nn.Module):
             use_agda_v2=use_agda_v2,
             agda_hidden_dim=agda_hidden_dim,
             use_encoder_sdpa=use_encoder_sdpa,
+            use_physical_input_context=use_physical_input_context,
+            physical_input_context_hidden_dim=physical_input_context_hidden_dim,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

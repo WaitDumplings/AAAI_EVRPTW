@@ -28,7 +28,8 @@ def module_update_snapshot(agent):
     for name, param in agent.named_parameters():
         if not param.requires_grad:
             continue
-        group = ('rdi' if any(key in name for key in ('rdi_adapter', 'residual_edge_bias', 'dist_bias_scale', 'type_pair_bias')) else
+        group = ('input_context' if 'physical_input_adapter' in name else
+                 'rdi' if any(key in name for key in ('rdi_adapter', 'residual_edge_bias', 'dist_bias_scale', 'type_pair_bias')) else
                  'agda' if 'dynamic_graph_kv_encoder' in name else
                  'critic' if name.startswith('critic.') else None)
         if group is not None:
@@ -57,7 +58,8 @@ def plugin_diagnostics(agent):
     if getattr(agent, '_monitor_this_epoch', False):
         for name, module in agent.named_modules():
             if hasattr(module, 'diagnostics_enabled') and callable(getattr(module, 'diagnostics', None)):
-                prefix = 'rdi' if 'rdi_adapter' in name else 'agda' if 'agda_adapter' in name else name.replace('.', '_')
+                prefix = ('input_context' if 'physical_input_adapter' in name else
+                          'rdi' if 'rdi_adapter' in name else 'agda' if 'agda_adapter' in name else name.replace('.', '_'))
                 output.update({f'{prefix}_{key}': value for key, value in module.diagnostics().items()})
     return tensors_to_floats(output)
 

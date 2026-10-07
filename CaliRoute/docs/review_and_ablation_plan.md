@@ -570,3 +570,252 @@ inherit their source interval and preserve intermediate source-final validation
 points. Raw validation curves can be exported with
 `scripts/plot_reward_norm_eval.py`; they are validation observations, not test
 results or independent pretraining-seed evidence.
+
+
+## Physical input normalization and representation screen (2026-10-07)
+
+This screen isolates network inputs from reward and advantage normalization.
+The design objective is to preserve directed road relationships, node roles,
+and physically meaningful resource constraints while making input magnitudes
+usable by the network. Depot centering, fixed distance units, and the new
+physical context adapter are our adaptations. Their accuracy and speed benefits
+are hypotheses; earlier reward/normalization validation results do not establish
+an input-representation improvement.
+
+### Literature basis and limits
+
+- [MatNet: Matrix Encoding Networks for Neural Combinatorial Optimization
+  (NeurIPS 2021), Sections 3.1-3.3](https://proceedings.neurips.cc/paper/2021/file/29539ed932d32f1c56324cded92c07c2-Paper.pdf)
+  encodes relationship matrices using separate row/column representations and
+  learns to mix pairwise costs with query-key scores. This supports exposing
+  actual directed road costs rather than asking coordinates to recover them.
+  Its original one-hot initialization has a size limit and is not adopted here.
+  [Official implementation](https://github.com/yd-kwon/MatNet).
+- [RRNCO: Towards Real-World Routing with Neural Combinatorial Optimization
+  (ICLR 2026), Sections 4.1.1-4.1.2](https://arxiv.org/html/2503.16159v2)
+  combines coordinate and sampled-distance node features through contextual
+  gates. Its edge bias separately embeds distance, duration, and direction
+  before fusion, retaining asymmetric relationships. We borrow the separation
+  of physical feature types and complementary node/edge information; we do not
+  reproduce its complete encoder or claim that its normalization preserves
+  absolute city scale. [Official implementation](https://github.com/ai4co/real-routing-nco).
+- [RADAR: Learning to Route with Asymmetry-aware Distance Representations
+  (ICLR 2026), Section 4 and Appendix E](https://arxiv.org/html/2603.03388v1)
+  initializes nodes using left/right factors of a truncated distance-matrix
+  SVD and uses both edge directions in attention. Appendix E compares z-score,
+  min-max, and unnormalized inputs on synthetic ATSP; this evidence does not
+  establish the best scaling for constrained real-world VRPTW/EVRPTW. Its
+  real-world experiment uses the RRNCO min-max setup. Per-instance z-score
+  removes absolute scale unless another input preserves it. SVD and Sinkhorn
+  are deferred, separately testable architecture changes.
+  [Official implementation](https://github.com/yihang0410/RADAR).
+- [RouteFinder: Towards Foundation Models for Vehicle Routing Problems,
+  Sections 4.2.2 and Appendix B.2](https://arxiv.org/html/2406.15007v3)
+  explicitly distinguishes node and global attributes and feeds global
+  conditions into the encoder. Appendix A divides demand by capacity and
+  describes normalized coordinate inputs; its example time-window generation
+  assumes unit speed. We borrow the explicit global context, not that speed
+  assumption or its full normalization recipe. Transformer RMSNorm/pre-norm
+  concerns hidden activations and is not changed by this input experiment.
+  [Official implementation](https://github.com/ai4co/routefinder).
+- [Buckingham, On Physically Similar Systems; Illustrations of the Use of
+  Dimensional Equations (1914)](https://doi.org/10.1103/PhysRev.4.345)
+  motivates consistent dimensionless groups and unit transformations. It does
+  not prescribe a neural architecture, guarantee generalization, or imply that
+  cities with distinct constraints should share identical embeddings. The
+  particular groups below are our application of dimensional consistency.
+
+### Input contract
+
+The experiment exposes two independent factors. Existing behavior remains the
+fallback when these options are absent:
+
+```yaml
+env:
+  observation_coordinate_mode: legacy_minmax  # or depot_fixed
+  observation_distance_scale_km: 43.638668060302734
+  observation_input_context: false
+model:
+  use_physical_input_context: false
+  physical_input_context_hidden_dim: 32
+```
+
+The environment and model context flags must agree. The context interface is a
+static node tensor `[B,N,12]` and a static graph tensor `[B,10]`, with an explicit,
+versioned feature order and normalization signature. Node context describes
+physical incoming/outgoing road relationships, depot relations, and finite-road
+reachability (not dynamic vehicle feasibility). Graph context exposes physical resource scales and enabled-task
+flags. No city ID, arbitrary customer index, or customer-count multiplier is
+used. Changes to feature meanings or ordering require a new schema; matching
+tensor dimensions alone is insufficient checkpoint compatibility.
+
+For `depot_fixed`, let `p_i` be coordinates in km, `p_0` the depot coordinate,
+and `D0 = 43.638668060302734 km`. Use `(p_i - p_0) / D0` with the same divisor
+for both axes. Negative and greater-than-one coordinates are valid; do not clip
+or refit a bounding box. Raw latitude/longitude is not a km coordinate and must
+be projected or converted by the data layer before this operation. Coordinates
+provide geometry; independently supplied road matrices remain authoritative.
+The existing directed `D_ij / D0` channel stays available in every arm, together
+with the existing RDI relative features and absolute distance bias.
+
+Resource scaling uses consistent groups, not independent arbitrary min-max
+transforms. With time unit `T0` and energy unit `E0`, use `T_ij / T0` and
+`E_ij / E0`; time windows, service/wait/charge durations and current time must
+share the corresponding time origin/unit, and battery capacity and remaining
+energy must share the energy unit. For constant physical speed `v`, consumption
+rate `c`, and charging power `P`, the consistent dimensionless coefficients
+are `v*T0/D0`, `c*D0/E0`, and `P*T0/E0`. Thus `T'=D'/v'`, `E'=c'*D'`, and
+`charge_time'=charged_energy'/P'` remain valid under that physical model.
+When measured time/energy matrices exist, retain those matrices instead of
+reconstructing them from a constant speed or consumption rate.
+
+For this first screen, existing time/horizon, demand/capacity, and
+energy/battery observations remain in their current compatible units. The
+optional graph context must preserve the physical scale/constraint information
+needed to interpret those ratios. Missing/inactive resources need explicit
+flags and finite neutral values, not an unmarked zero that could mean a real
+zero budget. Denominators must be validated; padding and self-edges must not
+silently alter neighborhood statistics. A reachability feature is an input
+hint, not a replacement for the environment's authoritative action mask.
+
+Two cities may legitimately share a representation when their full routing
+inputs and constraints are equivalent. The requirement is to retain differences
+that affect the decision: road detours, directionality, duration, energy,
+resource budgets, and customer attributes. A tenfold physical distance change
+with unchanged time windows/battery is not such an equivalence. Merely changing
+from km to meters, with all units transformed consistently, is an equivalence.
+
+Only static instance quantities belong in the cached context adapter. Current
+position/time/load/battery and visited-node-dependent margins remain in the
+dynamic observation/AGDA path. The new context adapter is a residual with only
+its final projection initialized to zero; zeroing every layer would obstruct
+learning. Adding it must preserve outputs at initialization for the same
+coordinate mode, while allowing nonzero gradients into the output projection.
+
+### Four-arm protocol and initialization fairness
+
+| Arm | Coordinate mode | Physical node/global context | Isolated comparison |
+| --- | --- | --- | --- |
+| `legacy` | `legacy_minmax` | Off | Current Norm input control |
+| `depot` | `depot_fixed` | Off | Depot centering and fixed coordinate scale |
+| `context` | `legacy_minmax` | On | Added physical context at the legacy coordinates |
+| `combined` | `depot_fixed` | On | Both factors and their interaction |
+
+From `CaliRoute`, inspect or launch the portable screen with:
+
+```bash
+bash scripts/run_input_norm_comparison.sh --help
+bash scripts/run_input_norm_comparison.sh --seed 3009 --gpus 0,1,2,3
+```
+
+The shell launches a detached supervisor by default. `--prepare-only` freezes
+and hashes the configurations/source/inputs without starting GPU workers.
+`--data-root /path/to/AAAI_Dataset` overrides the sibling dataset path; one to
+four homogeneous GPUs are supported, with remaining arms queued when fewer
+than four cards are provided. GPU locks, idle checks, separate preflight runs,
+and completion checks are shared with the reward/norm launcher. Preflight
+weights are discarded; formal training reloads the frozen shared archive.
+
+All arms share the completed Norm experiment's validation-best epoch-300
+weights, identified by source-file and model-tensor hashes. This is weights-only
+fine-tuning: optimizer, sampler, replay, actor RMS and PopArt training state are
+initialized afresh under the same policy in every arm. Source inference weights
+must represent the raw-unit critic, rather than silently importing a normalized
+training head without its moments. Newly introduced adapter keys are the only
+allowed missing checkpoint parameters; pre-existing model tensors must match
+exactly after loading. Record their provenance separately from the newly
+initialized parameters. Re-seed training/evaluation streams after construction
+so creating adapter layers does not accidentally shift the sampler/rollout RNG.
+
+The shared configuration is VRPTW100, PPO update passes 5, `n_traj=50`,
+300 fine-tuning epochs, validation at epochs 0/50/100/150/200/250/300, and the
+same train/validation splits, instance order, batch, learning-rate schedule,
+SL/expert/replay coefficients and monitoring cadence. Keep
+`training.reward_norm_mode=physical_shared_popart`, gamma 0.99, and the raw
+reward `-edge_km / 43.638668060302734` in all four arms. This screen does not
+introduce GDPO, independent PPO/SL RMS, a new critic loss, SVD, Sinkhorn, hidden
+LayerNorm/RMSNorm changes, or a different RDI/AGDA architecture. The added
+context adapter is the explicit architecture factor in the table.
+
+A mature legacy-input checkpoint favors the representation on which it was
+trained. Changing coordinates immediately changes its inputs, even though the
+weight file is the same. Therefore every arm must run a full epoch-zero
+validation and retain its own initial objective/feasibility. Only the
+`legacy`/`context` and `depot`/`combined` pairs should match initially after
+zero-output adapter loading; equality between those pairs is not expected.
+Compare absolute same-epoch and same-wall-time validation outcomes, report the
+initial shift and recovery cost, and do not rank solely by improvement from an
+arm's own worse epoch zero. This design measures usefulness for checkpoint
+migration, not an unbiased ranking of representations trained from scratch.
+The promising input design should later receive matched training from scratch
+or matched task-specific pretraining, additional seeds and cross-size/city
+validation. Several fine-tuning seeds sharing one pretrained checkpoint are not
+independent pretraining replications.
+
+### Validation gates and priorities
+
+1. **Representation and physical consistency.** Check depot coordinates are
+   exactly zero in fixed mode, translation and unit-conversion invariance,
+   preservation of aspect ratio, and equivariance to a joint node/edge
+   permutation that preserves the depot convention. Construct two geometrically
+   similar instances of different physical extent: the absolute branch must
+   distinguish them. Construct identical coordinates with different directed
+   road matrices: their road features must differ. Adding customers must not
+   rescale existing fixed coordinates or existing physical edge entries; full
+   network embeddings and neighborhood summaries may change with the graph.
+2. **Environment and consumer parity.** Replay identical fixed actions through
+   each mode using real CVRP/VRPTW data and synthetic EVRPTW cases. Raw distance,
+   arrival/wait/service/charge times, remaining resources, rewards and action
+   masks must agree within documented floating-point tolerances. Check regular
+   and fast environments, rollout observations, PPO observation slicing,
+   RDI/AGDA inputs and evaluation loaders. This establishes transition/input
+   consistency, not real EVRPTW solution quality.
+3. **Compatibility and state.** Verify the two within-coordinate epoch-zero
+   equivalences on logits and critic outputs; verify adapter gradient flow.
+   Disabled-context loading must retain legacy outputs. Save/load and resume
+   must preserve the input schema, coordinate mode and scales; fail clearly on
+   incompatible full-resume requests. Exercise cached static features and
+   renewed reset boundaries, not only direct model-forward calls.
+4. **Real-data learning smoke before the long run.** Run short VRPTW100 updates
+   for all four arms, including PPO, SL, expert and replay paths. Require finite
+   inputs/gradients, completed feasible rollouts, correct evaluation counts and
+   readable checkpoints. Log coordinate/context ranges and adapter residual
+   norms as well as existing KL, clipping, raw critic error, advantage scales,
+   feasibility, optimizer steps, memory and runtime. Initial migration losses
+   are reportable evidence; an unexpected numerical/feasibility failure blocks
+   the long launch until diagnosed.
+5. **Controlled quality assessment.** After the smoke passes, run the four arms
+   concurrently on matched GPUs with frozen code/configuration and per-arm
+   epoch-zero validation. Keep feasibility visible alongside distance, compare
+   paired instance IDs at common epochs and equal training time, and account
+   for input/adapter computation in timing. Select using validation; frozen
+   test evaluation follows selection. Do not infer city or Cus1000
+   generalization from a single VRPTW100 fine-tuning run.
+
+The first priority is lossless unit/feature construction and compatibility, then
+the coordinate/context factorial. Broader node/edge fusion, structural SVD
+features, attention normalization, and more complex dynamic resource features
+remain separate follow-ups. No outcome is asserted until its recorded checks
+and corresponding experiments have completed.
+
+
+Implementation checks completed on 2026-10-07 (before the formal GPU run):
+
+- Broad CPU regression: 548 tests passed, excluding the four unrelated Gurobi
+  suites; subsequent targeted input-profile checks also passed.
+- Data audit: 54 first/middle/last records across all 18 train/val task-size
+  cohorts (CVRP/VRPTW/EVRPTW, 15/50/100). This is a sample, not a full-data audit.
+  New context remained finite; physical-unit reconstruction, unchanged non-coordinate
+  observations and one-step rewards/dynamics, and fast/reference agreement passed.
+- Independent saved travel-time matrices were present for the 18 sampled VRPTW
+  records. Maximum reconstruction difference was 0.001776 seconds, within float32
+  tolerance. The other records do not establish agreement with independent saved T.
+- Full-route synthetic tests include depot returns, charging, capacity, and time
+  windows. Translation and physical-scale tests verify the intended invariances.
+- Audit details and feature quantiles: repository `results/audit/input_normalization_20261007.json`.
+- Input profile guarantees cover the new modes with explicit fixed units. Legacy
+  configurations with implicit reward-unit fallback retain historical behavior;
+  their effective unit can be resolved after checkpoint loading.
+
+These checks establish implementation consistency, not improved policy quality.
+The matched four-arm validation screen and repeat-seed confirmation remain pending.

@@ -291,10 +291,39 @@ def comparison_report(manifest, status):
                 epoch0.append(value)
         except (KeyError, ValueError, TypeError):
             pass
-    return dict(updated_at_utc=now(), state=status['state'], protocol=manifest['protocol'],
+    report = dict(updated_at_utc=now(), state=status['state'], protocol=manifest['protocol'],
         arms=status['arms'], matched_validation_epochs=aligned,
         initial_evaluation_consistent=(max(epoch0)-min(epoch0) <= 1e-4) if len(epoch0) == len(evaluations) and len(epoch0)>1 else None,
         scope='Compare raw mean km and feasibility at matching epochs; timing only within the same GPU model.')
+    pairs = manifest['protocol'].get('initial_evaluation_pairs')
+    if pairs is not None:
+        initial = {}
+        for arm, rows in evaluations.items():
+            row = rows.get(0, {})
+            try:
+                distance = float(row['eval_avg_objective_distance_km'])
+                feasibility = float(row['eval_feasible_rate'])
+                count = int(float(row['eval_num_instances']))
+                if math.isfinite(distance) and math.isfinite(feasibility):
+                    initial[arm] = dict(distance_km=distance, feasible_rate=feasibility, num_instances=count)
+            except (KeyError, ValueError, TypeError, OverflowError):
+                pass
+        checks = {}
+        expected_count = manifest['protocol'].get('validation_instances', 1000)
+        for left, right in pairs:
+            key = f'{left}__{right}'
+            a, b = initial.get(left), initial.get(right)
+            checks[key] = (abs(a['distance_km'] - b['distance_km']) <= 1e-4
+                and abs(a['feasible_rate'] - b['feasible_rate']) <= 1e-8
+                and a['num_instances'] == b['num_instances'] == expected_count) if a and b else None
+        report.update(initial_evaluation_consistency_scope='within_coordinate_mode_pairs_only',
+            initial_evaluation_pairs=checks, initial_validation_by_arm=initial,
+            initial_evaluation_consistent=all(checks.values()) if checks and all(v is not None for v in checks.values()) else None,
+            initialization_caveat='Different coordinate modes may have different epoch-zero quality despite shared weights; compare absolute results and report migration cost.')
+        if 'legacy' in initial:
+            base_distance = initial['legacy']['distance_km']
+            report['initial_distance_delta_from_legacy_km'] = {arm: row['distance_km'] - base_distance for arm, row in initial.items()}
+    return report
 
 
 def supervise(experiment, *, stop_requested=None):
@@ -455,10 +484,19 @@ def supervise(experiment, *, stop_requested=None):
         supervisor_lock.close()
 
 
-def prepare(args):
+def prepare(args, *, arm_definitions=None, arm_builder=None, default_checkpoint=None,
+            protocol_overrides=None, prerequisite_source_run=SOURCE_RUN):
+    """Prepare one frozen experiment; optional hooks support input-only screens.
+
+    Default arguments preserve the historical reward/norm launcher protocol.
+    Supervision is manifest driven and shared by all supported factorizations.
+    """
+    definitions = ARMS if arm_definitions is None else arm_definitions
+    builder = build_arm if arm_builder is None else arm_builder
+    bundled_checkpoint = DEFAULT_CHECKPOINT if default_checkpoint is None else default_checkpoint
     arms = args.arms.split(',')
-    if len(set(arms)) != len(arms) or not arms or any(arm not in ARMS for arm in arms):
-        raise ValueError('arms must be distinct names from: '+','.join(ARMS))
+    if len(set(arms)) != len(arms) or not arms or any(arm not in definitions for arm in arms):
+        raise ValueError('arms must be distinct names from: '+','.join(definitions))
     gpus = parse_gpus(args.gpus)
     hardware_at_prepare = probe_requested_gpus(gpus)
     positive_integer(args.epochs, 'epochs')
@@ -469,7 +507,7 @@ def prepare(args):
         raise ValueError('run-id must be a fresh directory name')
     base = yaml.safe_load(args.base_config.resolve().read_text())
     checkpoint = args.init_checkpoint.resolve()
-    bundled = checkpoint == (CODE_ROOT / DEFAULT_CHECKPOINT).resolve()
+    bundled = checkpoint == (CODE_ROOT / bundled_checkpoint).resolve()
     payload, initialization = load_initialization(checkpoint, args.expected_init_epoch,
         metadata_path=checkpoint.with_suffix('.json') if bundled else None)
     units = checkpoint_units(payload)
@@ -504,7 +542,7 @@ def prepare(args):
         output = experiment / arm
         output.mkdir()
         name = args.run_id + '_' + arm.upper()
-        cfg = build_arm(base, arm=arm, output=output, run_name=name, init_checkpoint=shared,
+        cfg = builder(base, arm=arm, output=output, run_name=name, init_checkpoint=shared,
             data_root=data_root, seed=args.seed, units=units, epochs=args.epochs, chunk_size=args.chunk_size, eval_interval=args.eval_interval)
         path = output / 'config.yaml'
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -524,16 +562,17 @@ def prepare(args):
             checkpoint_dir=str(CODE_ROOT / 'results/checkpoints/Cus_100_CS_0' / (name+'_PREFLIGHT') / f'seed_{args.seed}'),
             command=[sys.executable, '-B', '-u', '-m', 'offline2online.train', '--config', str(preflight_path), '--seed', str(args.seed), '--device', 'cuda:0'])
     prerequisites = [str(p.resolve()) for p in args.wait_for_experiment]
-    previous = CODE_ROOT / 'results/optimization' / SOURCE_RUN / 'status.json'
-    if local_live_prerequisite(previous) and str(previous.resolve()) not in prerequisites:
-        prerequisites.append(str(previous.resolve()))
+    if prerequisite_source_run is not None:
+        previous = CODE_ROOT / 'results/optimization' / prerequisite_source_run / 'status.json'
+        if local_live_prerequisite(previous) and str(previous.resolve()) not in prerequisites:
+            prerequisites.append(str(previous.resolve()))
     manifest = dict(created_at_utc=now(), code_root=str(frozen), source=source,
         init_checkpoint=str(shared), init_checkpoint_sha256=before, source_init_checkpoint=str(checkpoint),
         initialization_provenance=initialization,
         source_init_epoch=args.expected_init_epoch, frozen_units=units, inputs=inputs, arms=specs, gpus=gpus,
         hardware_at_prepare=list(hardware_at_prepare.values()) if hardware_at_prepare is not None else None,
         wait_for_experiments=prerequisites, idle_checks=args.idle_checks, poll_seconds=args.poll_seconds,
-        protocol=dict(task='vrptw100', epochs=args.epochs, seed=args.seed, variants={a:dict(gamma=ARMS[a][0], reward_norm_mode=ARMS[a][1]) for a in arms},
+        protocol=dict(task='vrptw100', epochs=args.epochs, seed=args.seed, variants={a:dict(gamma=definitions[a][0], reward_norm_mode=definitions[a][1]) for a in arms},
             world_size_per_arm=1, global_batch=64, n_traj=50, num_minibatches=4,
             ppo_update_epochs=5, ppo_step_chunk_size=args.chunk_size, learning_rate=1e-5,
             lr_schedule='constant', entropy_coef=.002, sl_coef=.35,
@@ -545,6 +584,8 @@ def prepare(args):
             sampling='uniform shuffle_cycle, no priority sampler; common new fine-tuning protocol',
             normalization_bundle='historical actor RMS + PopArt + physical-cost SL leave-one-out without expert group mixing; expert/replay auxiliary losses unchanged',
             stage='80-epoch local screen unless explicitly overridden; requires full retraining before broad accuracy claims'))
+    if protocol_overrides is not None:
+        manifest['protocol'].update(copy.deepcopy(protocol_overrides))
     write_json(experiment / 'manifest.json', manifest)
     write_json(experiment / 'status.json', dict(state='prepared', arms={a:dict(state='prepared') for a in arms}))
     if args.launch:

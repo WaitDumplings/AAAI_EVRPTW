@@ -34,3 +34,4 @@ venv/
 
 # Fixed weights-only initialization for the portable reward/norm experiment.
 !/CaliRoute/assets/reward_norm/vrptw100_update5_epoch0300.pt
+!/CaliRoute/assets/input_norm/vrptw100_norm_epoch0300.pt

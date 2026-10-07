@@ -22,6 +22,7 @@ STATIC_OBSERVATION_KEYS = frozenset({
     "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
     "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
     "full_charge_time", "fixed_full_charge", "instance_mask",
+    "node_input_context", "graph_input_context",
 })
 
 

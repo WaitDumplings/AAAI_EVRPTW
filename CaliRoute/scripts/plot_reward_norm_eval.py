@@ -72,23 +72,29 @@ def render(experiment, output_dir=None):
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     common = sorted(set.intersection(*(set(values) for values in series.values())))
     protocol = manifest['protocol']
+    input_screen = set(series).issubset({'legacy', 'depot', 'context', 'combined'}) and bool(set(series) & {'legacy', 'depot', 'context'})
+    styles = ({'legacy': ('Existing input', '#475569', 'o'),
+               'depot': ('Depot + fixed unit', '#D97706', 's'),
+               'context': ('Physical context', '#059669', '^'),
+               'combined': ('Depot + context', '#7C3AED', 'D')} if input_screen else STYLES)
+    title = 'VRPTW100 | Physical input normalization' if input_screen else 'VRPTW100 | Reward and normalization'
     fig, ax = plt.subplots(figsize=(12.8, 7.5))
     fig.subplots_adjust(left=.09, right=.97, bottom=.20, top=.76)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-    fig.text(.09, .935, 'VRPTW100 | Reward and normalization', fontsize=21, weight='bold', color='#172033')
+    fig.text(.09, .935, title, fontsize=21, weight='bold', color='#172033')
     fig.text(.09, .888,
         f"Seed {protocol['seed']}  |  {protocol['validation_instances']:,} validation instances  |  "
         f"Best of {protocol['eval_n_traj']} trajectories  |  Lower is better", fontsize=11, color='#526174')
     for arm, observed in series.items():
-        name, color, marker = STYLES.get(arm, (arm, '#334155', 'o'))
+        name, color, marker = styles.get(arm, (arm, '#334155', 'o'))
         epochs = sorted(observed)
         distances = [observed[e]['distance_km'] for e in epochs]
         ax.plot(epochs, distances, label=name, color=color, marker=marker,
             markersize=5, linewidth=2.2, markeredgecolor='white', markeredgewidth=.6)
     ax.set_xlabel('Fine-tuning epoch (starts from the shared epoch-300 model)', fontsize=11, labelpad=10)
     ax.set_ylabel('Mean validation distance (km)', fontsize=12, labelpad=10)
-    ax.xaxis.set_major_locator(MultipleLocator(20))
+    ax.xaxis.set_major_locator(MultipleLocator(int(protocol.get('eval_interval', 20))))
     ax.set_xlim(-2, int(protocol['epochs'])+2)
     ax.grid(axis='y', color='#E2E8F0', linewidth=.8)
     ax.set_axisbelow(True)
@@ -105,7 +111,7 @@ def render(experiment, output_dir=None):
         ax.text(latest_common-2, .985, f'Latest common eval: {latest_common}', transform=ax.get_xaxis_transform(),
             ha='right', va='top', fontsize=9, color='#64748B')
     feasibility = min(row['feasible_rate'] for obs in series.values() for row in obs.values())
-    endpoint_note = '  |  '.join(f"{STYLES.get(a,(a,))[0]} through {max(obs)}" for a,obs in series.items())
+    endpoint_note = '  |  '.join(f"{styles.get(a,(a,))[0]} through {max(obs)}" for a,obs in series.items())
     fig.text(.09,.105,endpoint_note,fontsize=10,color='#334155')
     fig.text(.09,.068,
         f'Raw validation points; no smoothing or extrapolation. Minimum feasibility: {feasibility:.0%}.',

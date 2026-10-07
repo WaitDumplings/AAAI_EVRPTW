@@ -47,6 +47,10 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.trainer import (
 from .models import Agent
 from .checkpoint_schedule import epoch_checkpoint_plan
 from .reward_normalization import (configure as configure_reward_normalization, inference_model_state)
+from .input_normalization import (configure as configure_input_normalization,
+                                  checkpoint_metadata as input_checkpoint_metadata,
+                                  load_checkpoint_profile as load_input_checkpoint_profile,
+                                  signature as input_normalization_signature)
 from .training_schedule import apply_epoch_schedule
 from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
 from .slppo_diagnostics import (tensors_to_floats, value_and_advantage_diagnostics,
@@ -203,6 +207,7 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "seed": int(seed),
             "config": cfg,
             "model_state_dict": inference_model_state(agent),
+            **input_checkpoint_metadata(agent, cfg),
             **({"reward_normalization_state": agent._reward_normalization.checkpoint_state(agent.critic)}
                if getattr(agent, "_reward_normalization", None) is not None else {}),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -942,6 +947,7 @@ def _make_envs(cfg: dict[str, Any], seed: int, *, problem_type: str):
 
 
 _INIT_CHECKPOINT_NEW_MODULE_PREFIXES = (
+    "backbone.physical_input_adapter.",
     "backbone.residual_edge_bias.",
     "backbone.rdi_adapter.",
     "backbone.decoder.dynamic_graph_kv_encoder.agda_adapter.",
@@ -961,7 +967,7 @@ def _load_initial_model_state(agent: Agent, state_dict: dict[str, Any], *, stric
     )
     if forbidden_missing or unexpected:
         raise RuntimeError(
-            "Incompatible initialization checkpoint; only explicitly added RDI/AGDA/edge/charge "
+            "Incompatible initialization checkpoint; only explicitly added input/RDI/AGDA/edge/charge "
             f"adapter keys may be missing. Missing: {forbidden_missing}; "
             f"unexpected: {sorted(unexpected)}"
         )
@@ -992,9 +998,13 @@ def _load_agent_checkpoint(
     else:
         state_dict = checkpoint
         checkpoint = {}
+    input_profile_info = load_input_checkpoint_profile(
+        agent, checkpoint, resume=False, checkpoint_path=ckpt_path,
+    )
     result = _load_initial_model_state(agent, state_dict, strict=strict)
     return {
         "checkpoint_path": str(ckpt_path),
+        "input_normalization": input_profile_info,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "seed": checkpoint.get("seed") if isinstance(checkpoint, dict) else None,
         "missing_keys": list(getattr(result, "missing_keys", [])),
@@ -1026,6 +1036,9 @@ def _load_training_checkpoint(
     else:
         state_dict = checkpoint
         checkpoint = {}
+    input_profile_info = load_input_checkpoint_profile(
+        agent, checkpoint, resume=True, checkpoint_path=ckpt_path,
+    )
     result = agent.load_state_dict(state_dict, strict=strict)
     agent._pending_reward_normalization_state = checkpoint.get("reward_normalization_state")
     optimizer_loaded = False
@@ -1043,6 +1056,7 @@ def _load_training_checkpoint(
         optimizer_loaded = True
     return {
         "checkpoint_path": str(ckpt_path),
+        "input_normalization": input_profile_info,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "seed": checkpoint.get("seed") if isinstance(checkpoint, dict) else None,
         "optimizer_loaded": optimizer_loaded,
@@ -1990,6 +2004,7 @@ def _cached_expert_route_mean_logprobs(agent, candidates, device, chunk_size):
         "cus_loc", "depot_loc", "rs_loc", "demand", "time_window", "service_time",
         "edge_distance", "edge_time", "edge_energy", "battery_capacity", "loading_capacity",
         "full_charge_time", "fixed_full_charge", "instance_mask",
+        "node_input_context", "graph_input_context",
     }
     maximum_length = max(len(candidate.actions) for candidate in candidates)
     route_batch_size = max(1, int(chunk_size) // max(maximum_length, 1))
@@ -4259,6 +4274,7 @@ def train_from_config(
     run_session_id = f"{os.getpid()}-{time.time_ns()}"
     cfg = deep_update(cfg, overrides or {})
     _apply_solution_level_aliases(cfg)
+    input_normalization_signature(cfg)  # Fail before creating devices, datasets or optimizers.
     train_cfg = cfg["training"]
     distributed = DistributedContext.initialize(device, int(train_cfg.get("distributed_timeout_minutes", 30)))
     device = distributed.device
@@ -4391,6 +4407,8 @@ def train_from_config(
             use_agda_v2=bool(model_cfg.get("use_agda_v2", False)),
             agda_hidden_dim=int(model_cfg.get("agda_hidden_dim", 32)),
             use_encoder_sdpa=bool(model_cfg.get("use_encoder_sdpa", False)),
+            use_physical_input_context=bool(model_cfg.get("use_physical_input_context", False)),
+            physical_input_context_hidden_dim=int(model_cfg.get("physical_input_context_hidden_dim", 32)),
             residual_edge_hidden_dim=int(model_cfg.get("residual_edge_hidden_dim", 32)),
             use_post_charge_adapter=bool(model_cfg.get("use_post_charge_adapter", False)),
             post_charge_adapter_hidden_dim=int(model_cfg.get("post_charge_adapter_hidden_dim", 32)),
@@ -4401,6 +4419,7 @@ def train_from_config(
         ).to(device)
 
     agent = _make_agent()
+    input_profile = configure_input_normalization(agent, cfg)
     init_checkpoint_info: dict[str, Any] = {}
     resume_checkpoint_info: dict[str, Any] = {}
     resume_checkpoint_path = (
@@ -4427,6 +4446,7 @@ def train_from_config(
     ) > 0.0
     if hard_ref_kl_requested:
         reference_agent = _make_agent()
+        configure_input_normalization(reference_agent, cfg)
         reference_checkpoint_path = offline_cfg.get("reference_checkpoint_path") or init_checkpoint_path or resume_checkpoint_path
         if reference_checkpoint_path:
             reference_checkpoint_info = _load_agent_checkpoint(
@@ -6376,6 +6396,8 @@ def train_from_config(
                 "expert_diagnostics": average_diagnostics(monitor_expert_records),
                 "replay_loss_diagnostics": average_diagnostics(monitor_replay_records),
                 "critic_diagnostics": monitor_values,
+                "input_normalization": input_profile,
+                "input_initialization": getattr(agent, "_input_normalization_initialization", None),
                 "reward_normalization": dict(reward_normalization.diagnostics) if reward_normalization is not None else {"mode": "legacy"},
                 "gradient_components": monitor_gradient_values,
                 "plugin_diagnostics": epoch_plugin_diagnostics,

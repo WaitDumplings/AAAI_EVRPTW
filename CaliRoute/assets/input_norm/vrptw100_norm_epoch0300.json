@@ -1,0 +1,23 @@
+{
+  "bytes": 19328323,
+  "env": {
+    "charging_mode": "fixed_full",
+    "info_level": "light",
+    "normalize_reward": true,
+    "observation_distance_scale_km": 43.638668060302734,
+    "reward_distance_scale_km": 43.638668060302734,
+    "reward_distance_scale_mode": "single_customer_repair_median",
+    "use_fast_env": true,
+    "use_jit_mask": true
+  },
+  "epoch": 300,
+  "filename": "vrptw100_norm_epoch0300.pt",
+  "format_version": 1,
+  "model_state_sha256": "4f87291d1e340b9c1cd438ba61adf660e9c4a7c0b4744d9b07319ac3b98c3c58",
+  "purpose": "weights-only initialization; not a training-resume checkpoint",
+  "seed": 3009,
+  "sha256": "7811cddd695cca9695eaff7000b006c3ff015e8d1bc1606f363c0d53eb2e1505",
+  "source_checkpoint_filename": "checkpoint_best.pt",
+  "source_checkpoint_sha256": "9f4e62a9ed1c9da273500bbe6a3fcde85284bc12905d7f82469fa813929ef8e2",
+  "tensor_count": 158
+}

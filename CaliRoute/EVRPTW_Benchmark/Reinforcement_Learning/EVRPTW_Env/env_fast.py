@@ -198,6 +198,7 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
         current_time = ((self.current_time_s - self.working_start_s) / self.horizon_s).astype(np.float32)
 
         return {
+            **self._input_context,
             "cus_loc": static["cus_loc"],
             "depot_loc": static["depot_loc"],
             "rs_loc": static["rs_loc"],

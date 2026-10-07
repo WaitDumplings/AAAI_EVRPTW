@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "EVRPTW_Core"))
 
 from evrptw_core.schema import EVRPTWInstance, merge_route_sequences
+from caliroute.input_normalization import (build_input_context, NODE_INPUT_CONTEXT_DIM, GRAPH_INPUT_CONTEXT_DIM)
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class EVRPTWVectorEnv(Env):
         reward_distance_scale_km: float | None = None,
         reward_distance_scale_mode: str = "single_customer_repair_median",
         observation_distance_scale_km: float | None = None,
+        observation_coordinate_mode: str = "legacy_minmax",
+        observation_input_context: bool = False,
     ) -> None:
         super().__init__()
         if reward_mode not in {"distance", "distance_success"}:
@@ -75,6 +78,12 @@ class EVRPTWVectorEnv(Env):
         self.normalize_reward = bool(normalize_reward)
         self.reward_distance_scale_km_override = reward_distance_scale_km
         self.observation_distance_scale_km_override = observation_distance_scale_km
+        self.observation_coordinate_mode = str(observation_coordinate_mode)
+        self.observation_input_context = bool(observation_input_context)
+        if self.observation_coordinate_mode not in {"legacy_minmax", "depot_fixed"}:
+            raise ValueError("observation_coordinate_mode must be legacy_minmax or depot_fixed")
+        if (self.observation_coordinate_mode == "depot_fixed" or self.observation_input_context) and observation_distance_scale_km is None:
+            raise ValueError("Physical input normalization requires explicit observation_distance_scale_km")
         for name, scale in (
             ("reward_distance_scale_km", reward_distance_scale_km),
             ("observation_distance_scale_km", observation_distance_scale_km),
@@ -162,6 +171,14 @@ class EVRPTWVectorEnv(Env):
             ]
         )
 
+        self._input_context = build_input_context(
+            distance_km=self.distance_km, travel_time_s=self.travel_time_s,
+            energy_kwh=self.energy_kwh, distance_scale_km=self.observation_distance_scale_km,
+            horizon_s=self.horizon_s, cargo_capacity_cm3=self.cargo_capacity_cm3,
+            battery_capacity_kwh=self.battery_capacity_kwh, speed_kmh=self.speed_kmh,
+            energy_per_km=self.energy_per_km, full_charge_time_s=self.full_charge_time_s,
+            charging_mode=self.charging_mode, metadata=instance.metadata,
+        ) if self.observation_input_context else {}
         self.stop_adj = self._build_stop_adjacency()
         self.max_steps = max(1, self.max_steps_factor * self.num_nodes)
         self._build_spaces()
@@ -189,10 +206,11 @@ class EVRPTWVectorEnv(Env):
 
     def _build_spaces(self) -> None:
         n = self.num_nodes
+        coordinate_bounds = (-np.inf, np.inf) if self.observation_coordinate_mode == "depot_fixed" else (0.0, 1.0)
         obs_dict = {
-            "cus_loc": spaces.Box(0.0, 1.0, shape=(self.num_customers, 2), dtype=np.float32),
-            "depot_loc": spaces.Box(0.0, 1.0, shape=(1, 2), dtype=np.float32),
-            "rs_loc": spaces.Box(0.0, 1.0, shape=(self.num_stations, 2), dtype=np.float32),
+            "cus_loc": spaces.Box(*coordinate_bounds, shape=(self.num_customers, 2), dtype=np.float32),
+            "depot_loc": spaces.Box(*coordinate_bounds, shape=(1, 2), dtype=np.float32),
+            "rs_loc": spaces.Box(*coordinate_bounds, shape=(self.num_stations, 2), dtype=np.float32),
             "edge_distance": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
             "edge_time": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
             "edge_energy": spaces.Box(0.0, np.inf, shape=(n, n), dtype=np.float32),
@@ -224,6 +242,9 @@ class EVRPTWVectorEnv(Env):
             "battery_capacity": spaces.Box(0.0, np.inf, shape=(1,), dtype=np.float32),
             "loading_capacity": spaces.Box(0.0, np.inf, shape=(1,), dtype=np.float32),
         }
+        if self.observation_input_context:
+            obs_dict["node_input_context"] = spaces.Box(0.0, np.inf, shape=(n, NODE_INPUT_CONTEXT_DIM), dtype=np.float32)
+            obs_dict["graph_input_context"] = spaces.Box(0.0, np.inf, shape=(GRAPH_INPUT_CONTEXT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Dict(obs_dict)
         self.action_space = spaces.MultiDiscrete([n] * self.n_traj)
 
@@ -536,6 +557,7 @@ class EVRPTWVectorEnv(Env):
         edge_energy = (self.energy_kwh / max(self.battery_capacity_kwh, 1e-12)).astype(np.float32)
 
         return {
+            **self._input_context,
             "cus_loc": coords[self.customer_start:self.station_start].astype(np.float32),
             "depot_loc": coords[0:1].astype(np.float32),
             "rs_loc": coords[self.station_start:].astype(np.float32),
@@ -587,6 +609,11 @@ class EVRPTWVectorEnv(Env):
         }
 
     def _normalized_coords(self) -> np.ndarray:
+        if self.observation_coordinate_mode == "depot_fixed":
+            # Coordinates already use kilometres. One frozen length unit keeps
+            # both axes isotropic and independent of which customers are drawn.
+            # This representation never changes road distances or dynamics.
+            return (self.coords_raw - self.coords_raw[0]) / self.observation_distance_scale_km
         lo = self.coords_raw.min(axis=0)
         hi = self.coords_raw.max(axis=0)
         scale = np.maximum(hi - lo, 1e-6)

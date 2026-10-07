@@ -418,3 +418,61 @@ requires a scalar critic, complete feasible rollouts, no reward shaping, and a
 single GPU; it fails explicitly for unsupported settings. See
 [the design and ablation notes](docs/review_and_ablation_plan.md#reward-and-normalization-screen-2026-10-07)
 for objective semantics and scope.
+
+
+## Physical network-input normalization comparison
+
+This separate screen changes network inputs while holding the reward definition,
+SL-PPO losses, gamma 0.99, and `physical_shared_popart` training normalization
+fixed. It uses the completed normalization arm's best epoch-300 weights, included
+as `assets/input_norm/vrptw100_norm_epoch0300.pt` with checked SHA256 metadata.
+Optimizers, replay, actor RMS and PopArt statistics start fresh in every arm.
+
+```bash
+# Four independent single-GPU arms, 300 additional epochs, full validation every 50.
+bash scripts/run_input_norm_comparison.sh --seed 3009 --gpus 0,1,2,3
+
+# Replication on a second server with the same dataset and source branch.
+bash scripts/run_input_norm_comparison.sh --seed 3010 --gpus 0,1,2,3
+```
+
+Two- and three-card servers use `--gpus 0,1` or `--gpus 0,1,2`; excess arms queue.
+The shell runs in the background; `--prepare-only` only writes frozen configs.
+Each arm first passes a separate two-epoch GPU preflight. All four share 64
+instances x 50 trajectories, update5, four minibatches, and LR 1e-5. Validation
+uses all 1,000 instances, best-of-50, at epoch 0, every 50 epochs, and the end.
+The test split is reserved for final evaluation.
+
+| Arm | Coordinate input | Added physical context |
+|---|---|---|
+| `legacy` | Existing per-instance axis min-max | No |
+| `depot` | Depot-relative kilometres / frozen shared distance unit | No |
+| `context` | Existing per-instance axis min-max | Directed node relations and vehicle/global resources |
+| `combined` | Depot-relative kilometres / frozen shared distance unit | Both node and global context |
+
+The shared distance unit is 43.638668060302734 km, inherited from the source
+model and frozen across all instances/cities/customer counts in this screen.
+It is a unit choice for this experiment, not a claimed universally optimal value.
+Time uses the working horizon, energy the battery capacity, and demand the cargo
+capacity; the added global context records the corresponding physical scales.
+No physical transition, feasibility mask, route objective or reward is changed.
+The two context MLP output layers initialize to zero. Therefore epoch-0 results
+must agree within `legacy/context` and within `depot/combined`; changed coordinates
+can shift the starting performance between those pairs. This mature-model screen
+does not establish from-scratch or cross-size performance.
+
+Training monitors add input-encoder residual magnitude, gradient norm and update
+norm alongside KL, clipping, entropy, feasibility, reward-normalization statistics
+and runtime. New fixed-unit checkpoints record the input schema and units; full
+resume rejects incompatible input settings. Legacy configs without an explicit
+observation unit retain their historical fallback behavior. Older weights may
+initialize the new adapter using
+the explicit whitelist, with the representation migration recorded.
+
+```bash
+python scripts/plot_reward_norm_eval.py results/optimization/<input-run-directory>
+```
+
+The input configuration remains opt-in until matched validation and repeat-seed
+results justify fixing it. Literature rationale and acceptance criteria are in
+[the design and ablation notes](docs/review_and_ablation_plan.md#physical-input-normalization-and-representation-screen-2026-10-07).

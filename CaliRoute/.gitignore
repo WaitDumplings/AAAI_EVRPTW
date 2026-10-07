@@ -13,3 +13,4 @@ checkpoints/
 
 # Fixed weights-only initialization for the portable reward/norm experiment.
 !/assets/reward_norm/vrptw100_update5_epoch0300.pt
+!/assets/input_norm/vrptw100_norm_epoch0300.pt

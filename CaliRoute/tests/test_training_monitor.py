@@ -53,3 +53,29 @@ def test_legacy_rdi_scale_and_type_bias_receive_module_monitoring():
     values = plugin_diagnostics(model)
     assert abs(values['module_rdi_grad_norm_unclipped'] - 10**.5) < 1e-6
     assert abs(values['module_rdi_update_norm'] - .2) < 1e-6
+
+
+def test_input_context_monitor_observes_zero_start_and_first_learned_update():
+    from caliroute.plugins.input_encoding import PhysicalInputContextAdapter
+    model = torch.nn.Module()
+    model.backbone = torch.nn.Module()
+    model.backbone.physical_input_adapter = PhysicalInputContextAdapter(8)
+    adapter = model.backbone.physical_input_adapter
+    begin_monitor_epoch(model, 1, {'monitor_interval': 10})
+    output = adapter(torch.ones(2, 3, 12), torch.ones(2, 10))
+    output.sum().backward()
+    optimizer = torch.optim.SGD(model.parameters(), lr=.01)
+    snapshot = module_update_snapshot(model)
+    assert set(snapshot) == {'input_context'}
+    optimizer.step()
+    finish_module_update(model, snapshot)
+    values = plugin_diagnostics(model)
+    assert values['input_context_residual_rms'] == 0.
+    assert values['module_input_context_grad_norm_unclipped'] > 0.
+    assert values['module_input_context_update_norm'] > 0.
+    adapter(torch.ones(2, 3, 12), torch.ones(2, 10))
+    assert plugin_diagnostics(model)['input_context_residual_rms'] > 0.
+    assert all(not tensor.requires_grad for tensor in adapter.diagnostics().values())
+    begin_monitor_epoch(model, 2, {'monitor_interval': 10})
+    assert not adapter.diagnostics_enabled
+    assert plugin_diagnostics(model) == {}
