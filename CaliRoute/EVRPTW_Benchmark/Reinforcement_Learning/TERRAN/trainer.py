@@ -155,7 +155,11 @@ def set_pbrs_reward_scale(envs: Sequence[Any], scale: float) -> None:
 
 def build_pbrs_config(cfg: dict[str, Any]) -> PotentialRewardConfig | None:
     pbrs = cfg.get("pbrs", {})
+    strict_contract = str(cfg.get("env", {}).get("reward_contract", "legacy")) == "strict_distance"
+    if strict_contract and float(cfg.get("training", {}).get("gamma", 0.99)) != 1.0:
+        raise ValueError("strict_distance reward contract requires training.gamma=1")
     config = PotentialRewardConfig(
+        strict_contract=strict_contract,
         use_customer_pbrs=bool(pbrs.get("use_customer_pbrs", False)),
         use_repair_distance_pbrs=bool(pbrs.get("use_repair_distance_pbrs", False)),
         use_feasible_ratio_pbrs=bool(pbrs.get("use_feasible_ratio_pbrs", False)),

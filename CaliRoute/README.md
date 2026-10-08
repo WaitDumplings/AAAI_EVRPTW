@@ -574,3 +574,27 @@ one explicitly; omit `--watch` for one snapshot and press Ctrl-C to stop watchin
 A directory falls back to `status.json` before `comparison.json` exists. It reads
 formal metrics only and shows missing values as `--`. Snapshot timestamps expose
 stale reports; this command does not check live GPU utilization or process liveness.
+
+
+### Physical reward and exploration screen
+
+The next incremental screen fixes combined inputs and the full stage-two model,
+then compares `legacy`, `physics`, `archive`, and `explore` on four independent
+GPUs. It adds consistent road/time/energy inputs, finite-route gamma=1, valid-action
+PPO loss, optional fresh-KL stopping, structurally diverse verified replay, and
+independent branch search. Search trajectories never enter on-policy PPO.
+
+```bash
+git fetch origin
+git switch opt/physics-exploration-20261008
+git pull --ff-only
+# From CaliRoute:
+bash scripts/run_physics_exploration_comparison.sh --seed 3010 --gpus 0,1,2,3
+```
+
+The default is 300 additional epochs and full validation every 50 epochs. Every
+arm runs a full-batch two-epoch preflight first. See
+[configuration, controls and monitoring](docs/physics_exploration_comparison.md)
+for frozen units, initialization, optional `--target-kl`, and the extra compute
+budget in the exploration arm. Accuracy gains require the resulting controlled
+experiments; these changes do not establish global optimality.

@@ -11,11 +11,12 @@ import copy
 SCHEMA = 'physical_model_integration_v1'
 FLAGS = ('use_typed_static_fusion', 'use_edge_relation_encoder',
          'use_edge_value_messages', 'use_edge_state_updates', 'use_resource_decoder')
+FEATURE_FLAGS = ('agda_physical_candidate_features', 'agda_smooth_distance_features')
 
 
 def _canonical_model(model):
     result = {}
-    for name in FLAGS:
+    for name in (*FLAGS, *FEATURE_FLAGS):
         value = model.get(name, False)
         if not isinstance(value, bool):
             raise ValueError(f'{name} must be a boolean')
@@ -36,13 +37,13 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile[name] for name in FLAGS)
+    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS))
 
 
 def signature(cfg):
     model = cfg.get('model', {}) or {}
     result = {'schema': SCHEMA, **_canonical_model(model)}
-    if enabled(result):
+    if any(result[name] for name in FLAGS):
         from .input_normalization import signature as input_signature
         inputs = input_signature(cfg)
         if not inputs['use_physical_input_context']:
@@ -73,6 +74,10 @@ def checkpoint_profile(checkpoint, *, require_metadata=True):
         if require_metadata and enabled(computed):
             raise ValueError('Stage-two checkpoint is missing its model integration signature')
         return computed
+    if isinstance(saved, dict):
+        saved = copy.deepcopy(saved)
+        for name in FEATURE_FLAGS:
+            saved.setdefault(name, False)  # pre-feature v1 checkpoints
     if not isinstance(saved, dict) or saved != computed:
         raise ValueError('Checkpoint model integration signature does not match its saved config')
     return copy.deepcopy(saved)
@@ -83,7 +88,7 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
     target = getattr(agent, '_model_integration_signature', None)
     if target is None:
         actual = _canonical_model(getattr(getattr(agent, 'backbone', None), 'model_integration_settings', {}))
-        if enabled(source) or any(actual[name] for name in FLAGS):
+        if enabled(source) or any(actual[name] for name in (*FLAGS, *FEATURE_FLAGS)):
             raise ValueError('Configure the target model integration before loading stage-two weights')
         target = source
     _check_agent(agent, target)

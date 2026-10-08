@@ -268,8 +268,30 @@ def _customer_matrix(payload: dict[str, Any], names: tuple[str, ...], n: int, *,
     return arr
 
 
-def _distance_matrix(payload: dict[str, Any], depot: np.ndarray, customers: np.ndarray) -> np.ndarray:
+def _require_road_matrix(payload: dict[str, Any]) -> None:
+    """Require kilometre OD data, never manufacture road costs from geometry.
+
+    A numerical matrix cannot prove provenance. Reject missing matrices and
+    contradictory metric declarations; the dataset owns upstream provenance.
+    """
+    if payload.get("distance_matrix_km") is None:
+        raise ValueError("strict_road_metric requires distance_matrix_km; Euclidean fallback and unitless aliases are disabled")
+    metadata = payload.get("metadata") or {}
+    metric = str(metadata.get("distance_metric", payload.get("distance_metric", ""))).lower()
+    if any(name in metric for name in ("euclid", "straight", "geodesic", "haversine")):
+        raise ValueError("strict_road_metric rejects a non-road distance_metric declaration")
+    distance = np.asarray(payload["distance_matrix_km"])
+    if distance.ndim != 2 or distance.shape[0] != distance.shape[1]:
+        raise ValueError("distance_matrix_km must be square")
+    if np.isnan(distance).any() or (distance < 0).any():
+        raise ValueError("distance_matrix_km must contain nonnegative distances or +inf")
+
+
+def _distance_matrix(payload: dict[str, Any], depot: np.ndarray, customers: np.ndarray,
+                     *, strict_road_metric: bool = False) -> np.ndarray:
     n = int(customers.shape[0])
+    if strict_road_metric:
+        _require_road_matrix(payload)
     value = _first_present(payload, ("distance_matrix_km", "distance_matrix", "distances", "distance"))
     if value is None:
         coords = np.vstack([depot.reshape(1, 2), customers])
@@ -321,10 +343,11 @@ def _working_window(payload: dict[str, Any], tw_s: np.ndarray | None, *, use_tim
     return 0, DEFAULT_NON_BINDING_HORIZON_S
 
 
-def _classical_to_evrptw_dict(payload: dict[str, Any], problem_type: str) -> dict[str, Any]:
+def _classical_to_evrptw_dict(payload: dict[str, Any], problem_type: str,
+                             *, strict_road_metric: bool = False) -> dict[str, Any]:
     depot, customers = _coords_from_payload(payload)
     n = int(customers.shape[0])
-    distance_matrix_km = _distance_matrix(payload, depot, customers)
+    distance_matrix_km = _distance_matrix(payload, depot, customers, strict_road_metric=strict_road_metric)
     demands_cm3 = _customer_vector(
         payload,
         ("demands_cm3", "demands", "demand", "customer_demands", "customer_demand"),
@@ -392,6 +415,24 @@ def _classical_to_evrptw_dict(payload: dict[str, Any], problem_type: str) -> dic
             "time_window_constraint": bool(use_time_windows),
         }
     )
+    metadata["edge_matrix_provenance"] = {
+        "distance": ("provided_distance_matrix_km" if payload.get("distance_matrix_km") is not None
+                     else "provided_unitless_distance_alias" if _first_present(payload, ("distance_matrix", "distances", "distance")) is not None
+                     else "legacy_euclidean_coordinate_fallback"),
+        "strict_road_metric": bool(strict_road_metric),
+        "travel_time": "provided_travel_time_matrix_s" if use_time_windows and payload.get("travel_time_matrix_s") is not None else "distance_over_effective_speed",
+        "energy": "inactive_classical_problem",
+    }
+    # Preserve heterogeneous edge times. Environments opt in explicitly;
+    # old checkpoints retain their distance / speed dynamics by default.
+    travel_time = payload.get("travel_time_matrix_s") if use_time_windows else None
+    if travel_time is not None:
+        travel_time = np.asarray(travel_time, dtype=np.float32)
+        source_distance = _first_present(payload, ("distance_matrix_km", "distance_matrix", "distances", "distance"))
+        if source_distance is not None and travel_time.shape == np.asarray(source_distance).shape:
+            travel_time = travel_time[:n + 1, :n + 1]
+        if travel_time.shape != distance_matrix_km.shape:
+            raise ValueError("travel_time_matrix_s shape must match the selected distance matrix")
     return {
         "instance_id": str(payload.get("instance_id", metadata.get("instance_id", ""))),
         "region_id": str(payload.get("region_id", metadata.get("region_id", ""))),
@@ -404,6 +445,8 @@ def _classical_to_evrptw_dict(payload: dict[str, Any], problem_type: str) -> dic
         "customers": customers.astype(np.float32),
         "charging_stations": np.zeros((0, 2), dtype=np.float32),
         "distance_matrix_km": distance_matrix_km.astype(np.float32),
+        "travel_time_matrix_s": travel_time,
+        "energy_matrix_kwh": None,  # Battery is disabled for classical tasks.
         "demands_cm3": demands_cm3.astype(np.float32),
         "package_counts": package_counts.astype(np.int32),
         "service_time_s": service_time_s.astype(np.float32),
@@ -416,11 +459,16 @@ def _classical_to_evrptw_dict(payload: dict[str, Any], problem_type: str) -> dic
     }
 
 
-def adapt_instance_payload(payload: dict[str, Any], *, problem_type: str | None = None) -> EVRPTWInstance:
+def adapt_instance_payload(payload: dict[str, Any], *, problem_type: str | None = None,
+                           strict_road_metric: bool = False) -> EVRPTWInstance:
+    if not isinstance(strict_road_metric, bool):
+        raise ValueError("strict_road_metric must be a boolean")
+    if strict_road_metric:
+        _require_road_matrix(payload)
     resolved_problem = _problem_type_from_payload(payload, problem_type)
     if resolved_problem == "evrptw":
         return EVRPTWInstance.from_dict(payload)
-    adapted = _classical_to_evrptw_dict(payload, resolved_problem)
+    adapted = _classical_to_evrptw_dict(payload, resolved_problem, strict_road_metric=strict_road_metric)
     if not adapted["instance_id"]:
         adapted["instance_id"] = "adapted_instance"
     return EVRPTWInstance.from_dict(adapted)
@@ -433,6 +481,7 @@ def iter_adapted_instances(
     num_charging_stations: int | None = None,
     problem_type: str | None = None,
     limit: int | None = None,
+    strict_road_metric: bool = False,
 ) -> Iterator[EVRPTWInstance]:
     yielded = 0
     for idx, payload in enumerate(
@@ -445,7 +494,7 @@ def iter_adapted_instances(
         if "instance_id" not in payload or payload.get("instance_id") in (None, ""):
             payload = dict(payload)
             payload["instance_id"] = f"adapted_{idx:06d}"
-        instance = adapt_instance_payload(payload, problem_type=problem_type)
+        instance = adapt_instance_payload(payload, problem_type=problem_type, strict_road_metric=strict_road_metric)
         if num_customers is not None and instance.num_customers != int(num_customers):
             continue
         if num_charging_stations is not None and instance.num_charging_stations != int(num_charging_stations):
@@ -463,6 +512,7 @@ def load_adapted_instances(
     num_charging_stations: int | None = None,
     problem_type: str | None = None,
     limit: int | None = None,
+    strict_road_metric: bool = False,
 ) -> list[EVRPTWInstance]:
     return list(
         iter_adapted_instances(
@@ -471,6 +521,7 @@ def load_adapted_instances(
             num_charging_stations=num_charging_stations,
             problem_type=problem_type,
             limit=limit,
+            strict_road_metric=strict_road_metric,
         )
     )
 
@@ -483,6 +534,7 @@ class AdaptedFixedDatasetInstancePool:
     seed: int | None = None
     sample_mode: str = "shuffle_cycle"
     problem_type: str | None = None
+    strict_road_metric: bool = False
 
     def __post_init__(self) -> None:
         path = resolve_repo_path(self.dataset_path)
@@ -494,6 +546,7 @@ class AdaptedFixedDatasetInstancePool:
             num_customers=self.num_customers,
             num_charging_stations=self.num_charging_stations,
             problem_type=resolved_problem,
+            strict_road_metric=self.strict_road_metric,
         )
         if not self.instances:
             raise FileNotFoundError(

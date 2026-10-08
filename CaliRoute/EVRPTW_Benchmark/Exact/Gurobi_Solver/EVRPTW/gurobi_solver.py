@@ -243,7 +243,30 @@ class GurobiEVRPTWSolver:
             "mapping_errors": mapping_errors,
         }
 
+    @staticmethod
+    def _check_physical_matrices(instance):
+        """This historical benchmark only models constant speed/consumption.
+
+        Do not silently solve a different instance when callers supply genuine
+        per-edge T/E. Float32 storage roundoff in proportional matrices is fine.
+        """
+        distance = np.asarray(instance.distance_matrix_km, dtype=float)
+        speed = float(instance.speed_profile.get("effective_speed_kmh") or instance.vehicle.get("design_speed_kmh") or 40.)
+        consumption = float(instance.vehicle.get("consumption_kwh_per_km", .404))
+        for name, expected, atol in (
+            ("travel_time_matrix_s", distance / max(speed, 1e-9) * 3600., .005),
+            ("energy_matrix_kwh", distance * consumption, 1e-5),
+        ):
+            actual = getattr(instance, name, None)
+            if actual is None:
+                actual = (getattr(instance, "raw", None) or {}).get(name)
+            if actual is not None:
+                actual = np.asarray(actual, dtype=float)
+                if actual.shape != expected.shape or not np.allclose(actual, expected, rtol=1e-6, atol=atol):
+                    raise ValueError(f"Historical Gurobi EVRPTW benchmark does not support nonproportional {name}; refusing to discard explicit edge costs")
+
     def _build_model(self, instance: EVRPTWInstance) -> tuple[Model, NodeMap, dict[tuple[int, int], Any], Any, Any]:
+        self._check_physical_matrices(instance)
         n = instance.num_customers
         m = instance.num_charging_stations
         cs_copies = max(1, int(self.config.cs_copies)) if m else 0

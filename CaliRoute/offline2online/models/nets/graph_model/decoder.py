@@ -3,7 +3,7 @@ from torch import nn
 
 from .routing_adapters import PostChargeAdapter
 from caliroute.plugins.agda import AdaptiveGraphAttention
-from caliroute.plugins.physical_decision import ResourceDecisionAdapter
+from caliroute.plugins.physical_decision import ResourceDecisionAdapter, candidate_transitions
 
 from ...nets.graph_model.multi_head_attention import (
     AttentionScore,
@@ -156,6 +156,20 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
     produces dynamic corrections for attention keys, values, action keys, and a
     scalar action bias.
     """
+
+    def __init__(self, *args, agda_physical_candidate_features=False,
+                 agda_smooth_distance_features=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.agda_physical_candidate_features = bool(agda_physical_candidate_features)
+        self.agda_smooth_distance_features = bool(agda_smooth_distance_features)
+
+    def _distance_feature(self, value, *, signed=False):
+        if self.agda_smooth_distance_features:
+            # No fixed cap: preserve differences beyond the training geography.
+            # Unreachable entries are finite sentinels and still hard-masked.
+            value = torch.nan_to_num(value.float(), nan=0., posinf=1e6, neginf=-1e6)
+            return value.sign() * torch.log1p(value.abs())
+        return value.clamp(-1. if signed else 0., 2.)
 
     @staticmethod
     def _step_count(state, fallback=1):
@@ -484,6 +498,26 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
         current_battery_feasible = (battery_after <= battery_capacity).to(dtype)
         battery_margin = (1.0 - battery_after).clamp(-1.0, 1.0)
 
+        if self.agda_physical_candidate_features:
+            physical = candidate_transitions(state, node_embeddings)
+            travel_proxy = physical['travel_distance']
+            return_to_depot = physical['return_distance']
+            depot_detour = physical['depot_detour']
+            load_after = physical['load_after']
+            capacity_margin = physical['capacity_margin'].clamp(-1., 1.)
+            energy_ratio = physical['travel_energy'].clamp(0., 2.)
+            # Keep the 30-channel checkpoint layout. In this version slots
+            # 20/22/23 are true next time, service-start due slack, and work-end
+            # slack (instead of legacy arrival / arrival-due / finish-due).
+            arrival = physical['next_time']
+            wait = physical['wait']
+            arrival_slack = physical['start_due_slack']
+            finish_slack = physical['work_end_slack']
+            battery_after = physical['battery_after']
+            battery_margin = physical['battery_margin'].clamp(-1., 1.)
+            # Arrival consumption is checked before a CS recharge/depot reset.
+            current_battery_feasible = (physical['battery_on_arrival'] <= 1.).to(dtype)
+
         node_ids = torch.arange(N, device=device).view(1, 1, N)
         current_candidate = node_ids == current_node_idx.unsqueeze(-1)
         prev_candidate = node_ids == prev_node_idx.unsqueeze(-1)
@@ -517,9 +551,9 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
                 current_candidate.to(dtype),
                 prev_candidate.to(dtype),
                 (prev_candidate & rs_mask).to(dtype),
-                travel_proxy.clamp(0.0, 2.0),
-                return_to_depot.clamp(0.0, 2.0),
-                depot_detour.clamp(-1.0, 2.0),
+                self._distance_feature(travel_proxy),
+                self._distance_feature(return_to_depot),
+                self._distance_feature(depot_detour, signed=True),
                 (action_mask & unvisited_customer).to(dtype),
             ],
             dim=-1,
@@ -699,6 +733,8 @@ class Decoder(nn.Module):
         optimize_dynamic_projections=False,
         use_agda_v2=False,
         agda_hidden_dim=32,
+        agda_physical_candidate_features=False,
+        agda_smooth_distance_features=False,
         use_resource_decoder=False,
         decoder_observation_mode="feasible",
         edge_relation_dim=16,
@@ -734,6 +770,8 @@ class Decoder(nn.Module):
             optimize_dynamic_projections=optimize_dynamic_projections,
             use_agda_v2=use_agda_v2,
             agda_hidden_dim=agda_hidden_dim,
+            agda_physical_candidate_features=agda_physical_candidate_features,
+            agda_smooth_distance_features=agda_smooth_distance_features,
         )
 
         # glimpse + pointer

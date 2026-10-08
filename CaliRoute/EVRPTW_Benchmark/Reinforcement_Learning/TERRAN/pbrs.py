@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from gymnasium import Wrapper
@@ -17,6 +17,7 @@ class PotentialRewardConfig:
     use_terminal_heuristic: bool = False
     customer_pbrs_mode: str = "progress"  # strict PBRS: gamma * Phi(s_next) - Phi(s)
     gamma: float = 0.99
+    strict_contract: bool = False
     alpha: float = 2.0
     beta: float = 0.5
     customer_pbrs_coef: float = 1.0
@@ -35,6 +36,23 @@ class PotentialRewardConfig:
         if mode not in {"progress", "direct_progress"}:
             raise ValueError("customer_pbrs_mode must be progress or direct_progress")
         object.__setattr__(self, "customer_pbrs_mode", mode)
+        if self.strict_contract:
+            if float(self.gamma) != 1.0:
+                raise ValueError("strict reward shaping requires gamma=1 for the finite total-distance objective")
+            if mode != "progress":
+                raise ValueError("strict reward shaping requires customer_pbrs_mode=progress")
+            if self.pbrs_clip is not None:
+                raise ValueError("strict reward shaping forbids pbrs_clip because clipping breaks telescoping")
+            if self.use_terminal_heuristic:
+                raise ValueError("strict reward shaping forbids terminal bonuses; failures use the environment's physical cost")
+            if not np.isfinite(float(self.beta)) or float(self.beta) <= 0:
+                raise ValueError("beta must be finite and positive under the strict reward contract")
+            if not np.isfinite(float(self.customer_progress_mix)) or not 0 <= float(self.customer_progress_mix) <= 1:
+                raise ValueError("customer_progress_mix must lie in [0, 1] under the strict reward contract")
+            for name in ("customer_pbrs_coef", "customer_progress_budget", "repair_progress_coef", "feasible_ratio_coef"):
+                value = float(getattr(self, name))
+                if not np.isfinite(value) or value < 0:
+                    raise ValueError(f"{name} must be finite and nonnegative under the strict reward contract")
 
 
 class PotentialRewardWrapper(Wrapper):
@@ -49,6 +67,10 @@ class PotentialRewardWrapper(Wrapper):
     def __init__(self, env, config: PotentialRewardConfig | None = None, **kwargs: Any) -> None:
         super().__init__(env)
         self.config = config or PotentialRewardConfig(**kwargs)
+        if getattr(self.unwrapped, "reward_contract", "legacy") == "strict_distance" and not self.config.strict_contract:
+            self.config = replace(self.config, strict_contract=True)
+        if self.config.strict_contract and getattr(self.unwrapped, "reward_contract", "legacy") != "strict_distance":
+            raise ValueError("strict reward shaping requires an environment with reward_contract=strict_distance")
         self._last_obs: dict[str, np.ndarray] | None = None
         self._last_info: dict[str, Any] | None = None
         self._last_finished: np.ndarray | None = None
@@ -56,8 +78,13 @@ class PotentialRewardWrapper(Wrapper):
         self._node_to_depot_repair_dist: np.ndarray | None = None
         self._total_customer_repair_dist: float = 1.0
         self.reward_scale = 1.0
+        self._episode_reward_scale: float | None = None
+        self._last_potentials: dict[str, np.ndarray] | None = None
+        self._initial_potential: np.ndarray | None = None
 
     def set_reward_scale(self, reward_scale: float) -> None:
+        if self.config.strict_contract and (not np.isfinite(float(reward_scale)) or float(reward_scale) < 0):
+            raise ValueError("Strict reward shaping scale must be finite and nonnegative")
         self.reward_scale = max(float(reward_scale), 0.0)
 
     def reset(self, **kwargs: Any):
@@ -67,11 +94,22 @@ class PotentialRewardWrapper(Wrapper):
         self._last_info = info
         self._last_finished = np.zeros_like(info["served_customers"], dtype=bool)
         zero = np.zeros_like(info["served_customers"], dtype=np.float32)
-        return obs, self._augment_info(info, zero)
+        info = self._augment_info(info, zero)
+        if self.config.strict_contract:
+            self._episode_reward_scale = float(self.reward_scale)
+            self._last_potentials = self._strict_potential_components(obs, info)
+            self._initial_potential = self._episode_reward_scale * sum(self._last_potentials.values(), zero.copy())
+            info["reward_shaping_initial_potential"] = self._initial_potential.copy()
+            info["reward_base"] = zero.copy()
+            info["reward_shaping"] = zero.copy()
+            info["reward_failure_cost"] = zero.copy()
+        return obs, info
 
     def step(self, action):
         if self._last_obs is None or self._last_info is None or self._last_finished is None:
             raise RuntimeError("PotentialRewardWrapper.step called before reset.")
+        if self.config.strict_contract:
+            return self._strict_step(action)
         prev_obs = self._last_obs
         prev_info = self._last_info
         prev_finished = self._last_finished.copy()
@@ -103,6 +141,58 @@ class PotentialRewardWrapper(Wrapper):
             "shaped": shaped.copy(),
             "pbrs_scale": np.full_like(shaped, scale, dtype=np.float32),
         }
+        return obs, shaped, terminated, truncated, out_info
+
+    def _strict_potential_components(self, obs, info) -> dict[str, np.ndarray]:
+        cfg = self.config
+        served = np.asarray(info["served_customers"], dtype=np.float64)
+        n = max(float(self.unwrapped.num_customers), 1.0)
+        zero = np.zeros_like(served)
+        customer = zero.copy()
+        if cfg.use_customer_pbrs:
+            ratio = np.clip(served / n, 0.0, 1.0)
+            mix = float(np.clip(cfg.customer_progress_mix, 0.0, 1.0))
+            phi = (1.0 - mix) * ratio + mix * self._direct_progress_potential(served, n, max(float(cfg.beta), 1e-8))
+            customer = float(cfg.customer_pbrs_coef) * float(cfg.customer_progress_budget) * phi
+        repair = float(cfg.repair_progress_coef) * (1.0 - self._remaining_repair_ratio().astype(np.float64)) if cfg.use_repair_distance_pbrs else zero.copy()
+        feasible = float(cfg.feasible_ratio_coef) * self._feasible_customer_ratio(obs).astype(np.float64) if cfg.use_feasible_ratio_pbrs else zero.copy()
+        return {"pbrs_customer": customer, "pbrs_repair_distance": repair, "pbrs_feasible_ratio": feasible}
+
+    def _strict_step(self, action):
+        if self._last_potentials is None or self._initial_potential is None:
+            raise RuntimeError("Strict reward shaping requires reset before step")
+        if float(self.reward_scale) != self._episode_reward_scale:
+            raise ValueError("Strict reward shaping scale cannot change within an episode")
+        previous_finished = self._last_finished.copy()
+        obs, base_reward, terminated, truncated, info = self.env.step(action)
+        finished = np.asarray(terminated, dtype=bool) | np.asarray(truncated, dtype=bool)
+        potentials = self._strict_potential_components(obs, info)
+        components = dict(info.get("reward_components", {}))
+        shaping = np.zeros_like(base_reward, dtype=np.float64)
+        scale = float(self._episode_reward_scale)
+        for name, potential in potentials.items():
+            # Every true terminal state has Phi=0, including failed terminals.
+            potential[finished] = 0.0
+            term = scale * (potential - self._last_potentials[name])
+            term[previous_finished] = 0.0
+            components[name] = term.astype(np.float32)
+            shaping += term
+        base_reward = np.asarray(base_reward, dtype=np.float32).copy()
+        base_reward[previous_finished] = 0.0
+        shaping = shaping.astype(np.float32)
+        shaped = base_reward + shaping
+        components.update({
+            "base": base_reward.copy(), "terminal_heuristic": np.zeros_like(shaped),
+            "shaped": shaped.copy(), "pbrs_scale": np.full_like(shaped, scale),
+        })
+        self._last_obs, self._last_info = obs, info
+        self._last_finished = finished
+        self._last_potentials = potentials
+        out_info = dict(info)
+        out_info["reward_components"] = components
+        out_info["reward_base"] = base_reward.copy()
+        out_info["reward_shaping"] = shaping.copy()
+        out_info["reward_shaping_initial_potential"] = self._initial_potential.copy()
         return obs, shaped, terminated, truncated, out_info
 
     def _prepare_repair_distance_cache(self) -> None:

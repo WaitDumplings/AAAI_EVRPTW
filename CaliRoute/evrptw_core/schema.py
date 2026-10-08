@@ -37,6 +37,9 @@ class EVRPTWInstance:
     greedy_audit: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Explicit per-edge physical costs; legacy environments opt in to use them.
+    travel_time_matrix_s: np.ndarray | None = None
+    energy_matrix_kwh: np.ndarray | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EVRPTWInstance":
@@ -63,6 +66,10 @@ class EVRPTWInstance:
             greedy_audit=dict(data.get("greedy_audit", {})),
             metadata=dict(data.get("metadata", {})),
             raw=data,
+            travel_time_matrix_s=(None if data.get("travel_time_matrix_s") is None
+                                  else np.asarray(data["travel_time_matrix_s"], dtype=np.float32)),
+            energy_matrix_kwh=(None if data.get("energy_matrix_kwh") is None
+                               else np.asarray(data["energy_matrix_kwh"], dtype=np.float32)),
         )
 
     @property

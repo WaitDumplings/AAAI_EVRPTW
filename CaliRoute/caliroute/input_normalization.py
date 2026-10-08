@@ -49,7 +49,12 @@ def input_normalization_signature(cfg):
         raise ValueError("Physical input normalization requires explicit observation_distance_scale_km")
     if unit is not None:
         unit = _positive(unit, "observation_distance_scale_km")
+    switches = {"strict_road_metric": cfg.get("data", {}).get("strict_road_metric", False),
+                "prefer_explicit_edge_matrices": env.get("prefer_explicit_edge_matrices", False)}
+    if any(not isinstance(value, bool) for value in switches.values()):
+        raise ValueError("strict_road_metric and prefer_explicit_edge_matrices must be booleans")
     return {
+        **switches,
         "observation_coordinate_mode": mode,
         "observation_distance_scale_km": unit,
         "observation_input_context": context,
@@ -70,20 +75,25 @@ def build_input_context(*, distance_km, travel_time_s, energy_kwh,
     feasibility. Zero-length edges and zero energy remain legal. Matrix summary
     means exclude self edges and unreachable entries. Inactive physical resource
     features are zero and have a separate activity flag, avoiding dummy values.
+    Global speed/consumption are nominal resource descriptors; explicit edge T/E
+    matrices remain authoritative when road-specific costs are provided.
     """
     metadata = metadata or {}
     length = _positive(distance_scale_km, "observation_distance_scale_km")
     horizon = _positive(horizon_s, "horizon_s")
     battery, cargo = float(battery_capacity_kwh), float(cargo_capacity_cm3)
     consumption = float(energy_per_km)
+    energy = np.asarray(energy_kwh, dtype=np.float64)
+    # Explicit heterogeneous energy may be meaningful even if the nominal
+    # vehicle consumption is zero. The task activity flag remains authoritative.
+    energy_active = consumption > 0 or bool(np.any(np.isfinite(energy) & (energy > 0)))
     battery_active = (bool(metadata.get("charging_constraint", True))
-                      and math.isfinite(battery) and battery > 0 and consumption > 0)
+                      and math.isfinite(battery) and battery > 0 and energy_active)
     capacity_active = (bool(metadata.get("capacity_constraint", True))
                        and math.isfinite(cargo) and cargo > 0)
     time_active = bool(metadata.get("time_window_constraint", True))
     distance = np.asarray(distance_km, dtype=np.float64)
     travel = np.asarray(travel_time_s, dtype=np.float64)
-    energy = np.asarray(energy_kwh, dtype=np.float64)
     if distance.ndim != 2 or distance.shape[0] != distance.shape[1] or distance.shape[0] < 1:
         raise ValueError("distance_km must be a nonempty square matrix")
     if travel.shape != distance.shape or energy.shape != distance.shape:

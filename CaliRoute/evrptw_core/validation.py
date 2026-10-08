@@ -52,6 +52,17 @@ def validate_instance_structure(instance: EVRPTWInstance) -> ValidationResult:
         if np.max(np.abs(diagonal)) > 1e-5:
             warnings.append("distance_matrix_km diagonal is not zero")
 
+    for name in ("travel_time_matrix_s", "energy_matrix_kwh"):
+        value = getattr(instance, name, None)
+        if value is None:
+            continue
+        value = np.asarray(value)
+        if value.shape != instance.distance_matrix_km.shape:
+            errors.append(f"{name} shape must match distance_matrix_km")
+        elif (np.isnan(value).any() or (value < 0).any()
+              or not np.array_equal(np.isfinite(value), np.isfinite(instance.distance_matrix_km))):
+            errors.append(f"{name} must be nonnegative and share distance reachability")
+
     return ValidationResult(
         success=not errors,
         errors=errors,

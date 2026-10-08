@@ -102,3 +102,45 @@ def gradient_component_diagnostics(losses, parameters):
         name: detached_component_gradients(loss, parameters)
         for name, loss in losses.items()
     })
+
+
+class DetachedGradientAccumulator:
+    """Sum detached common-head gradients across sequential loss chunks.
+
+    Norms of chunk sums represent the actual minibatch contribution; summing
+    chunk norms would incorrectly hide cancellation. Sampling retains only the
+    tiny parameter-gradient vectors, never their forward activation graphs.
+    """
+    def __init__(self, parameters, names=('ppo_minibatch', 'expert', 'replay')):
+        self.parameters = tuple(parameter for parameter in parameters if parameter.requires_grad)
+        self.gradients = {name: tuple(torch.zeros_like(p, dtype=torch.float32) for p in self.parameters)
+                          for name in names}
+
+    def sample(self, name, loss):
+        gradients = detached_component_gradients(loss, self.parameters)
+        if gradients:
+            if name not in self.gradients:
+                self.gradients[name] = tuple(torch.zeros_like(g, dtype=torch.float32) for g in gradients)
+            with torch.no_grad():
+                for total, gradient in zip(self.gradients[name], gradients):
+                    total.add_(gradient.float())
+        return gradients
+
+    def diagnostics(self):
+        values = gradient_diagnostics_from_components(self.gradients)
+        # Report only the intended comparisons. Inactive replay has zero norm,
+        # not a meaningful cosine or an enormous expert/replay denominator ratio.
+        output = {key: value for key, value in values.items() if key.endswith('_norm')}
+        reference = values.get('grad_ppo_minibatch_norm')
+        if reference is not None:
+            undefined = reference.new_full((), float('nan'))  # JSON monitor emits null.
+            for name in ('expert', 'replay'):
+                norm = values.get(f'grad_{name}_norm')
+                if norm is None:
+                    continue
+                output[f'grad_{name}_to_ppo_minibatch_ratio'] = torch.where(
+                    reference > 1e-12, norm / reference.clamp_min(1e-12), undefined)
+                output[f'grad_{name}_ppo_minibatch_cosine'] = torch.where(
+                    (norm > 1e-12) & (reference > 1e-12),
+                    values[f'grad_ppo_minibatch_{name}_cosine'], undefined)
+        return output

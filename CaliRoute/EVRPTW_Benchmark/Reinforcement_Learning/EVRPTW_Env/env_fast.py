@@ -46,6 +46,7 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
 
     def step(self, action):
         action_arr = np.asarray(action, dtype=np.int64).reshape(self.n_traj)
+        reward_snapshot = self._reward_step_snapshot()
         if self._current_action_mask is None:
             mask_before = self._compute_action_mask()
         else:
@@ -80,6 +81,7 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
 
         self._current_action_mask = np.asarray(action_mask, dtype=bool).copy()
         info = self._make_info(action_mask)
+        reward, info = self._finalize_reward_step(reward, info, reward_snapshot)
         return obs, reward, self.terminated.copy(), self.truncated.copy(), info
 
     def _precompute_stop_return_times(self) -> None:

@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "EVRPTW_Core"))
 
 from evrptw_core.schema import EVRPTWInstance, merge_route_sequences
+from evrptw_core.physical import resolve_physical_edge_matrices
 from caliroute.input_normalization import (build_input_context, NODE_INPUT_CONTEXT_DIM, GRAPH_INPUT_CONTEXT_DIM)
 
 
@@ -61,6 +62,9 @@ class EVRPTWVectorEnv(Env):
         observation_distance_scale_km: float | None = None,
         observation_coordinate_mode: str = "legacy_minmax",
         observation_input_context: bool = False,
+        reward_contract: str = "legacy",
+        failure_penalty_km: float | None = None,
+        prefer_explicit_edge_matrices: bool = False,
     ) -> None:
         super().__init__()
         if reward_mode not in {"distance", "distance_success"}:
@@ -76,6 +80,19 @@ class EVRPTWVectorEnv(Env):
         self.max_steps_factor = int(max_steps_factor)
         self.charging_mode = charging_mode
         self.normalize_reward = bool(normalize_reward)
+        self.reward_contract = str(reward_contract)
+        self.failure_penalty_km = failure_penalty_km
+        self.prefer_explicit_edge_matrices = bool(prefer_explicit_edge_matrices)
+        if self.reward_contract not in {"legacy", "strict_distance"}:
+            raise ValueError("reward_contract must be legacy or strict_distance")
+        if self.reward_contract == "strict_distance":
+            if not self.normalize_reward or reward_distance_scale_km is None:
+                raise ValueError("strict_distance requires an explicit positive reward_distance_scale_km and normalize_reward=True")
+            if reward_mode != "distance" or float(success_bonus) != 0.0:
+                raise ValueError("strict_distance forbids success bonuses; complete-route distance defines the objective")
+            if failure_penalty_km is None or not math.isfinite(float(failure_penalty_km)) or float(failure_penalty_km) <= 0.0:
+                raise ValueError("strict_distance requires an explicit finite positive failure_penalty_km")
+            self.failure_penalty_km = float(failure_penalty_km)
         self.reward_distance_scale_km_override = reward_distance_scale_km
         self.observation_distance_scale_km_override = observation_distance_scale_km
         self.observation_coordinate_mode = str(observation_coordinate_mode)
@@ -121,7 +138,12 @@ class EVRPTWVectorEnv(Env):
         self.station_nodes = np.arange(self.station_start, self.num_nodes, dtype=np.int32)
         self.stop_nodes = [0] + [int(x) for x in self.station_nodes]
 
-        self.distance_km = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+        physical_edges = resolve_physical_edge_matrices(
+            instance, prefer_explicit_edge_matrices=self.prefer_explicit_edge_matrices,
+        )
+        self.distance_km = physical_edges["distance_km"]
+        self.travel_time_source = physical_edges["travel_time_source"]
+        self.energy_source = physical_edges["energy_source"]
         self.reward_distance_scale_km = self._compute_reward_distance_scale_km()
         # Preserve legacy observations unless their distance unit is explicit.
         # The observation unit never changes rewards or physical feasibility.
@@ -144,11 +166,11 @@ class EVRPTWVectorEnv(Env):
             or 40.0
         )
         self.speed_km_per_s = max(self.speed_kmh / 3600.0, 1e-12)
-        self.travel_time_s = self.distance_km / self.speed_km_per_s
+        self.travel_time_s = physical_edges["travel_time_s"]
 
         self.battery_capacity_kwh = float(instance.vehicle.get("battery_capacity_kwh", 100.0))
         self.energy_per_km = float(instance.vehicle.get("consumption_kwh_per_km", 0.404))
-        self.energy_kwh = self.distance_km * self.energy_per_km
+        self.energy_kwh = physical_edges["energy_kwh"]
         self.cargo_capacity_cm3 = float(instance.vehicle.get("cargo_capacity_cm3", np.inf))
         self.full_charge_time_s = float(instance.vehicle.get("full_charge_time_s", 0.0))
         self.working_start_s = float(instance.working_start_s)
@@ -294,6 +316,7 @@ class EVRPTWVectorEnv(Env):
 
     def step(self, action):
         action_arr = np.asarray(action, dtype=np.int64).reshape(self.n_traj)
+        reward_snapshot = self._reward_step_snapshot()
         mask_before = self._compute_action_mask()
         reward = np.zeros(self.n_traj, dtype=np.float32)
         self.invalid_action.fill(False)
@@ -324,7 +347,44 @@ class EVRPTWVectorEnv(Env):
             action_mask = obs["action_mask"]
 
         info = self._make_info(action_mask)
+        reward, info = self._finalize_reward_step(reward, info, reward_snapshot)
         return obs, reward, self.terminated.copy(), self.truncated.copy(), info
+
+    def _reward_step_snapshot(self):
+        if self.reward_contract != "strict_distance":
+            return None
+        return (self.terminated | self.truncated).copy(), self.objective_distance_km.copy()
+
+    def _finalize_reward_step(self, reward, info, snapshot):
+        """Apply one physical cost to every genuine unsuccessful episode end.
+
+        Invalid actions, dead ends and the environment horizon share the same
+        explicit km-equivalent failure cost. A host rollout cutoff is not an
+        environment failure and must be handled by the collecting trainer.
+        """
+        if snapshot is None:
+            return reward, info
+        previous_finished, previous_distance = snapshot
+        active = ~previous_finished
+        newly_finished = active & (self.terminated | self.truncated)
+        failed = newly_finished & ~np.asarray(info["success"], dtype=bool)
+        distance = np.where(active, -(self.objective_distance_km - previous_distance) / self.reward_distance_scale_km, 0.0).astype(np.float32)
+        failure = np.where(failed, -float(self.failure_penalty_km) / self.reward_distance_scale_km, 0.0).astype(np.float32)
+        # Replace the legacy invalid-action number, rather than double counting it.
+        reward = distance + failure
+        info = dict(info)
+        info["reward_contract"] = self.reward_contract
+        info["reward_unit_km"] = float(self.reward_distance_scale_km)
+        info["failure_penalty_km"] = float(self.failure_penalty_km)
+        info["reward_base"] = reward.copy()
+        info["reward_shaping"] = np.zeros_like(reward)
+        info["reward_failure_cost"] = -failure.copy()
+        info["reward_components"] = {
+            "distance": distance, "failure": failure,
+            "success_bonus": np.zeros_like(distance),
+            "base": reward.copy(), "shaped": reward.copy(),
+        }
+        return reward, info
 
     def _apply_action(self, traj_idx: int, destination: int) -> float:
         start = int(self.last[traj_idx])

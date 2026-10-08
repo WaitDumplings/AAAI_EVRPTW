@@ -97,8 +97,7 @@ class GurobiVRPTWSolver:
         distance = np.asarray(instance.distance_matrix_km, dtype=float)
         travel_time = np.asarray(instance.travel_time_matrix_s, dtype=float)
         if travel_time.shape != distance.shape:
-            # Fallback for malformed CVRP-like payloads; VRPTW bundles should provide travel_time_matrix_s.
-            travel_time = distance * 3600.0 / 40.0
+            raise ValueError("VRPTW benchmark requires travel_time_matrix_s matching distance_matrix_km; refusing an implicit constant-speed fallback")
 
         demand = np.zeros(n + 1, dtype=float)
         demand[1:] = np.asarray(instance.demands_cm3, dtype=float)

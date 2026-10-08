@@ -57,9 +57,13 @@ from .model_integration import (configure as configure_model_integration,
                                 load_checkpoint_profile as load_model_integration_profile,
                                 signature as model_integration_signature)
 from .training_schedule import apply_epoch_schedule
+from .ppo_protocol import (reduction_mode, chunk_weight as ppo_chunk_weight,
+                           reduce_step_means, fresh_policy_kl, rollout_quality_diagnostics,
+                           protocol_signature, validate_protocol)
 from .training_monitor import (begin_monitor_epoch, module_update_snapshot, finish_module_update, plugin_diagnostics, average_diagnostics, append_monitor_row)
 from .slppo_diagnostics import (tensors_to_floats, value_and_advantage_diagnostics,
-                                detached_component_gradients, gradient_diagnostics_from_components)
+                                detached_component_gradients, gradient_diagnostics_from_components,
+                                DetachedGradientAccumulator)
 from .distributed import (
     DistributedContext, DISTRIBUTED_TRAIN_FIELDS, rank_seed,
     capture_local_training_state, restore_local_training_state,
@@ -211,6 +215,7 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "epoch": int(epoch),
             "seed": int(seed),
             "config": cfg,
+            "ppo_protocol_signature": protocol_signature(cfg),
             "model_state_dict": inference_model_state(agent),
             **input_checkpoint_metadata(agent, cfg),
             **model_integration_checkpoint_metadata(agent, cfg),
@@ -934,6 +939,7 @@ def _make_envs(cfg: dict[str, Any], seed: int, *, problem_type: str):
         seed=seed,
         sample_mode=str(data_cfg.get("train_sample_mode", "shuffle_cycle")),
         problem_type=problem_type,
+        strict_road_metric=bool(data_cfg.get("strict_road_metric", False)),
     )
     _configure_dataset_reward_scale(cfg, pool)
     pbrs_config = build_pbrs_config(cfg)
@@ -1056,6 +1062,10 @@ def _load_training_checkpoint(
     model_profile_info = load_model_integration_profile(
         agent, checkpoint, resume=True, checkpoint_path=ckpt_path,
     )
+    expected_protocol = getattr(agent, '_ppo_protocol_signature', None)
+    saved_protocol = checkpoint.get('ppo_protocol_signature', protocol_signature(checkpoint.get('config', {})))
+    if expected_protocol is not None and saved_protocol != expected_protocol:
+        raise ValueError('PPO/reward/exploration protocol changed during resume; use a weights-only initialization for a new experiment')
     result = agent.load_state_dict(state_dict, strict=strict)
     agent._pending_reward_normalization_state = checkpoint.get("reward_normalization_state")
     optimizer_loaded = False
@@ -1127,6 +1137,7 @@ def _eval_instance_batches(
     limit: int | None = None,
     num_batches_limit: int | None = None,
     problem_type: str | None = None,
+    strict_road_metric: bool = False,
 ):
     max_count = None if limit is None else int(limit)
     if num_batches_limit is not None:
@@ -1139,6 +1150,7 @@ def _eval_instance_batches(
         num_customers=num_customers,
         num_charging_stations=num_charging_stations,
         problem_type=problem_type,
+        strict_road_metric=strict_road_metric,
     ):
         if max_count is not None and seen >= max_count:
             break
@@ -1421,7 +1433,7 @@ def _validate_cvrp_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_vrptw_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
+def _validate_vrptw_eval_route(instance, row: dict[str, Any], *, prefer_explicit_edge_matrices=False) -> dict[str, Any]:
     """Verify exported VRPTW routes independently of the environment state.
 
     Times use the adapted instance's directed distances and effective speed,
@@ -1481,7 +1493,10 @@ def _validate_vrptw_eval_route(instance, row: dict[str, Any]) -> dict[str, Any]:
     if not inputs_valid or not result["indices_valid"] or not result["depot_endpoints_valid"]:
         return result
 
-    travel = distance / max(speed / 3600.0, 1e-12)
+    from evrptw_core.physical import resolve_physical_edge_matrices
+    physical = resolve_physical_edge_matrices(instance, prefer_explicit_edge_matrices=prefer_explicit_edge_matrices)
+    travel = physical['travel_time_s']
+    result['travel_time_source'] = physical['travel_time_source']
     for route_index, route in enumerate(row.get("routes", [])):
         clock = start
         waiting = 0.0
@@ -1609,6 +1624,7 @@ def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, e
         limit,
         num_batches_limit,
         problem_type=problem_type,
+        strict_road_metric=bool(data_cfg.get("strict_road_metric", False)),
     ):
         eval_env_cfg = dict(cfg.get("env", {}) or {})
         if bool(eval_env_cfg.get("use_fast_env", True)):
@@ -1635,7 +1651,7 @@ def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, e
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_cvrp_route_validation"
                 elif problem_type == "vrptw":
-                    row["route_validation"] = _validate_vrptw_eval_route(instance, row)
+                    row["route_validation"] = _validate_vrptw_eval_route(instance, row, prefer_explicit_edge_matrices=bool(cfg.get('env', {}).get('prefer_explicit_edge_matrices', False)))
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_vrptw_route_validation"
                 else:
@@ -1749,6 +1765,12 @@ def _init_policy_route_pool(cfg, train_pool):
         capacity=offline_cfg.get("policy_replay_capacity", 3),
         max_relative_gap=offline_cfg.get("policy_replay_max_relative_gap", 0.05),
         min_edge_distance=offline_cfg.get("policy_replay_min_edge_distance", 0.10),
+        structure_enabled=offline_cfg.get('policy_replay_selection', 'legacy') == 'structural',
+        partition_weight=offline_cfg.get('policy_replay_partition_weight', .5),
+        min_structure_distance=offline_cfg.get('policy_replay_min_structure_distance', .1),
+        exploration_capacity=offline_cfg.get('policy_replay_exploration_capacity', 0),
+        exploration_max_relative_gap=offline_cfg.get('policy_replay_exploration_max_relative_gap', .25),
+        exploration_stagnation_epochs=offline_cfg.get('policy_replay_exploration_stagnation_epochs', 10),
     )
 
 
@@ -1838,20 +1860,40 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
     valid = batch.valid.detach().cpu().numpy()
     new_budget = max(0, int(offline_cfg.get("policy_replay_max_new_routes", 32)))
     added = rejected = attempted = 0
-    ranked = [np.flatnonzero(success[index] & np.isfinite(objective[index])) for index in range(num_envs)]
-    ranked = [indices[np.argsort(objective[index, indices], kind="stable")] for index, indices in enumerate(ranked)]
-    for rank in range(route_pool.capacity):
-        for env_idx in order:
-            if attempted >= new_budget:
-                break
-            if len(ranked[env_idx]) <= rank:
-                continue
-            trajectory = int(ranked[env_idx][rank])
-            sequence = actions[:, env_idx, trajectory][valid[:, env_idx, trajectory]].tolist()
+    selection_info = {}
+    if offline_cfg.get('policy_replay_selection', 'legacy') == 'structural':
+        from caliroute.plugins.exploration import select_rollout_candidates
+        selected, route_pool.intake_cursor, selection_info = select_rollout_candidates(
+            actions, valid, objective, success,
+            num_customers=int(envs[0].unwrapped.instance.num_customers),
+            budget=new_budget, cursor=route_pool.intake_cursor,
+            per_instance_capacity=route_pool.capacity,
+            max_relative_gap=route_pool.exploration_max_relative_gap,
+            min_distance=route_pool.min_structure_distance,
+            partition_weight=route_pool.partition_weight,
+        )
+        for candidate in selected:
+            result = route_pool.ingest(_env_instance_id(envs[candidate.env_idx]),
+                                      candidate.actions, candidate.objective, epoch=epoch)
             attempted += 1
-            accepted = route_pool.add(_env_instance_id(envs[env_idx]), sequence, objective[env_idx, trajectory])
-            added += int(accepted)
-            rejected += int(not accepted)
+            added += int(result['elite_added'])
+            rejected += int(not result['verified'])
+        selection_info.update(route_pool.exploration_diagnostics(epoch))
+    else:
+        ranked = [np.flatnonzero(success[index] & np.isfinite(objective[index])) for index in range(num_envs)]
+        ranked = [indices[np.argsort(objective[index, indices], kind="stable")] for index, indices in enumerate(ranked)]
+        for rank in range(route_pool.capacity):
+            for env_idx in order:
+                if attempted >= new_budget:
+                    break
+                if len(ranked[env_idx]) <= rank:
+                    continue
+                trajectory = int(ranked[env_idx][rank])
+                sequence = actions[:, env_idx, trajectory][valid[:, env_idx, trajectory]].tolist()
+                attempted += 1
+                accepted = route_pool.add(_env_instance_id(envs[env_idx]), sequence, objective[env_idx, trajectory])
+                added += int(accepted)
+                rejected += int(not accepted)
     info = {
         "policy_replay_pool_routes": float(len(route_pool)),
         "policy_replay_candidates": float(len(candidates)),
@@ -1866,6 +1908,7 @@ def _prepare_policy_replay_candidates(agent, batch, cfg, envs, route_pool, devic
         "policy_replay_seen_edge_diversity": float(np.mean(seen_edge_distances)) if seen_edge_distances else 0.0,
     }
 
+    info.update(selection_info)
     info.update(numpy_distribution([candidate.advantage for candidate in candidates], "monitor_replay_adv"))
     info.update(numpy_distribution([candidate.old_mean_logprob for candidate in candidates], "monitor_replay_support"))
     return candidates, info
@@ -2542,6 +2585,8 @@ def _evaluate_policy_loss_with_stats(
     entropy_losses = []
     approx_kls = []
     clip_fracs = []
+    valid_counts = []
+    reduction = reduction_mode(cfg)
     for step in range(step_start, step_end):
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
@@ -2559,6 +2604,7 @@ def _evaluate_policy_loss_with_stats(
         unclipped = ratio * adv
         clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * adv
         valid = batch.valid[step, env_indices]
+        valid_counts.append(valid.sum())
         policy_losses.append(-_masked_mean(torch.minimum(unclipped, clipped), valid))
         normalization = getattr(agent, "_reward_normalization", None)
         if normalization is None:
@@ -2572,13 +2618,13 @@ def _evaluate_policy_loss_with_stats(
         with torch.no_grad():
             approx_kls.append(_masked_mean((ratio - 1.0) - logratio, valid))
             clip_fracs.append(_masked_mean((torch.abs(ratio - 1.0) > clip_coef).float(), valid))
-    policy_loss = torch.stack(policy_losses).mean()
-    value_loss = torch.stack(value_losses).mean()
-    entropy_loss = torch.stack(entropy_losses).mean()
+    policy_loss = reduce_step_means(policy_losses, valid_counts, reduction)
+    value_loss = reduce_step_means(value_losses, valid_counts, reduction)
+    entropy_loss = reduce_step_means(entropy_losses, valid_counts, reduction)
     total = policy_loss + vf_coef * value_loss - ent_coef * entropy_loss
     stats = {
-        "approx_kl": float(torch.stack(approx_kls).mean().detach().cpu().item()) if approx_kls else 0.0,
-        "clip_fraction": float(torch.stack(clip_fracs).mean().detach().cpu().item()) if clip_fracs else 0.0,
+        "approx_kl": float(reduce_step_means(approx_kls, valid_counts, reduction).detach().cpu().item()) if approx_kls else 0.0,
+        "clip_fraction": float(reduce_step_means(clip_fracs, valid_counts, reduction).detach().cpu().item()) if clip_fracs else 0.0,
     }
     return total, policy_loss.detach(), value_loss.detach(), entropy_loss.detach(), stats
 
@@ -2732,13 +2778,17 @@ def _compute_gae_from_rewards(
     gamma: float,
     gae_lambda: float,
     route_boundaries: torch.Tensor | None = None,
+    last_values: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    values = _to_scalar_values(values)
+    # Preserve a singleton trajectory axis; squeeze only a scalar value-head axis.
+    values = values.squeeze(-1) if values.ndim == rewards.ndim + 1 and values.shape[-1] == 1 else values
+    if values.shape != rewards.shape:
+        raise ValueError('Scalar GAE values must match the reward shape')
     advantages = torch.zeros_like(rewards)
     last_gae = torch.zeros_like(rewards[0])
     for step in reversed(range(rewards.size(0))):
         if step == rewards.size(0) - 1:
-            next_value = torch.zeros_like(values[step])
+            next_value = torch.zeros_like(values[step]) if last_values is None else last_values.reshape_as(values[step])
         else:
             next_value = values[step + 1]
         bootstrap_nonterminal = (~dones[step]).float()
@@ -2772,11 +2822,12 @@ def _compute_gae_returns(
     route_boundaries = getattr(batch, "route_boundaries", None) if route_segmented else None
     return _compute_gae_from_rewards(
         batch.rewards,
-        _value_head(batch.values, 0),
+        batch.values[..., 0] if batch.values.ndim == batch.rewards.ndim + 1 else batch.values,
         batch.dones,
         gamma,
         gae_lambda,
         route_boundaries=route_boundaries,
+        last_values=getattr(batch, "bootstrap_values", None),
     )
 
 
@@ -4331,6 +4382,7 @@ def train_from_config(
         raise ValueError("POMO trajectory advantage was removed from this cleaned branch.")
     if use_pomo_trajectory_advantage and use_decomposed_critic:
         raise ValueError("advantage_mode=pomo_trajectory requires use_decomposed_critic=false")
+    validate_protocol(cfg, decomposed_critic=use_decomposed_critic)
     cfg.setdefault("env", {})["use_fast_env"] = True
     cfg["env"].setdefault("info_level", "light")
     run_name = str(cfg.get("run_name", "O2O_TERRAN_FULL"))
@@ -4425,6 +4477,8 @@ def train_from_config(
             rdi_hidden_dim=int(model_cfg.get("rdi_hidden_dim", 32)),
             use_agda_v2=bool(model_cfg.get("use_agda_v2", False)),
             agda_hidden_dim=int(model_cfg.get("agda_hidden_dim", 32)),
+            agda_physical_candidate_features=bool(model_cfg.get('agda_physical_candidate_features', False)),
+            agda_smooth_distance_features=bool(model_cfg.get('agda_smooth_distance_features', False)),
             use_encoder_sdpa=bool(model_cfg.get("use_encoder_sdpa", False)),
             use_physical_input_context=bool(model_cfg.get("use_physical_input_context", False)),
             physical_input_context_hidden_dim=int(model_cfg.get("physical_input_context_hidden_dim", 32)),
@@ -4445,6 +4499,7 @@ def train_from_config(
         ).to(device)
 
     agent = _make_agent()
+    agent._ppo_protocol_signature = protocol_signature(cfg)
     input_profile = configure_input_normalization(agent, cfg)
     model_profile = configure_model_integration(agent, cfg)
     init_checkpoint_info: dict[str, Any] = {}
@@ -4578,6 +4633,7 @@ def train_from_config(
             seed=sampling_seed,
             sample_mode=str(data_cfg.get("train_sample_mode", "shuffle_cycle")),
             problem_type=problem_type,
+            strict_road_metric=bool(data_cfg.get("strict_road_metric", False)),
         )
         _configure_dataset_reward_scale(cfg, base_pool)
         references = _load_reference_metrics(offline_cfg.get("expert_solution_path") or offline_cfg.get("expert_csv_path"))
@@ -5072,6 +5128,11 @@ def train_from_config(
         train_fields = [field for field in train_fields if field not in median_fields]
         eval_fields = [field for field in eval_fields if field not in median_fields]
 
+    train_fields.extend(['ppo_passes_executed', 'ppo_kl_early_stopped', 'post_update_kl',
+                         'post_update_kl_time_s', 'post_update_kl_valid_actions',
+                         'group_cost_std_km_mean', 'near_zero_cost_group_fraction',
+                         'sample_best10_to_bestK_gain_km', 'first_action_unique_fraction',
+                         'rollout_trajectory_feasible_fraction'])
     train_fields.extend(DISTRIBUTED_TRAIN_FIELDS)
     train_fields.extend(["run_elapsed_seconds", "run_session_id", "run_elapsed_scope", "global_rollout_samples_seen", "sample_draw_scope"])
     train_fields.extend(["global_unique_instances_per_rollout", "global_duplicate_instances_per_rollout", "global_instance_ids_observed", "global_instance_ids_missing"])
@@ -5220,10 +5281,16 @@ def train_from_config(
             monitor_sampled = begin_monitor_epoch(agent, epoch, train_cfg)
             monitor_values = {}
             monitor_gradient_values = {}
+            monitor_aux_gradient_done = False
             monitor_route_records = []
             monitor_expert_records = []
             monitor_replay_records = []
             policy_replay_info = {}
+            exploration_info = {}
+            rollout_quality_info = {}
+            protocol_info = {'ppo_passes_executed': 0, 'ppo_kl_early_stopped': False,
+                             'post_update_kl': None, 'post_update_kl_time_s': 0.,
+                             'post_update_kl_by_pass': [], 'ppo_loss_reduction': reduction_mode(cfg)}
             if str(device).startswith("cuda"):
                 torch.cuda.reset_peak_memory_stats(device)
             pbrs_scale = pbrs_scale_for_epoch(cfg, epoch, epochs)
@@ -5336,7 +5403,14 @@ def train_from_config(
                     device=device,
                     seed=seed + epoch * 100_000,
                     profile_timing=profile_timing,
+                    bootstrap_truncation=bool(train_cfg.get('bootstrap_truncation', False)),
                 )
+                rollout_quality_info = rollout_quality_diagnostics(batch)
+                if offline_cfg.get('policy_replay_selection', 'legacy') == 'structural':
+                    from caliroute.plugins.exploration import rollout_structure_diagnostics
+                    rollout_quality_info.update(rollout_structure_diagnostics(
+                        batch.actions.detach().cpu().numpy(), batch.valid.detach().cpu().numpy(),
+                        np.stack([info['success'] for info in batch.final_infos]), num_customers=num_customers))
                 if use_priority_sampler and hasattr(pool, "update_from_rollout"):
                     priority_info = pool.update_from_rollout(batch, epoch=epoch)
                 decomposed_returns: dict[str, torch.Tensor] | None = None
@@ -5369,7 +5443,7 @@ def train_from_config(
                     if reward_normalization is None:
                         advantages = _normalize_valid(advantages, batch.valid)
                 else:
-                    returns = compute_returns(batch.rewards, batch.dones, gamma=gamma)
+                    returns = compute_returns(batch.rewards, batch.dones, gamma=gamma, last_values=getattr(batch, "bootstrap_values", None))
                     values = _value_head(batch.values, 0)
                     advantages = returns - values
                     advantages = _normalize_valid(advantages, batch.valid)
@@ -5384,7 +5458,9 @@ def train_from_config(
                         raise RuntimeError("physical_shared_popart requires complete feasible rollouts; inspect failure/truncation before updating")
                     physical_costs = torch.as_tensor(physical_objectives, device=device, dtype=torch.float32)
                     unit = reward_normalization.signature["reward_unit_km"]
-                    reward_identity_error = (torch.where(batch.valid, batch.rewards, 0.).sum(0) + physical_costs / unit).abs().max()
+                    initial_potential = getattr(batch, 'initial_shaping_potential', None)
+                    offset = initial_potential if initial_potential is not None else 0.
+                    reward_identity_error = (torch.where(batch.valid, batch.rewards, 0.).sum(0) + physical_costs / unit + offset).abs().max()
                     if float(reward_identity_error) > 1e-4:
                         raise RuntimeError(f"Rollout rewards disagree with physical distance: {float(reward_identity_error)}")
                     advantages = reward_normalization.begin_rollout_update(
@@ -5452,6 +5528,17 @@ def train_from_config(
                     # Gate the current batch with historical policy memory only;
                     # the current rollout becomes memory for subsequent epochs.
                     _update_policy_best_objectives(policy_best_objectives, batch, envs)
+                    if offline_cfg.get('branch_exploration_enabled', offline_cfg.get('exploration_enabled', False)):
+                        from .branch_exploration import run_branch_exploration
+                        exploration_info = run_branch_exploration(
+                            agent, list(policy_route_pool.instances.values()),
+                            [_env_instance_id(env) for env in envs], policy_route_pool, cfg, epoch, device)
+                        # Search solutions are independently verified. Make their best
+                        # costs visible to future expert gates, never to this batch's
+                        # already prepared on-policy/group advantages.
+                        for instance_id, verified_best in policy_route_pool.best_objectives.items():
+                            policy_best_objectives[instance_id] = min(
+                                policy_best_objectives.get(instance_id, float('inf')), verified_best)
                 else:
                     advantages, adv_info = _apply_auxiliary_advantages(
                         advantages,
@@ -5640,7 +5727,7 @@ def train_from_config(
                 sl_candidate_expert_adv_means: list[float] = []
                 sl_candidate_expert_adv_stds: list[float] = []
                 sl_candidate_expert_route_counts: list[float] = []
-                for _ in range(ppo_epochs):
+                for ppo_pass in range(ppo_epochs):
                     bafipo_minibatches_used_this_ppo_epoch = 0
                     sl_minibatches_used_this_ppo_epoch = 0
                     np.random.shuffle(env_order)
@@ -5655,6 +5742,15 @@ def train_from_config(
                         group_entropy = 0.0
                         group_size = float(len(accum_group))
                         for env_indices in accum_group:
+                            sample_auxiliary_gradients = (
+                                monitor_sampled and not monitor_aux_gradient_done
+                                and bool(train_cfg.get("monitor_gradient_components", True))
+                                and bool(sl_expert_candidates or policy_replay_candidates)
+                            )
+                            auxiliary_gradient_sample = (DetachedGradientAccumulator(
+                                tuple(agent.backbone.decoder.action_query_proj.parameters())[-2:]
+                            ) if sample_auxiliary_gradients else None)
+                            sampled_expert_routes = sampled_replay_routes = 0.0
                             weighted_policy = 0.0
                             weighted_value = 0.0
                             weighted_entropy = 0.0
@@ -5681,7 +5777,9 @@ def train_from_config(
                                 sl_route_counts.append(float(route_info["sl_num_routes_used"]))
                             for step_start in range(0, total_steps, chunk_size):
                                 step_end = min(step_start + chunk_size, total_steps)
-                                chunk_weight = float(step_end - step_start) / max(float(total_steps), 1.0)
+                                chunk_weight = ppo_chunk_weight(batch.valid[:, env_indices], step_start, step_end, reduction_mode(cfg))
+                                if chunk_weight == 0.:
+                                    continue
                                 shared_sl_forward = bool(train_cfg.get("share_ppo_sl_forward", False)) and sl_enabled and sl_weights is not None
                                 with _autocast_context(device, amp_enabled):
                                     chunk_evaluations = _policy_chunk_evaluations(
@@ -5739,6 +5837,9 @@ def train_from_config(
                                         # PPO is averaged across time; the SL weights already
                                         # include the full-route length and route-count factors.
                                         loss = loss + sl_coef * shared_route_loss / chunk_weight
+                                auxiliary_ppo_gradients = (auxiliary_gradient_sample.sample(
+                                    "ppo_minibatch", ppo_loss_for_monitor * chunk_weight / group_size,
+                                ) if auxiliary_gradient_sample is not None else None)
                                 sample_gradient_components = (
                                     monitor_sampled and not monitor_gradient_values and sl_weights is not None
                                     and bool(train_cfg.get("monitor_gradient_components", True))
@@ -5747,7 +5848,7 @@ def train_from_config(
                                     common_parameters = tuple(agent.backbone.decoder.action_query_proj.parameters())[-2:]
                                     # Sample the existing training graphs. A separate diagnostic
                                     # SL forward would retain an extra route graph across epochs.
-                                    component_gradients = {"ppo": detached_component_gradients(
+                                    component_gradients = {"ppo": auxiliary_ppo_gradients if auxiliary_ppo_gradients is not None else detached_component_gradients(
                                         ppo_loss_for_monitor * chunk_weight / group_size, common_parameters,
                                     )}
                                     if shared_sl_forward:
@@ -5850,6 +5951,9 @@ def train_from_config(
                                         env_indices,
                                         device,
                                     )
+                                if auxiliary_gradient_sample is not None:
+                                    auxiliary_gradient_sample.sample("expert", sl_coef * expert_loss / group_size)
+                                    sampled_expert_routes = float(expert_info["sl_candidate_expert_num_routes"])
                                 _backward(sl_coef * expert_loss / group_size, scaler, amp_enabled)
                                 monitor_expert_records.append(expert_info)
                                 sl_candidate_expert_losses.append(float(expert_info["sl_candidate_expert_loss"]))
@@ -5865,6 +5969,9 @@ def train_from_config(
                                         agent, policy_replay_candidates, cfg, env_indices, device,
                                     )
                                 monitor_replay_records.append(replay_loss_info)
+                                if auxiliary_gradient_sample is not None:
+                                    auxiliary_gradient_sample.sample("replay", sl_coef * replay_loss / group_size)
+                                    sampled_replay_routes = float(replay_loss_info["sl_candidate_expert_num_routes"])
                                 _backward(sl_coef * replay_loss / group_size, scaler, amp_enabled)
                             if (
                                 bafipo_enabled
@@ -5923,6 +6030,15 @@ def train_from_config(
                                     gcbpo_pref_weight_means.append(float(gcbpo_loss_info["gcbpo_pref_weight_mean"]))
                                     gcbpo_pref_logit_means.append(float(gcbpo_loss_info["gcbpo_pref_logit_mean"]))
                                     gcbpo_prefix_route_counts.append(float(gcbpo_loss_info["gcbpo_prefix_route_count"]))
+                            if auxiliary_gradient_sample is not None:
+                                monitor_gradient_values.update(tensors_to_floats(auxiliary_gradient_sample.diagnostics()))
+                                monitor_gradient_values.update(
+                                    grad_reference_valid_actions=float(batch.valid[:, env_indices].sum()),
+                                    grad_expert_route_count=sampled_expert_routes,
+                                    grad_replay_route_count=sampled_replay_routes,
+                                )
+                                monitor_aux_gradient_done = True
+                                del auxiliary_gradient_sample
                             group_policy += weighted_policy / group_size
                             group_value += weighted_value / group_size
                             group_entropy += weighted_entropy / group_size
@@ -5997,6 +6113,20 @@ def train_from_config(
                             partition_positive_ratios.append(float(partition_info.get("partition_positive_ratio", 0.0)))
                         _optimizer_step(optimizer, agent, max_grad_norm, scaler, amp_enabled)
                         losses.append((group_policy, group_value, group_entropy))
+                    protocol_info['ppo_passes_executed'] = ppo_pass + 1
+                    kl_target = train_cfg.get('target_kl')
+                    kl_interval = int(train_cfg.get('post_update_kl_interval', 0))
+                    measure_kl = kl_target is not None or (kl_interval > 0 and epoch % kl_interval == 0 and ppo_pass + 1 == ppo_epochs)
+                    if measure_kl:
+                        kl_start = time.perf_counter()
+                        protocol_info.update(fresh_policy_kl(
+                            agent, batch, _slice_obs_by_env,
+                            minibatch_size=max(1, num_envs // max(minibatches, 1)), distributed=distributed))
+                        protocol_info['post_update_kl_time_s'] += time.perf_counter() - kl_start
+                        protocol_info['post_update_kl_by_pass'].append(protocol_info['post_update_kl'])
+                        if kl_target is not None and protocol_info['post_update_kl'] > float(kl_target):
+                            protocol_info['ppo_kl_early_stopped'] = ppo_pass + 1 < ppo_epochs
+                            break
                 if decomposed_loss_infos:
                     for key in (
                         "value_loss_total",
@@ -6343,6 +6473,7 @@ def train_from_config(
                     "samples_seen": pool.sample_count + sample_count_offset,
                     **distributed_metrics,
                     "train_mode": offline_method,
+                    **protocol_info, **rollout_quality_info,
                     "reward_mean": reward_mean,
                     "policy_loss": float(loss_arr[:, 0].mean()),
                     "value_loss": float(loss_arr[:, 1].mean()),
@@ -6414,12 +6545,15 @@ def train_from_config(
                 "sampling_seed": sampling_seed, "diagnostics_sampled": monitor_sampled,
                 "sampled_instance_ids": sampled_instance_ids,
                 "parameter_sync": epoch_parameter_sync,
-                "gradient_diagnostic_scope": "first_update_first_chunk_common_action_query_head; PPO includes policy/value/entropy, SL excludes experts/replay",
+                "gradient_diagnostic_scope": "first_update_first_chunk_common_action_query_head for PPO/SL; expert/replay compare with all-chunk PPO gradient on the first sampled minibatch, after loss coefficients and before global gradient clipping; local rank, common action_query_proj head only",
                 "module_update_scope": "first attempted optimizer step per sampled epoch; module_first_attempt_skipped identifies AMP/nonfinite skips",
                 "route_diagnostic_aggregation": "local minibatch arithmetic mean; quantiles are means of local minibatch quantiles",
                 **distributed_metrics, **epoch_schedule, **epoch_gpu_memory,
                 "local_training": {**train_summary, **ppo_stats_info, **decomposed_info},
                 "advantage": adv_info, "slppo": sl_info, "replay": policy_replay_info,
+                "ppo_protocol": protocol_info, "rollout_diversity": rollout_quality_info,
+                "exploration": exploration_info,
+                "reward_components": getattr(batch, 'reward_component_stats', {}) if not do_bc_warmup else {},
                 "route_diagnostics": average_diagnostics(monitor_route_records),
                 "expert_diagnostics": average_diagnostics(monitor_expert_records),
                 "replay_loss_diagnostics": average_diagnostics(monitor_replay_records),

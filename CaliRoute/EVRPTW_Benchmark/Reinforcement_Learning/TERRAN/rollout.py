@@ -105,6 +105,9 @@ class RolloutBatch:
     expert_actions: torch.Tensor | None = None
     expert_valid: torch.Tensor | None = None
     expert_advantages: torch.Tensor | None = None
+    bootstrap_values: torch.Tensor | None = None
+    reward_component_stats: dict[str, dict[str, float]] | None = None
+    initial_shaping_potential: torch.Tensor | None = None
 
 
 def reset_envs(envs, seed: int | None = None):
@@ -155,6 +158,31 @@ def step_envs(envs, actions: np.ndarray):
     return observations, np.asarray(rewards, dtype=np.float32), np.asarray(dones, dtype=bool), infos
 
 
+def _accumulate_reward_component_stats(stats, infos, rewards, valid):
+    """Accumulate physical/shaping diagnostics over valid actions only."""
+    for index, info in enumerate(infos):
+        terms = dict(info.get("reward_components", {}))
+        terms.setdefault("base", np.asarray(rewards[index]))
+        terms.setdefault("shaped", np.asarray(rewards[index]))
+        terms["shaping"] = np.asarray(info.get("reward_shaping", terms["shaped"] - terms["base"]))
+        if "reward_failure_cost" in info:
+            terms["failure_cost"] = np.asarray(info["reward_failure_cost"])
+        for name, values in terms.items():
+            if name == "pbrs_scale":
+                continue  # A coefficient is not a reward component.
+            values = np.broadcast_to(np.asarray(values, dtype=np.float64), valid[index].shape)[valid[index]]
+            finite = np.isfinite(values)
+            current = stats.setdefault(name, {"sum": 0., "sum_abs": 0., "sum_sq": 0., "count": 0., "max_abs": 0., "nonfinite_count": 0.})
+            current["nonfinite_count"] += float((~finite).sum())
+            values = values[finite]
+            if values.size:
+                current["sum"] += float(values.sum())
+                current["sum_abs"] += float(np.abs(values).sum())
+                current["sum_sq"] += float(np.square(values).sum())
+                current["count"] += float(values.size)
+                current["max_abs"] = max(current["max_abs"], float(np.abs(values).max()))
+
+
 def collect_rollout(
     agent,
     envs,
@@ -164,6 +192,7 @@ def collect_rollout(
     seed: int | None = None,
     profile_timing: bool = False,
     expert_provider=None,
+    bootstrap_truncation: bool = False,
 ) -> RolloutBatch:
     total_start = time.perf_counter()
     reset_start = time.perf_counter()
@@ -171,6 +200,11 @@ def collect_rollout(
     reset_time_s = time.perf_counter() - reset_start
     instance_ids = current_instance_ids(envs)
     done = np.zeros((len(envs), envs[0].unwrapped.n_traj), dtype=bool)
+    initial_shaping_potential = tensor_from_array(np.stack([
+        np.asarray(info.get("reward_shaping_initial_potential", np.zeros(env.unwrapped.n_traj)), dtype=np.float64)
+        for env, info in zip(envs, infos)
+    ]), device).float()
+    reward_component_stats: dict[str, dict[str, float]] = {}
     obs_steps: list[dict[str, np.ndarray]] = []
     actions_steps = []
     logprob_steps = []
@@ -227,6 +261,7 @@ def collect_rollout(
         env_start = time.perf_counter()
         next_observations, reward_np, step_done, infos = step_envs(envs, action_np)
         env_step_time_s += time.perf_counter() - env_start
+        _accumulate_reward_component_stats(reward_component_stats, infos, reward_np, valid)
 
         obs_steps.append(obs_batch)
         actions_steps.append(actions.detach())
@@ -243,6 +278,26 @@ def collect_rollout(
         if done.all():
             break
 
+    bootstrap_values = None
+    bootstrap_time_s = 0.0
+    if bootstrap_truncation and not done.all():
+        bootstrap_start = time.perf_counter()
+        next_obs_batch = stack_observations(observations, static_cache=static_obs_cache)
+        tensor_device = torch.device(device)
+        cuda_devices = ([tensor_device.index if tensor_device.index is not None else torch.cuda.current_device()]
+                        if tensor_device.type == "cuda" else [])
+        # Greedy avoids drawing an action. Fork RNG additionally preserves a
+        # legacy backbone's training-time dropout stream on this diagnostic pass.
+        with torch.no_grad(), torch.random.fork_rng(devices=cuda_devices):
+            _, _, _, next_values, _ = sample_actions(
+                agent, next_obs_batch, decode_mode="greedy", device=device,
+                cached_embeddings=cached_embeddings,
+            )
+        unfinished = tensor_from_array(~done, device).bool()
+        while unfinished.ndim < next_values.ndim:
+            unfinished = unfinished.unsqueeze(-1)
+        bootstrap_values = torch.where(unfinished, next_values, torch.zeros_like(next_values)).detach()
+        bootstrap_time_s = time.perf_counter() - bootstrap_start
     total_time_s = time.perf_counter() - total_start
     expert_actions = torch.stack(expert_action_steps, dim=0) if expert_action_steps else None
     expert_valid = torch.stack(expert_valid_steps, dim=0) if expert_valid_steps else None
@@ -272,17 +327,24 @@ def collect_rollout(
             "rollout_model_action_time_s": float(model_action_time_s),
             "rollout_env_step_time_s": float(env_step_time_s),
             "rollout_interaction_time_s": float(model_action_time_s + env_step_time_s),
+            "rollout_bootstrap_time_s": float(bootstrap_time_s),
         },
         instance_ids=instance_ids,
         expert_actions=expert_actions,
         expert_valid=expert_valid,
         expert_advantages=expert_advantages,
+        bootstrap_values=bootstrap_values,
+        reward_component_stats=reward_component_stats,
+        initial_shaping_potential=initial_shaping_potential,
     )
 
 
-def compute_returns(rewards: torch.Tensor, dones: torch.Tensor, gamma: float) -> torch.Tensor:
+def compute_returns(rewards: torch.Tensor, dones: torch.Tensor, gamma: float,
+                    last_values: torch.Tensor | None = None) -> torch.Tensor:
     returns = torch.zeros_like(rewards)
-    running = torch.zeros_like(rewards[0])
+    running = torch.zeros_like(rewards[0]) if last_values is None else last_values.detach().to(rewards)
+    if running.shape != rewards[0].shape:
+        raise ValueError("last_values shape must match one reward step")
     for step in reversed(range(rewards.size(0))):
         running = rewards[step] + float(gamma) * running * (~dones[step]).float()
         returns[step] = running

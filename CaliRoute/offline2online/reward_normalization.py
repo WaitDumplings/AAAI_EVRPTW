@@ -8,6 +8,7 @@ Expert/replay terms remain separate dimensionless auxiliary objectives.
 from __future__ import annotations
 
 import copy
+from dataclasses import asdict, fields
 import math
 import torch
 from caliroute.plugins.normalization import ActorAdvantageScale, ScalarPopArt
@@ -23,17 +24,45 @@ def mode(cfg):
     return name
 
 
+def _strict_reward_signature(cfg):
+    env = cfg.get('env', {})
+    if env.get('reward_contract', 'legacy') != 'strict_distance':
+        return None
+    train = cfg.get('training', {})
+    if float(train.get('gamma', .99)) != 1.:
+        raise ValueError('strict_distance reward contract requires gamma=1')
+    if not env.get('normalize_reward', True) or env.get('reward_distance_scale_km') is None:
+        raise ValueError('strict_distance requires an explicit normalized reward distance unit')
+    failure = env.get('failure_penalty_km')
+    if failure is None or not math.isfinite(float(failure)) or float(failure) <= 0:
+        raise ValueError('strict_distance requires an explicit finite positive failure_penalty_km')
+    if env.get('reward_mode', 'distance') != 'distance' or float(env.get('success_bonus', 0.)) != 0.:
+        raise ValueError('strict_distance forbids success bonuses')
+    from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.pbrs import PotentialRewardConfig
+    pbrs = cfg.get('pbrs', {}) or {}
+    names = {field.name for field in fields(PotentialRewardConfig)} - {'gamma', 'strict_contract'}
+    options = {name: pbrs[name] for name in names if name in pbrs}
+    potential = PotentialRewardConfig(gamma=1., strict_contract=True, **options)
+    return {'reward_contract': 'strict_distance', 'failure_penalty_km': float(failure),
+            'potential_config': asdict(potential),
+            'potential_annealing': copy.deepcopy(pbrs.get('annealing', {}))}
+
+
 def signature(cfg):
     env = cfg.get('env', {})
     unit = float(env.get('reward_distance_scale_km', 1.0)) if env.get('normalize_reward', True) else 1.0
     if not math.isfinite(unit) or unit <= 0:
         raise ValueError('reward_distance_scale_km must be finite and positive')
     train = cfg.get('training', {})
-    return dict(schema=SCHEMA, mode=mode(cfg), reward_unit_km=unit,
-                gamma=float(train.get('gamma', .99)), gae_lambda=float(train.get('gae_lambda', .95)),
-                beta=float(train.get('normalization_beta', .01)),
-                actor_min_scale=float(train.get('actor_min_scale', 1e-4)),
-                critic_min_std=float(train.get('critic_min_std', 1e-4)))
+    result = dict(schema=SCHEMA, mode=mode(cfg), reward_unit_km=unit,
+                  gamma=float(train.get('gamma', .99)), gae_lambda=float(train.get('gae_lambda', .95)),
+                  beta=float(train.get('normalization_beta', .01)),
+                  actor_min_scale=float(train.get('actor_min_scale', 1e-4)),
+                  critic_min_std=float(train.get('critic_min_std', 1e-4)))
+    strict = _strict_reward_signature(cfg)
+    if strict is not None:
+        result.update(strict)
+    return result
 
 
 def leave_one_out_cost_advantages(objectives, feasible, reward_unit_km):
@@ -53,6 +82,9 @@ def leave_one_out_cost_advantages(objectives, feasible, reward_unit_km):
 class RewardNormalization:
     def __init__(self, cfg, critic):
         self.signature = signature(cfg)
+        self.loss_reduction = ('valid_actions_with_length_normalized_route_SL'
+                               if cfg.get('training', {}).get('ppo_loss_reduction', 'legacy_step_mean') == 'valid_actions'
+                               else 'legacy_step_and_length_normalized_route_surrogates')
         device = critic.head.weight.device
         self.actor = ActorAdvantageScale(self.signature['beta'], self.signature['actor_min_scale']).to(device)
         self.critic = ScalarPopArt(self.signature['beta'], self.signature['critic_min_std']).to(device)
@@ -95,7 +127,7 @@ class RewardNormalization:
             'critic_head_moment_scale': float(factor),
             'normalizer_updates': int(self.actor.update_count),
             'auxiliary_units': 'legacy_dimensionless_expert_and_replay_weights; excluded_from_actor_RMS',
-            'loss_reduction': 'legacy_step_and_length_normalized_route_surrogates',
+            'loss_reduction': self.loss_reduction,
         }
         return normalized
 
@@ -137,8 +169,9 @@ def configure(agent, cfg, *, resume=False, distributed=None):
         raise ValueError('physical_shared_popart requires scalar critic and GAE')
     if cfg.get('offline', {}).get('method', 'ppo') not in {'ppo', 'sl_ppo', 'sl-ppo'}:
         raise ValueError('physical_shared_popart supports PPO and SL-PPO only')
-    if any(cfg.get('pbrs', {}).get(key, False) for key in ('use_customer_pbrs', 'use_repair_distance_pbrs', 'use_feasible_ratio_pbrs', 'use_terminal_heuristic')):
-        raise ValueError('physical_shared_popart requires unshaped physical distance rewards')
+    strict = _strict_reward_signature(cfg)
+    if any(cfg.get('pbrs', {}).get(key, False) for key in ('use_customer_pbrs', 'use_repair_distance_pbrs', 'use_feasible_ratio_pbrs', 'use_terminal_heuristic')) and strict is None:
+        raise ValueError('physical_shared_popart requires unshaped physical distance rewards or strict_distance terminal-correct potential shaping')
     if resume:
         if pending is None:
             raise ValueError('Legacy optimizer cannot resume as normalized; use weights-only initialization')

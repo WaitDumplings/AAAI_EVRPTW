@@ -116,6 +116,26 @@ def render(path):
     table(['Arm', 'GPU', 'State', 'Epoch', 'Latest km@epoch', 'Eval FR',
            'Best ckpt km@epoch', 'Train KL', 'Clip%', 'LR'], rows)
 
+    # New diagnostics are optional. Keep old snapshots and the main table
+    # unchanged; a missing measurement must not be presented as zero drift.
+    if any(any(key in (arm.get('latest_train_row') or {})
+               for key in ('ppo_passes_executed', 'post_update_kl'))
+           for arm in arms.values()):
+        print('\nPPO update diagnostics (latest training row)')
+        rows = []
+        for name, arm in arms.items():
+            train = arm.get('latest_train_row') or {}
+            fresh_kl = number(train.get('post_update_kl'))
+            # The trainer records zero monitoring time on unsampled epochs;
+            # display -- there too, rather than implying a zero-cost KL check.
+            kl_time = number(train.get('post_update_kl_time_s')) if fresh_kl is not None else None
+            rows.append([name, fmt(train.get('epoch'), 0),
+                         fmt(train.get('ppo_passes_executed'), 0),
+                         fmt(fresh_kl, 5), fmt(kl_time, 3)])
+        table(['Arm', 'Epoch', 'Executed passes', 'Fresh KL', 'KL time (s)'], rows)
+        print('Fresh KL uses the updated policy on sampled rollout actions; Train KL is the update aggregate.')
+        print('-- means no measurement in this row; fresh KL need not be measured every epoch.')
+
     matched = data.get('matched_validation_epochs') or {}
     expected_count = number(protocol.get('validation_instances'))
     complete = {}

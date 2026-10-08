@@ -39,7 +39,8 @@ def signature(cfg):
 
 
 def _uses_new_inputs(profile):
-    return profile["observation_coordinate_mode"] != "legacy_minmax" or profile["observation_input_context"]
+    return (profile["observation_coordinate_mode"] != "legacy_minmax" or profile["observation_input_context"]
+            or profile.get("strict_road_metric", False) or profile.get("prefer_explicit_edge_matrices", False))
 
 
 def _check_agent(agent, profile):
@@ -75,6 +76,10 @@ def checkpoint_profile(checkpoint, *, require_physical_metadata=True):
         if require_physical_metadata and _uses_new_inputs(computed):
             raise ValueError("Physical input checkpoint is missing its input normalization signature")
         return computed
+    if isinstance(saved, dict):
+        saved = copy.deepcopy(saved)
+        for key in ("strict_road_metric", "prefer_explicit_edge_matrices"):
+            saved.setdefault(key, False)  # backwards-compatible v1 defaults
     if not isinstance(saved, dict) or saved != computed:
         raise ValueError("Checkpoint input normalization signature does not match its saved config")
     return copy.deepcopy(saved)

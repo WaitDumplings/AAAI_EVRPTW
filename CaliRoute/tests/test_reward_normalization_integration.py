@@ -269,3 +269,40 @@ def test_unsupported_host_modes_fail_before_training(case):
         cfg['offline']['method'] = 'unknown'
     with pytest.raises(ValueError):
         rn.configure(agent, cfg, distributed=distributed)
+
+
+def _strict_cfg():
+    cfg = _cfg(ppo_loss_reduction='valid_actions')
+    cfg['env'].update(reward_contract='strict_distance', failure_penalty_km=1000.)
+    cfg['pbrs'] = {'use_customer_pbrs': True, 'use_repair_distance_pbrs': True}
+    return cfg
+
+
+def test_strict_terminal_correct_potential_is_accepted_and_recorded_in_resume_signature():
+    agent = DummyAgent()
+    controller = rn.configure(agent, _strict_cfg())
+    assert controller.signature['reward_contract'] == 'strict_distance'
+    assert controller.signature['potential_config']['strict_contract']
+    assert controller.signature['potential_config']['gamma'] == 1.
+    assert controller.loss_reduction == 'valid_actions_with_length_normalized_route_SL'
+    resumed = DummyAgent()
+    resumed._pending_reward_normalization_state = controller.checkpoint_state(agent.critic)
+    changed = _strict_cfg()
+    changed['pbrs']['repair_progress_coef'] = .8
+    with pytest.raises(ValueError, match='changed on resume'):
+        rn.configure(resumed, changed, resume=True)
+
+
+@pytest.mark.parametrize('changes', [
+    {'training': {'gamma': .99}},
+    {'env': {'failure_penalty_km': None}},
+    {'env': {'success_bonus': 1.}},
+    {'pbrs': {'pbrs_clip': .2}},
+    {'pbrs': {'use_terminal_heuristic': True}},
+])
+def test_strict_normalization_cannot_hide_an_invalid_reward_contract(changes):
+    cfg = _strict_cfg()
+    for section, values in changes.items():
+        cfg[section].update(values)
+    with pytest.raises(ValueError):
+        rn.configure(DummyAgent(), cfg)
