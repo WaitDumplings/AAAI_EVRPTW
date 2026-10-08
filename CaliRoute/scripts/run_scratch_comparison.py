@@ -40,11 +40,12 @@ def assert_scratch(cfg):
 
 
 def build_arm(base, *, arm, output, run_name, data_root, seed, epochs=300,
-              chunk_size=15, legacy_chunk_size=8, eval_interval=50, learning_rate=1e-4):
+              chunk_size=15, legacy_chunk_size=8, legacy_expert_chunk_size=128, eval_interval=50, learning_rate=1e-4):
     if arm not in ARMS:
         raise ValueError('Unknown scratch arm: ' + str(arm))
     if not math.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError('learning_rate must be finite and positive')
+    shared.positive_integer(legacy_expert_chunk_size, 'legacy_expert_chunk_size')
     if arm == 'legacy':
         cfg = build_original_config(output=output, run_name=run_name, data_root=data_root,
             seed=seed, epochs=epochs, chunk_size=legacy_chunk_size,
@@ -70,6 +71,14 @@ def build_arm(base, *, arm, output, run_name, data_root, seed, epochs=300,
             initial_evaluation_equivalence_group='physics_archive_explore_random_initialization')
     cfg['training']['ppo_update_epochs'] = 5
     if arm == 'legacy':
+        # Historical candidate evaluation reads advantage, not offline. Set
+        # both explicitly; chunking changes the encoding workspace, not the
+        # selected expert routes, their loss weights or optimizer-step count.
+        cfg['advantage']['sl_expert_logprob_chunk_size'] = legacy_expert_chunk_size
+        cfg['offline']['sl_expert_logprob_chunk_size'] = legacy_expert_chunk_size
+        cfg['experiment_protocol']['protocol_overrides'].append(dict(
+            parameter='advantage.sl_expert_logprob_chunk_size', original=4096, used=legacy_expert_chunk_size,
+            reason='Reduce expert re-encoding/backward workspace; all route steps and candidate loss terms are retained'))
         cfg['experiment_protocol']['evaluation_adapter'] = dict(
             epoch_zero=True, fixed_isolated_rng=True, export_selected_routes=True,
             independent_selected_route_validation=True, native_caveats='evaluation_caveats below describe the original runtime before this external adapter',
@@ -143,7 +152,8 @@ def prepare(args):
     if not arms or len(set(arms)) != len(arms) or any(a not in ARMS for a in arms):
         raise ValueError('arms must be distinct names from: ' + ','.join(ARMS))
     for value, label in ((args.epochs, 'epochs'), (args.eval_interval, 'eval_interval'),
-                         (args.chunk_size, 'chunk_size'), (args.legacy_chunk_size, 'legacy_chunk_size')):
+                         (args.chunk_size, 'chunk_size'), (args.legacy_chunk_size, 'legacy_chunk_size'),
+                         (args.legacy_expert_chunk_size, 'legacy_expert_chunk_size')):
         shared.positive_integer(value, label)
     if max(args.chunk_size, args.legacy_chunk_size) > 201:
         raise ValueError('Time chunks cannot exceed the rollout horizon 201')
@@ -183,7 +193,8 @@ def prepare(args):
         name = run_id + '_' + arm.upper()
         cfg = build_arm(base, arm=arm, output=output, run_name=name,
             data_root=data_root, seed=args.seed, epochs=args.epochs, chunk_size=args.chunk_size,
-            legacy_chunk_size=args.legacy_chunk_size, eval_interval=args.eval_interval, learning_rate=args.learning_rate)
+            legacy_chunk_size=args.legacy_chunk_size, legacy_expert_chunk_size=args.legacy_expert_chunk_size,
+            eval_interval=args.eval_interval, learning_rate=args.learning_rate)
         stages = [(False, cfg, output), (True, build_preflight(cfg, output/'preflight'), output/'preflight')]
         spec = {}
         for preflight, configuration, destination in stages:
@@ -220,6 +231,7 @@ def prepare(args):
             world_size_per_arm=1, global_batch=64, n_traj=50, num_minibatches=4, ppo_update_epochs=5,
             learning_rate=args.learning_rate, lr_schedule='constant', entropy_coef=.01, sl_coef=.5,
             ppo_step_chunk_size=args.chunk_size, legacy_ppo_step_chunk_size=args.legacy_chunk_size,
+            legacy_expert_logprob_chunk_size=args.legacy_expert_chunk_size,
             validation_instances=1000, eval_interval=args.eval_interval, eval_n_traj=50, eval_batch_size=32,
             eval_seed=17000000+args.seed, test_enabled=False,
             initial_evaluation_pairs=[[a,b] for a,b in [('physics','archive'), ('physics','explore')] if a in arms and b in arms],
@@ -239,6 +251,7 @@ def prepare(args):
             comparison_scope='original versus full improvement bundles; multi-seed scratch screen, not paper-protocol replication or single-factor proof',
             gpu_preflight=dict(epochs=2, instances_per_rollout=64, n_traj=50, ppo_update_epochs=5,
                 num_minibatches=4, chunk_size=args.chunk_size, legacy_chunk_size=args.legacy_chunk_size,
+                legacy_expert_chunk_size=args.legacy_expert_chunk_size,
                 validation_instances=4, validation_n_traj=4)))
     shared.write_json(experiment/'manifest.json', manifest)
     shared.write_json(experiment/'status.json', dict(state='prepared', arms={a:dict(state='prepared') for a in arms}))
@@ -262,6 +275,8 @@ def make_parser():
     p.add_argument('--learning-rate', type=float, default=1e-4)
     p.add_argument('--chunk-size', type=int, default=15)
     p.add_argument('--legacy-chunk-size', type=int, default=8)
+    p.add_argument('--legacy-expert-chunk-size', type=int, default=128,
+                   help='Expert re-encoding batch in the original runtime; smaller reduces workspace memory without dropping route steps')
     p.add_argument('--gpus', default='0,1,2,3')
     p.add_argument('--arms', default=','.join(ARMS))
     p.add_argument('--run-id')

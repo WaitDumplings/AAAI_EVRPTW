@@ -31,7 +31,8 @@ passes**, four minibatches, constant LR `1e-4`, entropy `0.01`, and SL coefficie
 asset is required; training expert routes are still required by SL-PPO.
 
 Place `AAAI_Dataset` beside `CaliRoute`, or pass `--data-root /path/to/AAAI_Dataset`.
-Legacy uses chunk size 8 and current arms use 15 for memory control. Original
+Legacy uses PPO chunk size 8 and expert encoding chunk 128; current arms use
+PPO chunk 15 for memory control. Original
 four-pass/priority defaults are explicitly overridden to five passes/uniform
 sampling for this experiment. Earlier warm-start launchers below remain as
 historical experiment entry points. See [the scratch comparison guide](docs/scratch_comparison.md)

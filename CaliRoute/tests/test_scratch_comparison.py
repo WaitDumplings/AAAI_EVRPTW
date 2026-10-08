@@ -78,6 +78,8 @@ def test_four_arms_are_from_scratch_with_common_original_optimizer_budget(tmp_pa
     assert 'reward_contract' not in legacy['env']
     assert 'prefer_explicit_edge_matrices' not in legacy['env']
     assert legacy['training']['gamma'] == .99
+    assert legacy['advantage']['sl_expert_logprob_chunk_size'] == 128
+    assert legacy['offline']['sl_expert_logprob_chunk_size'] == 128
     update_override = next(item for item in legacy['experiment_protocol']['protocol_overrides'] if item['parameter'] == 'training.ppo_update_epochs')
     assert (update_override['original'], update_override['used']) == (4, 5)
     for name in ('physics', 'archive', 'explore'):

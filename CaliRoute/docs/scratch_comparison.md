@@ -100,8 +100,16 @@ control memory use without changing the number of instances, trajectories,
 minibatches or PPO passes. Legacy retains its original loss reduction, so the
 comparison does not claim identical floating-point calculations or loss
 weighting. Reduce the appropriate chunk if the server's preflight runs out of
-memory. This document does not assert that every hardware configuration has
-already passed the scratch preflight.
+memory. Legacy also uses `--legacy-expert-chunk-size 128`, recorded as an
+explicit change from the original fallback of 4096. The historical SL candidate
+path reads `advantage.sl_expert_logprob_chunk_size`; the launcher writes that
+key and its `offline` counterpart. All candidate routes, all route steps and
+loss weights are retained. This limits each expert re-encoding batch and its
+backward workspace. It was added after a 2080 Ti preflight ran out of memory
+in the original expert-loss backward, despite PPO time chunk 8.
+
+This document does not assert that every hardware configuration has already
+passed the scratch preflight.
 
 ## What each arm contains
 
