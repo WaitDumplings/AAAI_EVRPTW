@@ -46,6 +46,39 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True)
+    def _available_stop_return_times_jit(station_start, num_nodes, travel_time_s, energy_kwh,
+                                         visited_stations, battery_capacity_kwh,
+                                         full_charge_time_s, fixed_full_charge):
+        # Reverse Dijkstra on available stops, once per trajectory/mask. Every
+        # stop departure has a full battery; exclude all previously used CS.
+        costs = np.full(num_nodes, np.inf, dtype=np.float64)
+        closed = np.zeros(num_nodes, dtype=np.bool_)
+        costs[0] = 0.0
+        for _ in range(num_nodes - station_start + 1):
+            best, cost = -1, np.inf
+            if not closed[0]:
+                best, cost = 0, costs[0]
+            for node in range(station_start, num_nodes):
+                if not visited_stations[node] and not closed[node] and costs[node] < cost:
+                    best, cost = node, costs[node]
+            if best < 0 or not np.isfinite(cost):
+                break
+            closed[best] = True
+            for previous in range(station_start, num_nodes):
+                if visited_stations[previous] or closed[previous] or previous == best:
+                    continue
+                energy = energy_kwh[previous, best]
+                if energy > battery_capacity_kwh + 1e-9:
+                    continue
+                charge = 0.0 if best == 0 else _charge_time_s_jit(
+                    energy, battery_capacity_kwh, full_charge_time_s, fixed_full_charge)
+                candidate = cost + travel_time_s[previous, best] + charge
+                if candidate < costs[previous]:
+                    costs[previous] = candidate
+        return costs
+
+
+    @njit(cache=True)
     def _can_return_to_depot_jit(
         start: int,
         current_time_s: float,
@@ -63,8 +96,9 @@ if NUMBA_AVAILABLE:
     ) -> bool:
         if start == 0:
             return True
-        if battery_used_kwh + energy_kwh[start, 0] <= battery_capacity_kwh + 1e-9:
-            return current_time_s + travel_time_s[start, 0] <= working_end_s + 1e-9
+        if (battery_used_kwh + energy_kwh[start, 0] <= battery_capacity_kwh + 1e-9
+                and current_time_s + travel_time_s[start, 0] <= working_end_s + 1e-9):
+            return True
 
         for first in range(station_start, num_nodes):
             if first == start:
@@ -125,6 +159,12 @@ if NUMBA_AVAILABLE:
 
             start = int(last[t])
             all_served = served_customers[t] == num_customers
+            return_times = stop_to_depot_time_s
+            if np.any(cs_visited_current_route[t]):
+                return_times = _available_stop_return_times_jit(
+                    station_start, num_nodes, travel_time_s, energy_kwh,
+                    cs_visited_current_route[t], battery_capacity_kwh,
+                    full_charge_time_s, fixed_full_charge)
             if all_served:
                 if start == 0:
                     mask[t, 0] = True
@@ -138,7 +178,9 @@ if NUMBA_AVAILABLE:
                     working_end_s,
                 ):
                     mask[t, 0] = True
-                continue
+                # If direct return is impossible, fall through to available CS.
+                if mask[t, 0]:
+                    continue
 
             if (
                 start != 0
@@ -180,7 +222,7 @@ if NUMBA_AVAILABLE:
                     num_nodes,
                     travel_time_s,
                     energy_kwh,
-                    stop_to_depot_time_s,
+                    return_times,
                     cs_visited_current_route[t],
                     battery_capacity_kwh,
                     full_charge_time_s,
@@ -212,7 +254,7 @@ if NUMBA_AVAILABLE:
                     num_nodes,
                     travel_time_s,
                     energy_kwh,
-                    stop_to_depot_time_s,
+                    return_times,
                     cs_visited_current_route[t],
                     battery_capacity_kwh,
                     full_charge_time_s,

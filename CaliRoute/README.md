@@ -10,6 +10,27 @@ PPO backbone -> SL-PPO
 `SL-PPO` is the proposed method. `PPO`, `DAPG`, and `AWBC` are comparison
 methods that share the same backbone and environment interface.
 
+## EVRPTW100 dual-GPU scratch comparison
+
+Use one pair of GPUs for the original `f388343` SL-PPO model/loss with an external
+synchronous execution adapter, and another pair for the optimized model:
+
+```bash
+bash scripts/run_evrptw100_original_dual.sh --gpus 0,1 --epochs 1500
+bash scripts/run_evrptw100_optimized_dual.sh --gpus 2,3 --epochs 1500
+```
+
+Both launch in the background, train from random initialization, and use two
+synchronized ranks × 32 instances × 50 trajectories, five PPO passes, LR `1e-4`,
+and full validation every 50 epochs. Each runs a separate full-allocation
+two-epoch preflight before restarting from scratch for formal training. No
+initialization checkpoint is needed. Use `--prepare-only` to inspect configs;
+on a two-card server pass `--gpus 0,1` to either script.
+
+The [dual-GPU EVRPTW guide](docs/evrptw_dual_scratch.md) documents physical
+charging, partial expert coverage, failed-rollout rewards, evaluation,
+monitoring and the scope of local CPU/Gloo versus remote GPU validation.
+
 ## Current VRPTW100 scratch comparison
 
 The current four-arm experiment starts every model from random initialization:

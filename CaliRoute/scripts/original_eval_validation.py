@@ -1,4 +1,4 @@
-"""Independent NumPy-only measurements for an immutable original VRPTW policy.
+"""Independent NumPy-only route measurements for immutable original policies.
 
 The validation contract matches the modern route evaluator but imports no modern
 model, trainer or environment code. The legacy environment may use D/v even when
@@ -211,4 +211,200 @@ def validate_vrptw_route(instance, row: dict[str, Any], *, raw_payload=None) -> 
     result["valid"] = bool(spatial_valid and capacity_valid and all(result[key] for key in (
         "time_windows_valid", "service_completion_valid", "depot_return_valid", "return_reachability_valid",
     )))
+    return result
+
+
+def resolve_validation_energy(instance, *, raw_payload=None):
+    """Preserve authoritative directed kWh; no inference from Euclidean inputs."""
+    distance = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+    value = getattr(instance, 'energy_matrix_kwh', None)
+    if value is None:
+        value = (getattr(instance, 'raw', None) or {}).get('energy_matrix_kwh')
+    if value is None and raw_payload is not None:
+        value = raw_payload.get('energy_matrix_kwh')
+    if value is not None:
+        energy = np.asarray(value, dtype=np.float64)
+        if energy.shape != distance.shape or np.isnan(energy).any() or (energy < 0).any():
+            raise ValueError('Authoritative energy_matrix_kwh must be nonnegative and match distance shape')
+        if not np.array_equal(np.isfinite(energy), np.isfinite(distance)):
+            raise ValueError('Authoritative energy_matrix_kwh reachability must match distance_matrix_km')
+        return energy, 'provided_energy_matrix_kwh'
+    consumption = float(instance.vehicle.get('consumption_kwh_per_km', 0.404))
+    if not np.isfinite(consumption) or consumption < 0:
+        raise ValueError('consumption_kwh_per_km must be finite and nonnegative')
+    energy = np.full_like(distance, np.inf)
+    np.multiply(distance, consumption, out=energy, where=np.isfinite(distance))
+    return energy, 'distance_times_consumption'
+
+
+def validate_evrptw_route(instance, row: dict[str, Any], *, raw_payload=None,
+                          charging_mode='fixed_full') -> dict[str, Any]:
+    """Independently replay physical EVRPTW routes in km, seconds and kWh.
+
+    Supported scope: homogeneous vehicles, full batteries at each depot start,
+    fixed-time full recharge at every CS visit, customer service-start windows,
+    and independently starting routes. Matrix rows are depot, customers, then
+    physical stations. No Gurobi virtual CS-copy budget is imposed on these
+    physical node IDs. Repeated CS visits are physical events, never coverage
+    errors. Environment action restrictions remain a separate success test.
+
+    Actual route suffixes provide return-to-depot witnesses: this verifier does
+    not reproduce an environment's conservative lookahead mask. Unsupported
+    charging modes and malformed instance arrays fail explicitly; infeasible
+    candidate routes return a diagnostic ``valid=False`` result. No project
+    environment, trainer, model, or learned checkpoint is imported.
+    """
+    if charging_mode != 'fixed_full':
+        raise ValueError('Independent EVRPTW route validation currently supports charging_mode=fixed_full only')
+    tolerance = 1e-9
+    n = int(instance.num_customers)
+    m = int(instance.num_charging_stations)
+    terminals = 1 + n + m
+    if n < 1 or m < 0:
+        raise ValueError('EVRPTW validation requires positive customer and nonnegative station counts')
+    distance = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+    if distance.shape != (terminals, terminals) or np.isnan(distance).any() or (distance < 0).any():
+        raise ValueError('distance_matrix_km must match EVRPTW terminals and contain nonnegative costs or +inf')
+    demands = np.asarray(instance.demands_cm3, dtype=np.float64)
+    service = np.asarray(instance.service_time_s, dtype=np.float64)
+    windows = np.asarray(instance.tw_s, dtype=np.float64)
+    if (demands.shape != (n,) or not np.isfinite(demands).all() or (demands < 0).any()
+            or service.shape != (n,) or not np.isfinite(service).all() or (service < 0).any()
+            or windows.shape != (n, 2) or not np.isfinite(windows).all()
+            or (windows[:, 0] > windows[:, 1]).any()):
+        raise ValueError('EVRPTW demands/service/windows must match customers with finite valid values')
+    start, end = float(instance.working_start_s), float(instance.working_end_s)
+    capacity = float(instance.vehicle.get('cargo_capacity_cm3', np.inf))
+    battery = float(instance.vehicle.get('battery_capacity_kwh', 100.0))
+    charge_time = float(instance.vehicle.get('full_charge_time_s', 0.0))
+    if (not np.isfinite(start) or not np.isfinite(end) or start > end
+            or np.isnan(capacity) or capacity <= 0
+            or not np.isfinite(battery) or battery <= 0
+            or not np.isfinite(charge_time) or charge_time < 0):
+        raise ValueError('EVRPTW working window and vehicle capacities/charge time are invalid')
+    travel, travel_source = resolve_validation_travel_time(instance, raw_payload=raw_payload)
+    energy, energy_source = resolve_validation_energy(instance, raw_payload=raw_payload)
+    result = {
+        'checked': True, 'problem_type': 'evrptw', 'charging_mode': charging_mode,
+        'valid': False, 'physical_inputs_valid': True,
+        'validation_scope': 'complete_route_physics; environment_action_masks_checked_separately',
+        'station_visit_semantics': 'physical_station_ids; recharge_on_each_visit; no_virtual_copy_limit',
+        'time_window_semantics': 'service_start_in_window; waiting_allowed; each_route_clock_resets',
+        'travel_time_source': travel_source, 'energy_source': energy_source,
+        'indices_valid': True, 'depot_endpoints_valid': True,
+        'routes_have_customers': True, 'customer_coverage_valid': False,
+        'capacity_valid': True, 'battery_valid': True, 'time_windows_valid': True,
+        'service_completion_valid': True, 'charging_completion_valid': True,
+        'depot_return_valid': True, 'traversed_edges_reachable': True,
+        'distance_matches': False, 'recomputed_distance_km': None, 'distance_error_km': None,
+        'cargo_capacity_cm3': capacity, 'battery_capacity_kwh': battery,
+        'full_charge_time_s': charge_time, 'time_atol_s': tolerance,
+        'capacity_atol_cm3': tolerance, 'energy_atol_kwh': tolerance,
+        'distance_atol_km': 1e-5, 'distance_rtol': 1e-6,
+        'missing_customers': [], 'repeated_customers': [],
+        'route_loads_cm3': [], 'route_return_times_s': [], 'route_waiting_times_s': [],
+        'route_max_battery_used_kwh': [], 'route_charge_counts': [],
+        'charge_events': [], 'capacity_violations': [], 'battery_violations': [],
+        'time_window_violations': [], 'service_completion_violations': [],
+        'charging_completion_violations': [], 'depot_return_violations': [],
+        'unreachable_edges': [],
+    }
+    supplied = row.get('routes', [])
+    if not isinstance(supplied, (list, tuple)) or not supplied:
+        result['depot_endpoints_valid'] = False
+        result['missing_customers'] = list(range(1, n + 1))
+        return result
+    routes = []
+    coverage = np.zeros(n, dtype=np.int64)
+    for route in supplied:
+        if not isinstance(route, (list, tuple, np.ndarray)) or (isinstance(route, np.ndarray) and route.ndim != 1):
+            result['indices_valid'] = result['depot_endpoints_valid'] = False
+            continue
+        nodes = []
+        for node in route:
+            if isinstance(node, (bool, np.bool_)) or not isinstance(node, (int, np.integer)) or not 0 <= int(node) < terminals:
+                result['indices_valid'] = False
+                continue
+            nodes.append(int(node))
+            if 1 <= int(node) <= n:
+                coverage[int(node) - 1] += 1
+        if len(nodes) != len(route) or len(nodes) < 3 or nodes[0] != 0 or nodes[-1] != 0 or 0 in nodes[1:-1]:
+            result['depot_endpoints_valid'] = False
+        if not any(1 <= node <= n for node in nodes):
+            result['routes_have_customers'] = False
+        routes.append(nodes)
+    result['missing_customers'] = (np.where(coverage == 0)[0] + 1).tolist()
+    result['repeated_customers'] = (np.where(coverage > 1)[0] + 1).tolist()
+    result['customer_coverage_valid'] = bool(np.all(coverage == 1))
+    result['recomputed_vehicle_count'] = len(routes)
+    if not result['indices_valid'] or not result['depot_endpoints_valid']:
+        return result
+
+    total_distance = 0.0
+    for route_index, nodes in enumerate(routes):
+        clock, used_energy, load, waiting = start, 0.0, 0.0, 0.0
+        peak_energy, charges = 0.0, 0
+        for previous, node in zip(nodes, nodes[1:]):
+            d, t, e = float(distance[previous, node]), float(travel[previous, node]), float(energy[previous, node])
+            if not all(np.isfinite(value) for value in (d, t, e)):
+                result['unreachable_edges'].append({'route_index': route_index, 'from': previous, 'to': node})
+            total_distance += d
+            clock += t
+            used_energy += e
+            peak_energy = max(peak_energy, used_energy)
+            # A station is usable only if the vehicle can arrive before recharge.
+            if used_energy > battery + tolerance:
+                result['battery_violations'].append({'route_index': route_index, 'from': previous, 'to': node,
+                                                    'battery_used_kwh': used_energy, 'capacity_kwh': battery})
+            if node == 0:
+                if clock > end + tolerance:
+                    result['depot_return_violations'].append({'route_index': route_index, 'return_time_s': clock, 'deadline_s': end})
+            elif node <= n:
+                load += float(demands[node - 1])
+                if load > capacity + tolerance:
+                    result['capacity_violations'].append({'route_index': route_index, 'customer': node, 'load_cm3': load, 'capacity_cm3': capacity})
+                ready, due = windows[node - 1]
+                service_start = max(clock, float(ready))
+                if np.isfinite(clock):
+                    waiting += service_start - clock
+                if service_start > float(due) + tolerance:
+                    result['time_window_violations'].append({'route_index': route_index, 'customer': node, 'service_start_s': service_start, 'due_s': float(due)})
+                clock = service_start + float(service[node - 1])
+                if clock > end + tolerance:
+                    result['service_completion_violations'].append({'route_index': route_index, 'customer': node, 'service_completion_s': clock, 'deadline_s': end})
+            else:
+                arrival = clock
+                clock += charge_time
+                result['charge_events'].append({'route_index': route_index, 'station': node,
+                    'arrival_time_s': arrival, 'departure_time_s': clock,
+                    'battery_used_before_charge_kwh': used_energy, 'battery_used_after_charge_kwh': 0.0,
+                    'charge_time_s': charge_time})
+                charges += 1
+                if clock > end + tolerance:
+                    result['charging_completion_violations'].append({'route_index': route_index, 'station': node, 'departure_time_s': clock, 'deadline_s': end})
+                used_energy = 0.0
+        result['route_loads_cm3'].append(load)
+        result['route_return_times_s'].append(clock)
+        result['route_waiting_times_s'].append(waiting)
+        result['route_max_battery_used_kwh'].append(peak_energy)
+        result['route_charge_counts'].append(charges)
+    try:
+        objective = float(row.get('objective_distance_km', np.nan))
+    except (TypeError, ValueError):
+        objective = np.nan
+    result['distance_matches'] = bool(np.isfinite(total_distance) and np.isfinite(objective)
+        and np.isclose(total_distance, objective, rtol=1e-6, atol=1e-5))
+    result['recomputed_distance_km'] = total_distance if np.isfinite(total_distance) else None
+    result['distance_error_km'] = total_distance - objective if np.isfinite(total_distance) and np.isfinite(objective) else None
+    for valid_key, violations_key in (
+        ('capacity_valid', 'capacity_violations'), ('battery_valid', 'battery_violations'),
+        ('time_windows_valid', 'time_window_violations'), ('service_completion_valid', 'service_completion_violations'),
+        ('charging_completion_valid', 'charging_completion_violations'), ('depot_return_valid', 'depot_return_violations'),
+        ('traversed_edges_reachable', 'unreachable_edges'),
+    ):
+        result[valid_key] = not result[violations_key]
+    result['valid'] = all(result[key] for key in ('indices_valid', 'depot_endpoints_valid',
+        'routes_have_customers', 'customer_coverage_valid', 'capacity_valid', 'battery_valid',
+        'time_windows_valid', 'service_completion_valid', 'charging_completion_valid',
+        'depot_return_valid', 'traversed_edges_reachable', 'distance_matches'))
     return result

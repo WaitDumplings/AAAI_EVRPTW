@@ -1654,9 +1654,16 @@ def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, e
                     row["route_validation"] = _validate_vrptw_eval_route(instance, row, prefer_explicit_edge_matrices=bool(cfg.get('env', {}).get('prefer_explicit_edge_matrices', False)))
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_vrptw_route_validation"
+                elif problem_type == "evrptw" and cfg.get("env", {}).get("charging_mode", "fixed_full") == "fixed_full":
+                    # Shared, NumPy-only physical scorer is also used outside
+                    # the immutable original runtime. It imports no model/env.
+                    from scripts.original_eval_validation import validate_evrptw_route
+                    row["route_validation"] = validate_evrptw_route(instance, row)
+                    row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
+                    row["feasibility_source"] = "environment_success_and_independent_evrptw_route_validation"
                 else:
                     row["route_validation"] = {
-                        "checked": False, "reason": "independent_validation_implemented_for_cvrp_and_vrptw_only",
+                        "checked": False, "reason": "independent_validation_requires_supported_task_and_fixed_full_evrptw",
                     }
             reference = reference_metrics.get(str(instance.instance_id), {})
             reference_objective = reference.get("objective_distance_km", float("nan"))
@@ -5451,18 +5458,12 @@ def train_from_config(
                     physical_objectives, physical_success, _ = _final_info_arrays(
                         batch.final_infos, int(batch.actions.size(1)), int(batch.actions.size(2)),
                     )
-                    # This first controlled release supports completed routing
-                    # episodes only. Do not silently equate truncation/failure
-                    # with a cheap feasible solution or a zero-value terminal.
-                    if not np.all(physical_success & np.isfinite(physical_objectives)):
-                        raise RuntimeError("physical_shared_popart requires complete feasible rollouts; inspect failure/truncation before updating")
-                    physical_costs = torch.as_tensor(physical_objectives, device=device, dtype=torch.float32)
-                    unit = reward_normalization.signature["reward_unit_km"]
-                    initial_potential = getattr(batch, 'initial_shaping_potential', None)
-                    offset = initial_potential if initial_potential is not None else 0.
-                    reward_identity_error = (torch.where(batch.valid, batch.rewards, 0.).sum(0) + physical_costs / unit + offset).abs().max()
-                    if float(reward_identity_error) > 1e-4:
-                        raise RuntimeError(f"Rollout rewards disagree with physical distance: {float(reward_identity_error)}")
+                    # All ranks validate together before any global moment collective.
+                    # Opt-in completed failures retain their physical terminal cost;
+                    # collector cutoffs are never relabeled as true failed terminals.
+                    physical_costs, reward_identity_error = reward_normalization.validate_rollout(
+                        batch, physical_objectives, physical_success,
+                    )
                     advantages = reward_normalization.begin_rollout_update(
                         returns, advantages, batch.valid, agent.critic, optimizer,
                     )

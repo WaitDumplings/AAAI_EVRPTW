@@ -151,33 +151,10 @@ class EVRPTWVectorEnvFast(EVRPTWVectorEnv):
         }
 
     def _can_return_to_depot(self, start: int, current_time_s: float, battery_used_kwh: float, traj_idx: int | None = None) -> bool:
-        if start == 0:
-            return True
-        if battery_used_kwh + self.energy_kwh[start, 0] <= self.battery_capacity_kwh + 1e-9:
-            return current_time_s + self.travel_time_s[start, 0] <= self.working_end_s + 1e-9
-        stop_to_depot = self._stop_to_depot_time_s
-        for first_station in self.station_nodes:
-            first = int(first_station)
-            if first == int(start):
-                continue
-            if traj_idx is not None and self.cs_visited_current_route[int(traj_idx), first]:
-                continue
-            battery_at_first = battery_used_kwh + self.energy_kwh[start, first]
-            if battery_at_first > self.battery_capacity_kwh + 1e-9:
-                continue
-            time_at_first = current_time_s + self.travel_time_s[start, first]
-            depart_first = time_at_first + self._charge_time_s(battery_at_first)
-            if stop_to_depot is None:
-                stop_plan = super()._shortest_stop_time(first, 0)
-                if stop_plan is None:
-                    continue
-            else:
-                stop_plan = float(stop_to_depot[first])
-                if not np.isfinite(stop_plan):
-                    continue
-            if depart_first + stop_plan <= self.working_end_s + 1e-9:
-                return True
-        return False
+        # A cached unrestricted stop path can revisit a station already used in
+        # this route. The JIT mask computes a route-specific table; reference
+        # calls must apply the same restriction.
+        return super()._can_return_to_depot(start, current_time_s, battery_used_kwh, traj_idx=traj_idx)
 
     def _make_observation(self) -> dict[str, np.ndarray]:
         action_mask = self._compute_action_mask()

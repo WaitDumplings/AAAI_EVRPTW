@@ -3,7 +3,9 @@
 
 Evaluation instrumentation adds fixed isolated RNG, optional epoch-zero eval,
 route exports, and independent physical feasibility checks. The archived model,
-optimizer, losses and environment files are imported unchanged.
+optimizer, losses and environment files are imported unchanged. Under torchrun,
+an explicitly declared external optimizer-boundary synchronization layer adds
+data parallelism; the historical revision has no native DDP implementation.
 """
 from __future__ import annotations
 
@@ -28,6 +30,10 @@ _helper_spec = importlib.util.spec_from_file_location(
     '_original_eval_validation', Path(__file__).with_name('original_eval_validation.py'))
 _validation = importlib.util.module_from_spec(_helper_spec)
 _helper_spec.loader.exec_module(_validation)
+_runtime_spec = importlib.util.spec_from_file_location(
+    '_original_external_distributed', Path(__file__).with_name('original_distributed.py'))
+_distributed = importlib.util.module_from_spec(_runtime_spec)
+_runtime_spec.loader.exec_module(_distributed)
 
 PROJECT_PREFIXES = ('offline2online', 'EVRPTW_Benchmark', 'evrptw_core',
                     'evrptw_hierarchy', 'caliroute', 'ablation')
@@ -149,8 +155,10 @@ def _load_validation_sidecar(trainer, runtime_cfg):
             num_charging_stations=trainer.num_charging_stations_for_problem(data, problem))):
         identity = str(payload.get('instance_id') or f'adapted_{index:06d}')
         values = {name: payload[name] for name in
-                  ('travel_time_matrix_s', 'time_matrix_s', 'travel_time_matrix')
+                  ('travel_time_matrix_s', 'time_matrix_s', 'travel_time_matrix', 'energy_matrix_kwh', 'edge_energy_kwh')
                   if payload.get(name) is not None}
+        if 'energy_matrix_kwh' not in values and 'edge_energy_kwh' in values:
+            values['energy_matrix_kwh'] = values['edge_energy_kwh']
         if values:
             if identity in sidecar:
                 raise ValueError(f'Duplicate validation instance with explicit time matrix: {identity}')
@@ -165,13 +173,18 @@ def run_original_scratch(source_root, config_path, seed, device):
         raise ValueError('Original baseline configuration must be a mapping')
     assert_scratch_config(cfg)
     trainer, origins = _import_original(source_root)
+    runtime = _distributed.OriginalDistributedRuntime(cfg, seed, device, config_path.parent)
+    context, device = runtime.context, runtime.device
     fixed_seed = int(cfg.get('evaluation', {}).get('eval_seed', 17_000_000 + int(seed)))
     if fixed_seed < 0:
         raise ValueError('eval_seed must be nonnegative')
     initial_eval = bool(cfg.get('evaluation', {}).get('eval_before_training', False))
-    metadata_path = config_path.with_name('original_adapter.json')
+    metadata_path = config_path.with_name('original_adapter.json' if context.is_primary else f'original_adapter_rank_{context.rank}.json')
+    problem = trainer.problem_type_from_config(cfg)
+    validation_problem = 'evrptw' if problem == 'evrptw' else 'vrptw'
     metadata = {
-        'adapter_schema': 'original_scratch_eval_instrumentation_v2',
+        'adapter_schema': 'original_scratch_eval_instrumentation_v3',
+        'distributed_runtime': runtime.describe(),
         'source_root': str(source_root), 'config': str(config_path),
         'initialization': 'random; checkpoint loading forbidden', 'seed': int(seed),
         'eval_seed': fixed_seed, 'eval_before_training': initial_eval,
@@ -179,13 +192,13 @@ def run_original_scratch(source_root, config_path, seed, device):
         'source_sha256': {str(Path(path).relative_to(source_root)): hashlib.sha256(Path(path).read_bytes()).hexdigest()
                           for path in sorted(set(origins.values())) if Path(path).is_file()},
         'evaluation_adapter': 'fixed torch/Python/NumPy seed with isolated RNG; original epoch-dependent env seed offset cancelled',
-        'evaluation_feasibility_source': 'environment_success_and_independent_vrptw_route_validation',
+        'evaluation_feasibility_source': f'environment_success_and_independent_{validation_problem}_route_validation',
         'independent_route_validation': True, 'per_instance_route_export': True,
-        'evaluation_physics': 'authoritative directed travel_time_matrix_s when available; otherwise D/v; original training/decode environment unchanged',
+        'evaluation_physics': 'authoritative directed time/energy matrices when available; otherwise D/v and D*c; original training/decode environment unchanged',
         'trajectory_distribution_metrics': 'original environment-only feasibility; independent validation applies to the selected minimum route',
-        'monitoring_capabilities': {'original_train_csv': True, 'global_rank_metrics': False,
+        'monitoring_capabilities': {'original_train_csv': True, 'global_rank_metrics': context.enabled,
                                    'post_update_kl': False, 'plugin_gradient_diagnostics': False},
-        'training_model_optimizer_loss_environment': 'unchanged archived implementation',
+        'training_model_optimizer_loss_environment': 'unchanged archived functions; external gradient synchronization and constant-zero auxiliary backward guard when distributed',
         'checkpoint_selection': 'unchanged original trainer; epoch zero is not eligible',
         'state': 'starting', 'completed_eval_epochs': [],
     }
@@ -205,17 +218,18 @@ def run_original_scratch(source_root, config_path, seed, device):
             if 'agent' in captured:
                 raise RuntimeError('Scratch adapter expected exactly one original policy; reference policies are unsupported')
             captured['agent'] = self
+            runtime.model_ready(self, trainer.set_seed)
 
     def configure_scale(runtime_cfg, pool):
         result = original_scale(runtime_cfg, pool)
         captured['runtime_cfg'] = runtime_cfg
         return result
 
-    def evaluate(agent, runtime_cfg, seed, epoch, device):
+    def evaluate_primary(agent, runtime_cfg, seed, epoch, device):
         del seed
         problem = trainer.problem_type_from_config(runtime_cfg)
-        if problem not in ('vrptw', 'cvrptw'):
-            raise ValueError('Original measurement adapter currently requires VRPTW evaluation')
+        if problem not in ('vrptw', 'cvrptw', 'evrptw'):
+            raise ValueError('Original measurement adapter supports VRPTW and EVRPTW evaluation')
         if 'validation_sidecar' not in captured:
             captured['validation_sidecar'] = _load_validation_sidecar(trainer, runtime_cfg)
         captured['evaluation_rows'] = []
@@ -252,6 +266,27 @@ def run_original_scratch(source_root, config_path, seed, device):
         _write_metadata(metadata_path, metadata)
         return row
 
+    def evaluate(agent, runtime_cfg, seed, epoch, device):
+        if not context.enabled:
+            return evaluate_primary(agent, runtime_cfg, seed, epoch, device)
+        packet = None
+        if context.is_primary:
+            try:
+                packet = {'row': evaluate_primary(agent, runtime_cfg, seed, epoch, device)}
+            except Exception as error:
+                # Deliver the failure instead of leaving the other rank waiting
+                # until the long validation collective timeout expires.
+                packet = {'error': f'{type(error).__name__}: {error}'}
+        packet = context.broadcast_object(packet)
+        if 'error' in packet:
+            raise RuntimeError('Original primary evaluation failed: ' + packet['error'])
+        if not context.is_primary:
+            metadata['completed_eval_epochs'].append(int(epoch))
+            metadata['latest_eval'] = dict(epoch=int(epoch), **packet['row'])
+            metadata['evaluation_executed_on_rank'] = 0
+            _write_metadata(metadata_path, metadata)
+        return packet['row']
+
     def rollout_eval(agent, envs, *args, **kwargs):
         rows = original_rollout_eval(agent, envs, *args, **kwargs)
         if len(rows) != len(envs):
@@ -272,8 +307,13 @@ def run_original_scratch(source_root, config_path, seed, device):
             # Export the actual prefix, not a synthetic unexecuted depot return.
             if index is not None and env.route_has_customer[index] and env.current_routes[index]:
                 row['routes'][-1] = list(env.current_routes[index])
-            result = _validation.validate_vrptw_route(
-                instance, row, raw_payload=captured['validation_sidecar'].get(str(instance.instance_id)))
+            raw = captured['validation_sidecar'].get(str(instance.instance_id))
+            if validation_problem == 'evrptw':
+                result = _validation.validate_evrptw_route(
+                    instance, row, raw_payload=raw,
+                    charging_mode=captured['runtime_cfg'].get('env', {}).get('charging_mode', 'fixed_full'))
+            else:
+                result = _validation.validate_vrptw_route(instance, row, raw_payload=raw)
             row.update(route_validation=result, independently_valid=bool(result['valid']),
                        feasible=bool(row['environment_feasible'] and result['valid']),
                        feasibility_source=metadata['evaluation_feasibility_source'])
@@ -283,6 +323,9 @@ def run_original_scratch(source_root, config_path, seed, device):
     class InstrumentedWriter(original_writer):
         def __init__(self, handle, fieldnames, *args, **kwargs):
             fields = list(fieldnames)
+            self._is_train = 'policy_loss' in fields and 'reward_mean' in fields
+            if self._is_train and context.enabled:
+                fields.extend(key for key in _distributed.EXTRA_TRAIN_FIELDS if key not in fields)
             self._is_eval = ('eval_status' in fields and 'eval_avg_objective_distance_km' in fields
                              and 'policy_loss' not in fields and 'reward_mean' not in fields)
             if self._is_eval:
@@ -293,6 +336,12 @@ def run_original_scratch(source_root, config_path, seed, device):
                         fields.append(key)
             self._handle = handle
             super().__init__(handle, fields, *args, **kwargs)
+
+        def writerow(self, row):
+            if self._is_train and context.enabled and isinstance(row.get('epoch'), (int, np.integer)):
+                row = dict(row)
+                row.update(runtime.finish_epoch(row))
+            return super().writerow(row)
 
         def writeheader(self):
             result = super().writeheader()
@@ -310,6 +359,7 @@ def run_original_scratch(source_root, config_path, seed, device):
     def forbid_checkpoint(*args, **kwargs):
         raise RuntimeError('Original scratch adapter forbids every initialization/resume/reference checkpoint load')
 
+    runtime.install(trainer)
     trainer.Agent = CapturedAgent
     trainer._configure_dataset_reward_scale = configure_scale
     trainer.evaluate_fixed_dataset = evaluate
@@ -322,9 +372,16 @@ def run_original_scratch(source_root, config_path, seed, device):
         metadata['state'] = 'running'
         checkpoint = trainer.train_from_config(cfg, seed=int(seed), device=device)
         assert_project_origins(source_root)
+        final_difference = runtime.finalize()
+        if context.enabled:
+            checkpoint = runtime.last_checkpoint_path
         if initial_eval and not captured.get('initial_eval_written'):
             raise RuntimeError('Original trainer completed without required epoch-zero evaluation')
         metadata.update(state='completed', checkpoint_final=str(checkpoint),
+                        expert_observation_storage=dict(runtime.expert_storage),
+                        final_parameter_max_abs_difference=final_difference,
+                        optimizer_steps=context.optimizer_steps if context.enabled else None,
+                        amp_skipped_steps=context.amp_skipped_steps if context.enabled else None,
                         adapter_wall_time_s=time.perf_counter() - started)
         _write_metadata(metadata_path, metadata)
         print(f'Saved original from-scratch final checkpoint: {checkpoint}', flush=True)
@@ -342,6 +399,7 @@ def run_original_scratch(source_root, config_path, seed, device):
         csv.DictWriter = original_writer
         for name, function in load_functions.items():
             setattr(trainer, name, function)
+        runtime.uninstall(trainer)
 
 
 def main():

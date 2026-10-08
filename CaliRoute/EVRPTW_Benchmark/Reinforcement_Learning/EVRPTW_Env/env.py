@@ -484,6 +484,13 @@ class EVRPTWVectorEnv(Env):
                     mask[t, 0] = True
                 elif self._direct_depot_feasible(t):
                     mask[t, 0] = True
+                else:
+                    # The final customer may require a charging stop before
+                    # depot return; serving it does not make that stop invalid.
+                    for station in self.station_nodes:
+                        station = int(station)
+                        if station != start and not self.cs_visited_current_route[t, station] and self._station_action_feasible(t, station):
+                            mask[t, station] = True
                 continue
 
             if start != 0 and self.route_has_customer[t] and self._direct_depot_feasible(t):
@@ -540,8 +547,12 @@ class EVRPTWVectorEnv(Env):
     def _can_return_to_depot(self, start: int, current_time_s: float, battery_used_kwh: float, traj_idx: int | None = None) -> bool:
         if start == 0:
             return True
-        if battery_used_kwh + self.energy_kwh[start, 0] <= self.battery_capacity_kwh + 1e-9:
-            return current_time_s + self.travel_time_s[start, 0] <= self.working_end_s + 1e-9
+        if (battery_used_kwh + self.energy_kwh[start, 0] <= self.battery_capacity_kwh + 1e-9
+                and current_time_s + self.travel_time_s[start, 0] <= self.working_end_s + 1e-9):
+            return True
+        blocked = set(np.flatnonzero(self.cs_visited_current_route[int(traj_idx)])) if traj_idx is not None else set()
+        if self._is_station(start):
+            blocked.add(int(start))
         for first_station in self.station_nodes:
             first = int(first_station)
             if first == int(start):
@@ -553,7 +564,7 @@ class EVRPTWVectorEnv(Env):
                 continue
             time_at_first = current_time_s + self.travel_time_s[start, first]
             depart_first = time_at_first + self._charge_time_s(battery_at_first)
-            stop_plan = self._shortest_stop_time(first, 0)
+            stop_plan = self._shortest_stop_time(first, 0, blocked_stations=blocked)
             if stop_plan is None:
                 continue
             if depart_first + stop_plan <= self.working_end_s + 1e-9:
@@ -573,7 +584,8 @@ class EVRPTWVectorEnv(Env):
                 adjacency[i].append((j, float(self.travel_time_s[i, j]) + charge_time))
         return adjacency
 
-    def _shortest_stop_time(self, start: int, target: int) -> Optional[float]:
+    def _shortest_stop_time(self, start: int, target: int, blocked_stations=None) -> Optional[float]:
+        blocked = set() if blocked_stations is None else blocked_stations
         heap: list[tuple[float, int]] = [(0.0, int(start))]
         dist = {int(start): 0.0}
         while heap:
@@ -583,6 +595,8 @@ class EVRPTWVectorEnv(Env):
             if cost > dist.get(node, math.inf) + 1e-12:
                 continue
             for nxt, edge_cost in self.stop_adj.get(node, []):
+                if nxt in blocked:
+                    continue
                 cand = cost + edge_cost
                 if cand + 1e-12 < dist.get(nxt, math.inf):
                     dist[nxt] = cand
