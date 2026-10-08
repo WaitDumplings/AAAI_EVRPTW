@@ -138,7 +138,12 @@ def successful_training(spec, detail):
     epochs = [int(row['epoch']) for row in read_csv(Path(spec['log_dir']) / 'train_log.csv')]
     evaluation = detail.get('latest_validation') or {}
     target = spec['epochs']
-    return (epochs == list(range(1, target + 1))
+    expected_count = spec.get('validation_instances', 1000)
+    validation_rows = read_csv(Path(spec['log_dir']) / 'eval_log.csv')
+    completed_evaluations = {int(row['epoch']) for row in validation_rows
+        if row.get('eval_status') == 'ok' and int(float(row.get('eval_num_instances', 0))) == expected_count}
+    required = set(spec.get('required_validation_epochs', []))
+    return (required <= completed_evaluations and epochs == list(range(1, target + 1))
         and int(evaluation.get('epoch', -1)) == target
         and evaluation.get('eval_status') == 'ok'
         and int(float(evaluation.get('eval_num_instances', 0))) == spec.get('validation_instances', 1000)
@@ -226,7 +231,7 @@ def acquire_gpu_lock(uuid):
     return lock
 
 
-def source_snapshot(destination):
+def source_snapshot(destination, *, include_initialization_assets=True):
     """Copy code bytes; later git pulls cannot change this experiment's source."""
     repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], cwd=CODE_ROOT, text=True).strip())
     relative = CODE_ROOT.relative_to(repo)
@@ -235,11 +240,13 @@ def source_snapshot(destination):
     hashes = {}
     for name in files:
         src = repo / name
-        if not src.is_file():
-            raise ValueError(f'Missing source file: {src}')
         rel = src.relative_to(CODE_ROOT)
         if rel.parts[0] == 'results':
             continue
+        if not include_initialization_assets and (rel.parts[0] == 'assets' or src.suffix.lower() in {'.pt', '.pth', '.ckpt'}):
+            continue
+        if not src.is_file():
+            raise ValueError(f'Missing source file: {src}')
         dst = destination / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         before = digest(src)
@@ -258,8 +265,23 @@ def verify_manifest(manifest):
     for relative, checksum in manifest['source']['files'].items():
         if digest(source / relative) != checksum:
             raise ValueError(f'Frozen source changed: {relative}')
-    if digest(Path(manifest['init_checkpoint'])) != manifest['init_checkpoint_sha256']:
+    if manifest.get('initialization_mode') == 'scratch':
+        if any(manifest.get(key) for key in ('init_checkpoint', 'init_checkpoint_sha256', 'source_init_checkpoint', 'source_init_epoch')):
+            raise ValueError('A scratch manifest cannot contain a learned initialization')
+    elif digest(Path(manifest['init_checkpoint'])) != manifest['init_checkpoint_sha256']:
         raise ValueError('Frozen initialization changed')
+    # Independent historical code must be verified too, not just the launcher.
+    roots = {str(source.resolve())}
+    for name, item in manifest.get('additional_sources', {}).items():
+        root = Path(item['code_root']).resolve()
+        roots.add(str(root))
+        for relative, checksum in item['source']['files'].items():
+            if digest(root / relative) != checksum:
+                raise ValueError(f'Frozen additional source changed: {name}/{relative}')
+    for name, spec in manifest['arms'].items():
+        for stage in (spec, spec.get('preflight', {})):
+            if stage and str(Path(stage.get('code_root', spec.get('code_root', source))).resolve()) not in roots:
+                raise ValueError(f'Unverified execution source for {name}')
     for key, item in manifest['inputs'].items():
         if digest(Path(item['path'])) != item['sha256']:
             raise ValueError(f'Dataset/reference changed: {key}')
@@ -269,6 +291,21 @@ def verify_manifest(manifest):
         for stage in (spec, spec.get('preflight', {})):
             if stage and digest(Path(stage['config'])) != stage['config_sha256']:
                 raise ValueError(f'Configuration changed: {arm}')
+            if stage and manifest.get('initialization_mode') == 'scratch':
+                if stage.get('resume_checkpoint'):
+                    raise ValueError('Scratch execution cannot load a resume checkpoint')
+                cfg = yaml.safe_load(Path(stage['config']).read_text())
+                def check_scratch_mapping(node, prefix=''):
+                    if isinstance(node, dict):
+                        for key, value in node.items():
+                            name = str(key)
+                            if value and ('checkpoint' in name or name == 'pretrained_path') and any(token in name for token in ('init', 'initial', 'resume', 'reference', 'pretrained')) and not name.endswith('_strict'):
+                                raise ValueError(f'Scratch execution forbids {prefix}{name}')
+                            check_scratch_mapping(value, prefix + name + '.')
+                    elif isinstance(node, list):
+                        for value in node:
+                            check_scratch_mapping(value, prefix)
+                check_scratch_mapping(cfg)
 
 
 def comparison_report(manifest, status):
@@ -356,8 +393,11 @@ def supervise(experiment, *, stop_requested=None):
             OPENBLAS_NUM_THREADS='1', NUMBA_NUM_THREADS='1', PYTHONUNBUFFERED='1',
             PYTHONDONTWRITEBYTECODE='1', NUMBA_CACHE_DIR=str(Path(spec['output_dir']) / 'numba_cache'))
         env.pop('EVRPTW_DB_ROOT', None)
+        # Inherited PYTHONPATH must not import another checkout into a frozen arm.
+        env.pop('PYTHONPATH', None)
+        code_root = spec.get('code_root', manifest['arms'][arm].get('code_root', manifest['code_root']))
         try:
-            process = subprocess.Popen(spec['command'], cwd=manifest['code_root'], env=env,
+            process = subprocess.Popen(spec['command'], cwd=code_root, env=env,
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
         except BaseException:
             stream.close()

@@ -1,5 +1,12 @@
 # Physical consistency and exploration comparison
 
+> Historical warm-start protocol. The current comparison is
+> [VRPTW100 from scratch](scratch_comparison.md), launched with
+> `bash scripts/run_scratch_comparison.sh --seed 3010 --gpus 0,1,2,3`.
+> It uses random initialization for every arm and the exact original `f388343`
+> source for `legacy`. The older `legacy` and checkpoint-based settings below
+> describe a different experiment and do not define the current scratch run.
+
 This launcher prepares four independent, single-GPU VRPTW100 runs. Every arm
 uses depot-centred fixed-unit inputs, physical input context, and the same full
 stage-two embedding/encoder/decoder architecture. `legacy` here means the

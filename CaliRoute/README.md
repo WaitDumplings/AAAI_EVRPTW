@@ -10,6 +10,33 @@ PPO backbone -> SL-PPO
 `SL-PPO` is the proposed method. `PPO`, `DAPG`, and `AWBC` are comparison
 methods that share the same backbone and environment interface.
 
+## Current VRPTW100 scratch comparison
+
+The current four-arm experiment starts every model from random initialization:
+`legacy`, `physics`, `archive`, and `explore`. `legacy` uses the complete original
+source at commit `f388343`, with an external evaluation adapter; it is not the
+current model with features disabled. From `CaliRoute/`:
+
+```bash
+bash scripts/run_scratch_comparison.sh --seed 3010 --gpus 0,1,2,3
+# Prepare configs and source snapshots without starting training:
+bash scripts/run_scratch_comparison.sh --prepare-only --seed 3011 --gpus 0,1,2,3
+```
+
+The shell starts a background supervisor with one GPU per arm and a separate
+preflight. All arms use 300 epochs, 64 instances × 50 trajectories, **five PPO
+passes**, four minibatches, constant LR `1e-4`, entropy `0.01`, and SL coefficient
+`0.5`. Validation uses all 1,000 instances, best-of-50, at epoch zero and every
+50 epochs. No PPO-init checkpoint, previous results directory or bundled weight
+asset is required; training expert routes are still required by SL-PPO.
+
+Place `AAAI_Dataset` beside `CaliRoute`, or pass `--data-root /path/to/AAAI_Dataset`.
+Legacy uses chunk size 8 and current arms use 15 for memory control. Original
+four-pass/priority defaults are explicitly overridden to five passes/uniform
+sampling for this experiment. Earlier warm-start launchers below remain as
+historical experiment entry points. See [the scratch comparison guide](docs/scratch_comparison.md)
+for data files, source provenance, evaluation limits and monitoring commands.
+
 ## Data Layout
 
 The code and dataset live under the same `AAAI_EVRPTW` workspace:
