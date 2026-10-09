@@ -162,6 +162,13 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
         super().__init__(*args, **kwargs)
         self.agda_physical_candidate_features = bool(agda_physical_candidate_features)
         self.agda_smooth_distance_features = bool(agda_smooth_distance_features)
+        # Fixed semantic channel maps move with the module without adding
+        # checkpoint keys or constructing CPU-to-GPU indices at each decision.
+        self.register_buffer('_candidate_resource_flags',
+                             torch.tensor([7, 7, 7, 6, 8, 8, 8, 8, 6, 6, 6, -1, -1, -1]),
+                             persistent=False)
+        self.register_buffer('_system_resource_flags', torch.tensor([7, 6, 8, -1, -1]),
+                             persistent=False)
 
     def _distance_feature(self, value, *, signed=False):
         if self.agda_smooth_distance_features:
@@ -382,6 +389,13 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             ],
             dim=-1,
         )
+        if self.agda_physical_candidate_features:
+            graph = state.states.get('graph_input_context')
+            if graph is not None:
+                flags = self._system_resource_flags
+                active = (graph[:, flags.clamp_min(0)] > .5) | (flags < 0)
+                constraint_context = torch.where(active[:, None], constraint_context, 0.)
+            constraint_context = torch.nan_to_num(constraint_context, nan=0., posinf=2., neginf=-1.)
         return torch.cat([routing_core, constraint_context], dim=-1)
 
     def _candidate_features(
@@ -398,108 +412,113 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
         route_order,
         current_node_idx,
         prev_node_idx,
+        physical_transitions=None,
     ):
-        depot_loc = state.states["depot_loc"]
-        if depot_loc.dim() == 2:
-            depot_loc = depot_loc.unsqueeze(1)
+        B, N, _ = node_embeddings.shape
+        device, dtype = node_embeddings.device, node_embeddings.dtype
+        # Physical mode already has authoritative directed road transitions;
+        # avoid rebuilding and discarding coordinate and legacy resource proxies.
+        if not self.agda_physical_candidate_features:
+            depot_loc = state.states["depot_loc"]
+            if depot_loc.dim() == 2:
+                depot_loc = depot_loc.unsqueeze(1)
 
-        cus_loc = state.states["cus_loc"]
-        rs_loc = state.states["rs_loc"]
-        node_loc = torch.cat([depot_loc, cus_loc, rs_loc], dim=1)
-        B, N, _ = node_loc.shape
-        device = node_embeddings.device
-        dtype = node_embeddings.dtype
+            cus_loc = state.states["cus_loc"]
+            rs_loc = state.states["rs_loc"]
+            node_loc = torch.cat([depot_loc, cus_loc, rs_loc], dim=1)
 
-        current_loc = torch.gather(
-            node_loc.to(device=device, dtype=dtype),
-            dim=1,
-            index=current_node_idx.unsqueeze(-1).expand(-1, -1, node_loc.size(-1)),
-        )
-        rel = node_loc.to(device=device, dtype=dtype).unsqueeze(1) - current_loc.unsqueeze(2)
-        coord_travel_proxy = torch.linalg.norm(rel, dim=-1).clamp(min=0.0) / (2.0 ** 0.5)
-        depot_step_loc = node_loc[:, :1, :].to(device=device, dtype=dtype)
-        coord_return_to_depot = torch.linalg.norm(
-            node_loc.to(device=device, dtype=dtype).unsqueeze(1)
-            - depot_step_loc.unsqueeze(2),
-            dim=-1,
-        ).clamp(min=0.0) / (2.0 ** 0.5)
-        if coord_return_to_depot.size(1) == 1 and T != 1:
-            coord_return_to_depot = coord_return_to_depot.expand(-1, T, -1)
-        coord_current_to_depot = torch.linalg.norm(
-            current_loc - depot_step_loc,
-            dim=-1,
-            keepdim=True,
-        ).clamp(min=0.0) / (2.0 ** 0.5)
-        travel_proxy = coord_travel_proxy
-        return_to_depot = coord_return_to_depot
-        current_to_depot = coord_current_to_depot
+            current_loc = torch.gather(
+                node_loc.to(device=device, dtype=dtype),
+                dim=1,
+                index=current_node_idx.unsqueeze(-1).expand(-1, -1, node_loc.size(-1)),
+            )
+            rel = node_loc.to(device=device, dtype=dtype).unsqueeze(1) - current_loc.unsqueeze(2)
+            coord_travel_proxy = torch.linalg.norm(rel, dim=-1).clamp(min=0.0) / (2.0 ** 0.5)
+            depot_step_loc = node_loc[:, :1, :].to(device=device, dtype=dtype)
+            coord_return_to_depot = torch.linalg.norm(
+                node_loc.to(device=device, dtype=dtype).unsqueeze(1)
+                - depot_step_loc.unsqueeze(2),
+                dim=-1,
+            ).clamp(min=0.0) / (2.0 ** 0.5)
+            if coord_return_to_depot.size(1) == 1 and T != 1:
+                coord_return_to_depot = coord_return_to_depot.expand(-1, T, -1)
+            coord_current_to_depot = torch.linalg.norm(
+                current_loc - depot_step_loc,
+                dim=-1,
+                keepdim=True,
+            ).clamp(min=0.0) / (2.0 ** 0.5)
+            travel_proxy = coord_travel_proxy
+            return_to_depot = coord_return_to_depot
+            current_to_depot = coord_current_to_depot
 
-        edge_distance = self._edge_matrix(state, "edge_distance", B=B, device=device, dtype=dtype)
-        if edge_distance is not None:
-            travel_proxy = self._gather_edge_from_current(edge_distance, current_node_idx)
-            return_to_depot = edge_distance[:, None, :, 0].expand(-1, T, -1)
-            current_to_depot = self._gather_edge_to_depot(edge_distance, current_node_idx)
-        depot_detour = travel_proxy + return_to_depot - current_to_depot
+            edge_distance = self._edge_matrix(state, "edge_distance", B=B, device=device, dtype=dtype)
+            if edge_distance is not None:
+                travel_proxy = self._gather_edge_from_current(edge_distance, current_node_idx)
+                return_to_depot = edge_distance[:, None, :, 0].expand(-1, T, -1)
+                current_to_depot = self._gather_edge_to_depot(edge_distance, current_node_idx)
+            depot_detour = travel_proxy + return_to_depot - current_to_depot
 
-        edge_energy = self._edge_matrix(state, "edge_energy", B=B, device=device, dtype=dtype)
-        if edge_energy is None:
-            energy_cost = travel_proxy
-        else:
-            energy_cost = self._gather_edge_from_current(edge_energy, current_node_idx)
-        edge_time = self._edge_matrix(state, "edge_time", B=B, device=device, dtype=dtype)
-        if edge_time is None:
-            travel_time = coord_travel_proxy
-        else:
-            travel_time = self._gather_edge_from_current(edge_time, current_node_idx)
-
-        time_window = state.states["time_window"].to(device=device, dtype=dtype)
-        service_time = state.states["service_time"].to(device=device, dtype=dtype)
-        if service_time.dim() == 3:
-            service_time = service_time.squeeze(-1)
-        demand = state.states["demand"].to(device=device, dtype=dtype)
-        if demand.dim() == 3:
-            demand = demand.squeeze(-1)
-
-        tw_open = time_window[..., 0].unsqueeze(1)
-        tw_close = time_window[..., 1].unsqueeze(1)
-        service = service_time.unsqueeze(1).expand(B, T, N)
-        demand_step = demand.unsqueeze(1).expand(B, T, N)
-
-        current_time = self._as_step_scalar(state.current_time.float(), T, node_embeddings)
-        current_load = self._as_step_scalar(state.used_capacity.float(), T, node_embeddings)
-        current_battery = self._as_step_scalar(state.used_battery.float(), T, node_embeddings)
-
-        arrival = current_time + travel_time
-        wait = torch.relu(tw_open - arrival)
-        service_start = torch.maximum(arrival, tw_open)
-        finish = service_start + service
-        arrival_slack = tw_close - arrival
-        finish_slack = tw_close - finish
-        load_after = current_load + demand_step
-        battery_after = current_battery + energy_cost
-        capacity_margin = (1.0 - load_after).clamp(-1.0, 1.0)
-
-        battery_capacity = state.states.get("battery_capacity", None)
-        if battery_capacity is None:
-            battery_capacity = torch.ones(B, 1, 1, device=device, dtype=dtype)
-        else:
-            battery_capacity = battery_capacity.to(device=device, dtype=dtype)
-            if battery_capacity.dim() == 0:
-                battery_capacity = battery_capacity.view(1, 1, 1)
-            elif battery_capacity.dim() == 1:
-                battery_capacity = battery_capacity.view(-1, 1, 1)
+            edge_energy = self._edge_matrix(state, "edge_energy", B=B, device=device, dtype=dtype)
+            if edge_energy is None:
+                energy_cost = travel_proxy
             else:
-                battery_capacity = battery_capacity.reshape(battery_capacity.size(0), -1)
-                battery_capacity = battery_capacity[:, :1].view(-1, 1, 1)
-            if battery_capacity.size(0) == 1 and B != 1:
-                battery_capacity = battery_capacity.expand(B, -1, -1)
-        battery_capacity = battery_capacity.clamp_min(1e-6)
-        energy_ratio = (energy_cost / battery_capacity).clamp(0.0, 2.0)
-        current_battery_feasible = (battery_after <= battery_capacity).to(dtype)
-        battery_margin = (1.0 - battery_after).clamp(-1.0, 1.0)
+                energy_cost = self._gather_edge_from_current(edge_energy, current_node_idx)
+            edge_time = self._edge_matrix(state, "edge_time", B=B, device=device, dtype=dtype)
+            if edge_time is None:
+                travel_time = coord_travel_proxy
+            else:
+                travel_time = self._gather_edge_from_current(edge_time, current_node_idx)
+
+            time_window = state.states["time_window"].to(device=device, dtype=dtype)
+            service_time = state.states["service_time"].to(device=device, dtype=dtype)
+            if service_time.dim() == 3:
+                service_time = service_time.squeeze(-1)
+            demand = state.states["demand"].to(device=device, dtype=dtype)
+            if demand.dim() == 3:
+                demand = demand.squeeze(-1)
+
+            tw_open = time_window[..., 0].unsqueeze(1)
+            tw_close = time_window[..., 1].unsqueeze(1)
+            service = service_time.unsqueeze(1).expand(B, T, N)
+            demand_step = demand.unsqueeze(1).expand(B, T, N)
+
+            current_time = self._as_step_scalar(state.current_time.float(), T, node_embeddings)
+            current_load = self._as_step_scalar(state.used_capacity.float(), T, node_embeddings)
+            current_battery = self._as_step_scalar(state.used_battery.float(), T, node_embeddings)
+
+            arrival = current_time + travel_time
+            wait = torch.relu(tw_open - arrival)
+            service_start = torch.maximum(arrival, tw_open)
+            finish = service_start + service
+            arrival_slack = tw_close - arrival
+            finish_slack = tw_close - finish
+            load_after = current_load + demand_step
+            battery_after = current_battery + energy_cost
+            capacity_margin = (1.0 - load_after).clamp(-1.0, 1.0)
+
+            battery_capacity = state.states.get("battery_capacity", None)
+            if battery_capacity is None:
+                battery_capacity = torch.ones(B, 1, 1, device=device, dtype=dtype)
+            else:
+                battery_capacity = battery_capacity.to(device=device, dtype=dtype)
+                if battery_capacity.dim() == 0:
+                    battery_capacity = battery_capacity.view(1, 1, 1)
+                elif battery_capacity.dim() == 1:
+                    battery_capacity = battery_capacity.view(-1, 1, 1)
+                else:
+                    battery_capacity = battery_capacity.reshape(battery_capacity.size(0), -1)
+                    battery_capacity = battery_capacity[:, :1].view(-1, 1, 1)
+                if battery_capacity.size(0) == 1 and B != 1:
+                    battery_capacity = battery_capacity.expand(B, -1, -1)
+            battery_capacity = battery_capacity.clamp_min(1e-6)
+            energy_ratio = (energy_cost / battery_capacity).clamp(0.0, 2.0)
+            current_battery_feasible = (battery_after <= battery_capacity).to(dtype)
+            battery_margin = (1.0 - battery_after).clamp(-1.0, 1.0)
 
         if self.agda_physical_candidate_features:
-            physical = candidate_transitions(state, node_embeddings)
+            physical = (candidate_transitions(state, node_embeddings)
+                        if physical_transitions is None else physical_transitions)
+            demand_step = physical['demand']
             travel_proxy = physical['travel_distance']
             return_to_depot = physical['return_distance']
             depot_detour = physical['depot_detour']
@@ -577,6 +596,18 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             ],
             dim=-1,
         )
+        if self.agda_physical_candidate_features:
+            graph = state.states.get('graph_input_context')
+            if graph is not None:
+                # Inactive resources are dummy observation fields, including
+                # their margins and feasibility bits. They carry no information.
+                flags = self._candidate_resource_flags
+                active = (graph[:, flags.clamp_min(0)] > .5) | (flags < 0)
+                constraint_supplement = torch.where(active[:, None, None], constraint_supplement, 0.)
+            # Invalid/masked candidates still traverse shared MLPs. Sanitizing
+            # here prevents NaNs from poisoning every candidate via gradients.
+            routing_core = torch.nan_to_num(routing_core, nan=0., posinf=2., neginf=-1.)
+            constraint_supplement = torch.nan_to_num(constraint_supplement, nan=0., posinf=2., neginf=-1.)
         return torch.cat([routing_core, constraint_supplement], dim=-1)
 
     def forward(
@@ -586,6 +617,7 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
         driver_query,
         state,
         node_projections=None,
+        physical_transitions=None,
     ):
         if not self.enabled:
             return 0, 0, 0, 0
@@ -641,6 +673,7 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             route_order=route_order,
             current_node_idx=current_node_idx,
             prev_node_idx=prev_node_idx,
+            physical_transitions=physical_transitions,
         )
         if self.optimize_dynamic_projections and not (
             self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key
@@ -872,6 +905,13 @@ class Decoder(nn.Module):
         node_embeddings, graph_context, glimpse_K, glimpse_V, action_key = cached_embeddings[:5]
         node_projections = cached_embeddings[5].get("node_projections") if len(cached_embeddings) > 5 else None
 
+        # Both AGDA and the resource readout consume the same current-state
+        # transition features. Share only within this call, never across PPO
+        # replay states or trajectory chunks.
+        physical_transitions = None
+        if (self.dynamic_graph_kv_encoder.enabled
+                and self.dynamic_graph_kv_encoder.agda_physical_candidate_features):
+            physical_transitions = candidate_transitions(state, node_embeddings, node_mask=node_mask)
         query = self.driver_query_encoder(node_embeddings, graph_context, state)
         key_delta, val_delta, action_key_delta, action_bias = self.dynamic_graph_kv_encoder(
             node_embeddings=node_embeddings,
@@ -879,6 +919,7 @@ class Decoder(nn.Module):
             driver_query=query,
             state=state,
             node_projections=node_projections,
+            physical_transitions=physical_transitions,
         )
         if self.post_charge_adapter is not None:
             action_bias = action_bias + self.post_charge_adapter(state, node_embeddings)
@@ -890,6 +931,7 @@ class Decoder(nn.Module):
                 edge_relations=extra.get("edge_relations"),
                 edge_relation_valid=extra.get("edge_relation_valid"),
                 node_mask=node_mask,
+                transitions=physical_transitions,
             )
             query = query + query_delta
             if torch.is_tensor(action_key_delta) and action_key_delta.dim() == 3:

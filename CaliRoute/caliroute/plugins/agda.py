@@ -243,13 +243,17 @@ class AdaptiveGraphAttention(nn.Module):
             device=flat_tokens.device,
             dtype=flat_tokens.dtype,
         )
+        # Only the decision token is consumed below. Query that token against
+        # every summary key/value, avoiding unused attention and FF activations
+        # for the other tokens (especially costly across trajectories/replay).
+        decision_input = flat_tokens[:, :1]
         attended_tokens, _ = self.token_attn(
-            flat_tokens,
+            decision_input,
             flat_tokens,
             flat_tokens,
             need_weights=False,
         )
-        flat_tokens = self.token_norm(flat_tokens + attended_tokens)
+        flat_tokens = self.token_norm(decision_input + attended_tokens)
         flat_tokens = self.token_ff_norm(flat_tokens + self.token_ff(flat_tokens))
         decision_token = flat_tokens[:, 0, :].reshape(B, T, D)
 

@@ -207,7 +207,8 @@ class ResourceDecisionAdapter(nn.Module):
         return None
 
     def forward(self, node_embeddings, query, state, *, cached_readout=None,
-                edge_relations=None, edge_relation_valid=None, node_mask=None):
+                edge_relations=None, edge_relation_valid=None, node_mask=None,
+                transitions=None):
         B, T, D = query.shape
         N = node_embeddings.size(1)
         key_delta = query.new_zeros(B, T, N, D)
@@ -215,7 +216,8 @@ class ResourceDecisionAdapter(nn.Module):
         query_delta = torch.zeros_like(query)
         diagnostics = {}
         if self.use_resources:
-            features = candidate_transitions(state, node_embeddings, node_mask=node_mask)
+            features = (candidate_transitions(state, node_embeddings, node_mask=node_mask)
+                        if transitions is None else transitions)
             if 'graph_input_context' not in state.states:
                 raise KeyError('Resource decoder requires graph_input_context with explicit resource flags')
             graph = state.states['graph_input_context'].float()
