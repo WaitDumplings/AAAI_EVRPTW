@@ -113,6 +113,15 @@ def build_config(base, **kwargs):
         comparison_scope='Same remote training/model source; graph versus current static encoder and matching decoder edge interface. Same local distributed rules, global batch, reward, SL, exploration and validation budgets.',
         remote_reproduction_caveat='Dual GPU uses independent rank samplers and archives and averages rank-local masked losses; it is not a bitwise or global-valid-action-loss equivalent of the remote single-GPU run. Hardware, software and chunk arithmetic also differ.',
     )
+    integration = cfg['experiment_protocol'].get('model_integration', {})
+    for key in list(integration):
+        if key in cfg['model']:
+            integration[key] = cfg['model'][key]
+    integration.update(use_joint_graph_encoder=cfg['model']['use_joint_graph_encoder'],
+        joint_graph_edge_dim=cfg['model'].get('joint_graph_edge_dim'),
+        active_edge_state_dim=(cfg['model']['joint_graph_edge_dim'] if cfg['model']['use_joint_graph_encoder']
+                               else cfg['model']['edge_relation_dim']))
+    cfg['experiment_protocol']['model_integration'] = integration
     return cfg
 
 
@@ -148,7 +157,7 @@ def main():
     parser = shared.make_parser()
     parser.description = __doc__
     parser.set_defaults(task='vrptw', variant='optimized', encoder_variant='graph',
-                        seed=3011, batch_per_gpu=None, chunk_size=56, expert_chunk_size=64)
+                        seed=3011, batch_per_gpu=None, chunk_size=48, expert_chunk_size=64)
     args = parser.parse_args()
     if args.supervise:
         shared.supervise(args.supervise.resolve())

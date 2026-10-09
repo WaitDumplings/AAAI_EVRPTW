@@ -317,3 +317,12 @@ def test_prepare_records_distinct_arm_and_provenance_builder_without_launching(
         assert cfg['experiment_protocol']['require_preflight_health']
         shared.scratch.assert_scratch(cfg)
     shared.shared.verify_manifest(manifest)
+
+
+@pytest.mark.parametrize('encoder_variant', ['graph', 'current'])
+def test_protocol_describes_actual_encoder_instead_of_inherited_template(tmp_path, encoder_variant):
+    cfg = build(tmp_path, encoder_variant=encoder_variant)
+    recorded = cfg['experiment_protocol']['model_integration']
+    assert recorded['use_joint_graph_encoder'] == cfg['model']['use_joint_graph_encoder']
+    assert recorded['use_edge_relation_encoder'] == cfg['model']['use_edge_relation_encoder']
+    assert recorded['active_edge_state_dim'] == (32 if encoder_variant == 'graph' else 16)
