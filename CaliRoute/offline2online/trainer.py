@@ -2666,6 +2666,8 @@ def _evaluate_policy_loss_policy_only_with_stats(
     entropy_losses = []
     approx_kls = []
     clip_fracs = []
+    valid_counts = []
+    reduction = reduction_mode(cfg)
     for step in range(step_start, step_end):
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
@@ -2682,18 +2684,19 @@ def _evaluate_policy_loss_policy_only_with_stats(
         unclipped = ratio * adv
         clipped = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * adv
         valid = batch.valid[step, env_indices]
+        valid_counts.append(valid.sum())
         policy_losses.append(-_masked_mean(torch.minimum(unclipped, clipped), valid))
         entropy_losses.append(_masked_mean(entropy, valid))
         with torch.no_grad():
             approx_kls.append(_masked_mean((ratio - 1.0) - logratio, valid))
             clip_fracs.append(_masked_mean((torch.abs(ratio - 1.0) > clip_coef).float(), valid))
-    policy_loss = torch.stack(policy_losses).mean()
+    policy_loss = reduce_step_means(policy_losses, valid_counts, reduction)
     value_loss = torch.zeros((), device=policy_loss.device, dtype=policy_loss.dtype)
-    entropy_loss = torch.stack(entropy_losses).mean()
+    entropy_loss = reduce_step_means(entropy_losses, valid_counts, reduction)
     total = policy_loss - ent_coef * entropy_loss
     stats = {
-        "approx_kl": float(torch.stack(approx_kls).mean().detach().cpu().item()) if approx_kls else 0.0,
-        "clip_fraction": float(torch.stack(clip_fracs).mean().detach().cpu().item()) if clip_fracs else 0.0,
+        "approx_kl": float(reduce_step_means(approx_kls, valid_counts, reduction).detach().cpu().item()) if approx_kls else 0.0,
+        "clip_fraction": float(reduce_step_means(clip_fracs, valid_counts, reduction).detach().cpu().item()) if clip_fracs else 0.0,
     }
     return total, policy_loss.detach(), value_loss.detach(), entropy_loss.detach(), stats
 
@@ -3499,29 +3502,46 @@ def _compute_solution_level_ppo_loss(
     device: str | torch.device,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     del device
+    result = _solution_level_ppo_result(agent, batch, route_adv, route_success, cfg, env_indices)
+    return result.loss, _solution_level_result_info(result)
+
+
+def _solution_level_ppo_result(agent, batch, route_adv, route_success, cfg, env_indices):
+    """Stream route ratios with the portable loss's padding and precision rules."""
     offline_cfg = cfg.get("offline", {}) or {}
     route_clip_eps = float(offline_cfg.get("route_clip_eps", offline_cfg.get("sl_clip_coef", 0.20)))
     only_success = bool(offline_cfg.get("only_success_route_loss", True))
     total_steps = int(batch.actions.size(0))
     env_indices = np.asarray(env_indices, dtype=np.int64)
     cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
-    sum_delta = torch.zeros_like(batch.old_logprobs[0, env_indices])
+    old_logprobs = batch.old_logprobs.detach()
+    accumulator_dtype = torch.float64 if old_logprobs.dtype == torch.float64 else torch.float32
+    sum_delta = torch.zeros_like(old_logprobs[0, env_indices], dtype=accumulator_dtype)
     valid_counts = torch.zeros_like(sum_delta)
+    finite_routes = torch.ones_like(sum_delta, dtype=torch.bool)
     for step in range(total_steps):
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
         _, new_logprob, _, _, _ = agent.get_action_and_value_cached(obs_mb, action=actions, state=cached_state)
-        valid = batch.valid[step, env_indices].to(dtype=new_logprob.dtype)
-        sum_delta = sum_delta + (new_logprob - batch.old_logprobs[step, env_indices]) * valid
+        new_logprob = new_logprob.to(accumulator_dtype)
+        old_logprob = old_logprobs[step, env_indices].to(accumulator_dtype)
+        valid = batch.valid[step, env_indices].bool()
+        finite = torch.isfinite(new_logprob) & torch.isfinite(old_logprob)
+        finite_routes = finite_routes & (~valid | finite)
+        # Multiplication by zero cannot mask NaN/Inf in padded trajectories.
+        safe_new = torch.where(valid & finite, new_logprob, 0.0)
+        safe_old = torch.where(valid & finite, old_logprob, 0.0)
+        sum_delta = sum_delta + (safe_new - safe_old)
         valid_counts = valid_counts + valid
 
     mean_delta = sum_delta / valid_counts.clamp_min(1.0)
-    route_mask = valid_counts > 0
+    route_mask = (valid_counts > 0) & finite_routes
     if only_success:
         route_mask = route_mask & route_success[env_indices]
     result = clipped_route_surrogate(mean_delta, route_adv[env_indices], route_mask,
                                      clip_coef=route_clip_eps, valid_counts=valid_counts)
-    return result.loss, _solution_level_result_info(result)
+    result.diagnostics["invalid_logprob_routes"] = (~finite_routes & (valid_counts > 0)).sum().to(accumulator_dtype)
+    return result
 
 
 def _solution_level_result_info(result):
@@ -3539,31 +3559,11 @@ def _prepare_solution_level_ppo_weights(
     env_indices: np.ndarray,
     device: str | torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    del device
-    offline_cfg = cfg.get("offline", {}) or {}
-    route_clip_eps = float(offline_cfg.get("route_clip_eps", offline_cfg.get("sl_clip_coef", 0.20)))
-    only_success = bool(offline_cfg.get("only_success_route_loss", True))
-    total_steps = int(batch.actions.size(0))
-    env_indices = np.asarray(env_indices, dtype=np.int64)
-    with torch.no_grad():
-        cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
-        sum_delta = torch.zeros_like(batch.old_logprobs[0, env_indices])
-        valid_counts = torch.zeros_like(sum_delta)
-        for step in range(total_steps):
-            obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
-            actions = batch.actions[step, env_indices].long()
-            _, new_logprob, _, _, _ = agent.get_action_and_value_cached(obs_mb, action=actions, state=cached_state)
-            valid = batch.valid[step, env_indices].to(dtype=new_logprob.dtype)
-            sum_delta = sum_delta + (new_logprob - batch.old_logprobs[step, env_indices]) * valid
-            valid_counts = valid_counts + valid
-
-        mean_delta = sum_delta / valid_counts.clamp_min(1.0)
-        route_mask = valid_counts > 0
-        if only_success:
-            route_mask = route_mask & route_success[env_indices]
-        result = clipped_route_surrogate(mean_delta, route_adv[env_indices], route_mask,
-                                         clip_coef=route_clip_eps, valid_counts=valid_counts)
-        return result.weights.detach(), valid_counts.detach(), _solution_level_result_info(result)
+    # The detached ratio weights must describe the same numerical forward as
+    # the differentiable PPO/SL chunks, including mixed precision and clipping.
+    with torch.no_grad(), _autocast_context(device, _amp_enabled(cfg.get("training", {}), device)):
+        result = _solution_level_ppo_result(agent, batch, route_adv, route_success, cfg, env_indices)
+        return result.weights.detach(), result.valid_counts.detach(), _solution_level_result_info(result)
 
 
 def _compute_solution_level_weighted_logprob_loss(
@@ -3579,7 +3579,8 @@ def _compute_solution_level_weighted_logprob_loss(
 ) -> torch.Tensor:
     del device
     env_indices = np.asarray(env_indices, dtype=np.int64)
-    loss = torch.zeros((), dtype=batch.old_logprobs.dtype, device=batch.old_logprobs.device)
+    accumulator_dtype = torch.float64 if batch.old_logprobs.dtype == torch.float64 else torch.float32
+    loss = torch.zeros((), dtype=accumulator_dtype, device=batch.old_logprobs.device)
     weights = weights.detach()
     valid_counts = valid_counts.detach().clamp_min(1.0)
     if not bool((weights != 0).any()):
@@ -3593,8 +3594,10 @@ def _compute_solution_level_weighted_logprob_loss(
             _, new_logprob, _, _, _ = agent.get_action_and_value_cached(obs_mb, action=actions, state=cached_state)
         else:
             new_logprob = evaluations[step - step_start][0]
-        valid = batch.valid[step, env_indices].to(dtype=new_logprob.dtype)
-        loss = loss - ((weights / valid_counts) * new_logprob * valid).sum()
+        new_logprob = new_logprob.to(accumulator_dtype)
+        valid = batch.valid[step, env_indices].bool() & (weights != 0)
+        safe_logprob = torch.where(valid & torch.isfinite(new_logprob), new_logprob, 0.0)
+        loss = loss - ((weights / valid_counts) * safe_logprob).sum()
     return loss
 
 

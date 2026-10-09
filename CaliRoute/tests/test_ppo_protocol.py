@@ -7,7 +7,9 @@ import torch
 
 from test_rollout_static_cache import _agent, _run
 from offline2online.ppo_protocol import chunk_weight, fresh_policy_kl, validate_protocol, protocol_signature
-from offline2online.trainer import _evaluate_policy_loss_with_stats, _compute_gae_from_rewards, _slice_obs_by_env
+from offline2online.trainer import (_evaluate_policy_loss_with_stats,
+                                  _evaluate_policy_loss_policy_only_with_stats,
+                                  _compute_gae_from_rewards, _slice_obs_by_env)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +58,32 @@ def test_valid_action_loss_and_gradient_ignore_chunk_boundaries_and_padding():
     assert result[0] == pytest.approx(full[0], abs=1e-6)
     for name in full[1]:
         torch.testing.assert_close(full[1][name], result[1][name], rtol=1e-4, atol=3e-6)
+
+
+@pytest.mark.parametrize("width", [1, 3, 100])
+def test_policy_only_valid_action_reduction_matches_zero_value_coefficient(width):
+    model = _agent()
+    batch = _run(model)
+    returns, advantages = batch.rewards.cumsum(0), torch.randn_like(batch.rewards)
+    cfg = {'training': {'ppo_loss_reduction': 'valid_actions', 'vf_coef': 0., 'ent_coef': .01}}
+    baseline, actual = copy.deepcopy(model), copy.deepcopy(model)
+    reference = _evaluate_policy_loss_with_stats(baseline, batch, returns, advantages, cfg)[0]
+    reference.backward()
+    result = 0.
+    for start in range(0, len(batch.observations), width):
+        end = min(start + width, len(batch.observations))
+        weight = chunk_weight(batch.valid, start, end, 'valid_actions')
+        loss = _evaluate_policy_loss_policy_only_with_stats(
+            actual, batch, advantages, cfg, step_start=start, step_end=end)[0] * weight
+        result += float(loss.detach())
+        loss.backward()
+    assert result == pytest.approx(float(reference.detach()), abs=1e-6)
+    expected = dict(baseline.backbone.named_parameters())
+    for name, parameter in actual.backbone.named_parameters():
+        if expected[name].grad is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, expected[name].grad, rtol=1e-4, atol=3e-6)
 
 
 def test_fresh_kl_reencodes_changed_weights_and_ignores_invalid_padding():
