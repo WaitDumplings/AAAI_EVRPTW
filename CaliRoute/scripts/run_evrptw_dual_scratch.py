@@ -196,7 +196,7 @@ def dataset_inputs(data_root, task="evrptw"):
     return inputs,expert_count
 
 
-def prepare(args):
+def prepare(args, *, config_builder=None, arm_label=None):
     gpus=shared.parse_gpus(args.gpus)
     if len(gpus) not in (1, 2):
         raise ValueError('One or two distinct GPU IDs are required per model')
@@ -223,7 +223,7 @@ def prepare(args):
     base=yaml.safe_load(args.base_config.resolve().read_text())
     # Validate requested settings before creating output or copying source.
     output=experiment/args.variant
-    cfg=build_config(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
+    cfg=(config_builder or build_config)(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
         data_root=data_root,seed=args.seed,epochs=args.epochs,eval_interval=args.eval_interval,
         batch_per_gpu=args.batch_per_gpu,chunk_size=args.chunk_size,expert_chunk_size=args.expert_chunk_size,learning_rate=args.learning_rate,task=args.task,
         encoder_variant=args.encoder_variant,world_size=world_size)
@@ -262,11 +262,11 @@ def prepare(args):
             eval_n_traj=cfg['evaluation']['eval_n_traj']))
     manifest=dict(created_at_utc=shared.now(),initialization_mode='scratch',init_checkpoint=None,init_checkpoint_sha256=None,
         source_init_checkpoint=None,source_init_epoch=None,code_root=str(frozen),source=source,additional_sources=additional,
-        inputs=inputs,arms={args.variant:spec},gpus=gpus,protocol=protocol,
+        inputs=inputs,arms={arm_label or args.variant:spec},gpus=gpus,protocol=protocol,
         hardware_at_prepare=list(hardware.values()) if hardware is not None else None,poll_seconds=args.poll_seconds,idle_checks=args.idle_checks,
         after_runs=after_runs)
     shared.write_json(experiment/'manifest.json',manifest)
-    shared.write_json(experiment/'status.json',dict(state='prepared',arms={args.variant:dict(state='prepared')}))
+    shared.write_json(experiment/'status.json',dict(state='prepared',arms={arm_label or args.variant:dict(state='prepared')}))
     shared.verify_manifest(manifest)
     if args.launch:
         with (experiment/'supervisor.log').open('a',buffering=1) as log:
@@ -375,6 +375,9 @@ def supervise(experiment):
                     success=code==0 and shared.successful_training(spec,progress)
                     progress.update(exit_code=code,finished_at_utc=shared.now());stream.close();stream=None
                     if stage=='preflight' and success and not stopped:
+                        if manifest['protocol'].get('require_preflight_health'):
+                            from run_graph_reproduction_2080ti import validate_preflight
+                            progress['numerical_health'] = validate_preflight(spec, len(manifest['gpus']))
                         progress['state']='completed';spawn('training')
                     else:
                         detail['state']='interrupted' if stopped else ('completed' if success else 'failed')
