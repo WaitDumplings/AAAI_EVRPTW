@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two synchronous GPUs for one EVRPTW100 or VRPTW100 original/optimized scratch run.
+"""One or two GPUs for one EVRPTW100 or VRPTW100 original/optimized scratch run.
 
 Shell wrappers launch in the background. Original weights, models and losses
 come from f388343; an external adapter supplies distributed execution and
@@ -32,9 +32,12 @@ import run_scratch_comparison as scratch
 def build_config(base, *, variant, output, run_name, data_root, seed=3010,
                  epochs=1500, eval_interval=50, batch_per_gpu=32, chunk_size=8,
                  expert_chunk_size=64, learning_rate=1e-4, task="evrptw",
-                 encoder_variant="current"):
+                 encoder_variant="current", world_size=2):
     if task not in ('evrptw', 'vrptw'):
         raise ValueError('task must be evrptw or vrptw')
+    if isinstance(world_size, bool) or world_size not in (1, 2) or not isinstance(world_size, int):
+        raise ValueError('world_size must be 1 or 2')
+    topology = 'dual' if world_size == 2 else 'single'
     charging_stations = 20 if task == 'evrptw' else 0
     horizon = 512 if task == 'evrptw' else 201
     if variant not in ('original','optimized'):
@@ -73,7 +76,7 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         cfg['offline']['original_share_static_expert_observations']=True
     if variant=='optimized':
         cfg['training']['require_complete_feasible_rollouts']=task != 'evrptw'
-        cfg['offline']['exploration_instances']=4  # two ranks: at most 64 search trajectories/event
+        cfg['offline']['exploration_instances']=8 // world_size  # fixed global budget: 64 search trajectories/event
         cfg['model']['use_joint_graph_encoder'] = encoder_variant == 'graph'
         if encoder_variant == 'graph':
             cfg['model'].update(joint_graph_edge_dim=32, joint_graph_dropout=0.0,
@@ -84,24 +87,24 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         eval_before_training=True,eval_seed=17000000+seed,eval_output_dir=str(output/'evaluations'))
     for key in ('eval_limit','eval_num_batches'):
         cfg['evaluation'].pop(key,None)
-    cfg['experiment_protocol'].update(phase=f'{task}100_dual_from_scratch',arm=variant,task=f'{task}100',
+    cfg['experiment_protocol'].update(phase=f'{task}100_{topology}_from_scratch',arm=variant,task=f'{task}100',
         implementation='legacy' if variant=='original' else 'explore',target_kl=None,
-        seed=seed,epochs=epochs,world_size=2,global_instances_per_rollout=batch_per_gpu*2,
-        global_trajectories_per_rollout=batch_per_gpu*2*50,
-        global_instances_per_optimizer_step=batch_per_gpu*2//4,
-        batch_controls=dict(instances=batch_per_gpu*2,per_rank_instances=batch_per_gpu,trajectories=50,
+        seed=seed,epochs=epochs,world_size=world_size,global_instances_per_rollout=batch_per_gpu*world_size,
+        global_trajectories_per_rollout=batch_per_gpu*world_size*50,
+        global_instances_per_optimizer_step=batch_per_gpu*world_size//4,
+        batch_controls=dict(instances=batch_per_gpu*world_size,per_rank_instances=batch_per_gpu,trajectories=50,
                             minibatches=4,ppo_passes=5,rollout_steps=horizon),
         env_action_limit=4*(101+charging_stations),physical_charging_stations=charging_stations,charging_mode='fixed_full',
         initial_evaluation_equivalence_group=None,
         evaluation=f'same independent {task} route validator; fixed isolated RNG; all 1000 validation instances, references optional per instance',
-        distributed_execution='mean of rank-local masked objectives; scaled gradient averaging at optimizer boundaries; rank-local sampler and policy memory',
+        distributed_execution=('mean of rank-local masked objectives; scaled gradient averaging at optimizer boundaries; rank-local sampler and policy memory' if world_size == 2 else 'single-process objective; one sampler and policy archive'),
         expert_coverage='Missing experts do not remove PPO instances; actual reference counts are recorded at preparation',
         input_units='native original training-set D0' if variant=='original' else 'fixed physical unit 43.638668060302734 km; distance/time/energy remain dimensionally consistent',
-        original_runtime='f388343 model/environment/loss source plus external synchronous two-rank execution, read-only static expert-array storage sharing and evaluation adapter' if variant=='original' else None,
+        original_runtime=f'f388343 model/environment/loss source plus external {world_size}-rank execution, read-only static expert-array storage sharing and evaluation adapter' if variant=='original' else None,
         failure_handling='native original reward' if variant=='original' else 'strict distance plus explicit 1000km failure guard; complete failed episodes remain in PPO, feasible-only SL',
         comparison_scope='before/after complete implementations from scratch under common sampling and update budget; not an isolated architecture ablation',
         extra_search_enabled=variant=='optimized',
-        search_budget=dict(interval=5,max_instances_per_rank=4,trajectories_per_instance=8,max_global_trajectories=64) if variant=='optimized' else None)
+        search_budget=dict(interval=5,max_instances_per_rank=8 // world_size,trajectories_per_instance=8,max_global_trajectories=64) if variant=='optimized' else None)
     cfg['experiment_protocol'].update(encoder_variant=encoder_variant,
         architecture=dict(use_joint_graph_encoder=encoder_variant == 'graph',
             joint_graph_edge_dim=32 if encoder_variant == 'graph' else None,
@@ -118,11 +121,11 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         cfg['experiment_protocol']['protocol_overrides']=[item for item in cfg['experiment_protocol']['protocol_overrides'] if item['parameter'] not in changed]
         cfg['experiment_protocol']['protocol_overrides'].extend([
             dict(parameter='data.problem_type',original='vrptw preset',used=task,reason='requested task; original EVRPTW environment'),
-            dict(parameter='training.num_envs_per_gpu',original=128,used=batch_per_gpu,reason='two-rank common global rollout budget'),
+            dict(parameter='training.num_envs_per_gpu',original=128,used=batch_per_gpu,reason='declared per-rank and global rollout budget'),
             dict(parameter='training.rollout_steps',original=120,used=horizon,reason='512 covers EVRPTW native timeout; 201 covers VRPTW customer/depot routes'),
             dict(parameter='evaluation.eval_max_steps',original=120,used=horizon,reason='same complete-route horizon for both models'),
             dict(parameter='evaluation.eval_batch_size',original=1000,used=16,reason='common evaluation memory budget'),
-            dict(parameter='execution.world_size',original=1,used=2,reason='external synchronous execution adapter; original model/loss bytes unchanged'),
+            dict(parameter='execution.world_size',original=1,used=world_size,reason='external synchronous execution adapter; original model/loss bytes unchanged'),
             dict(parameter='offline.original_share_static_expert_observations',original=False,used=True,reason='share identical read-only static expert arrays during construction; retain every sample and original forward/loss; avoid duplicating static edge arrays per expert step')])
     scratch.assert_scratch(cfg)
     return cfg
@@ -135,8 +138,8 @@ def preflight_config(cfg, output):
         eval_n_traj=4,eval_batch_size=4,eval_output_dir=str(output/'evaluations'))
     if result['offline'].get('branch_exploration_enabled'):
         result['offline']['exploration_interval']=1
-    result['experiment_protocol'].update(phase=cfg['experiment_protocol']['task']+'_dual_scratch_preflight',epochs=2,
-        validation_instances=4,comparison_scope='full two-rank training allocation; reduced validation; discard all resulting state')
+    result['experiment_protocol'].update(phase=cfg['experiment_protocol']['task']+('_dual' if cfg['experiment_protocol']['world_size'] == 2 else '_single')+'_scratch_preflight',epochs=2,
+        validation_instances=4,comparison_scope='full configured training allocation; reduced validation; discard all resulting state')
     return result
 
 
@@ -161,14 +164,18 @@ def dataset_inputs(data_root, task="evrptw"):
 
 def prepare(args):
     gpus=shared.parse_gpus(args.gpus)
-    if len(gpus)!=2:
-        raise ValueError('Exactly two distinct GPU IDs are required per model')
+    if len(gpus) not in (1, 2):
+        raise ValueError('One or two distinct GPU IDs are required per model')
+    if args.single_gpu and len(gpus) != 1:
+        raise ValueError('--single-gpu requires exactly one GPU ID')
+    world_size = len(gpus)
+    topology = 'DUAL' if world_size == 2 else 'SINGLE'
     hardware=shared.probe_requested_gpus(gpus)
     if not 1<=args.poll_seconds<=60 or not 2<=args.idle_checks<=10:
         raise ValueError('poll-seconds must be 1..60, idle-checks 2..10')
     data_root=args.data_root.resolve();inputs,expert_count=dataset_inputs(data_root, args.task)
     encoder_suffix = '_GRAPH' if args.encoder_variant == 'graph' else ''
-    run_id=args.run_id or f'{args.task.upper()}100_DUAL_SCRATCH_{args.variant.upper()}{encoder_suffix}_S{args.seed}_E{args.epochs}_'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())
+    run_id=args.run_id or f'{args.task.upper()}100_{topology}_SCRATCH_{args.variant.upper()}{encoder_suffix}_S{args.seed}_E{args.epochs}_'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())
     if Path(run_id).name!=run_id or run_id in ('.','..'):
         raise ValueError('run-id must be a fresh directory name')
     experiment=CODE_ROOT/'results/optimization'/run_id
@@ -178,7 +185,7 @@ def prepare(args):
     cfg=build_config(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
         data_root=data_root,seed=args.seed,epochs=args.epochs,eval_interval=args.eval_interval,
         batch_per_gpu=args.batch_per_gpu,chunk_size=args.chunk_size,expert_chunk_size=args.expert_chunk_size,learning_rate=args.learning_rate,task=args.task,
-        encoder_variant=args.encoder_variant)
+        encoder_variant=args.encoder_variant,world_size=world_size)
     experiment.mkdir(parents=True,exist_ok=False);output.mkdir()
     frozen=experiment/'source/CaliRoute';source=shared.source_snapshot(frozen,include_initialization_assets=False)
     original=experiment/'original_source/CaliRoute';additional={}
@@ -187,7 +194,7 @@ def prepare(args):
     spec={}
     for preflight,config,destination in [(False,cfg,output),(True,preflight_config(cfg,output/'preflight'),output/'preflight')]:
         destination.mkdir(exist_ok=True);path=destination/'config.yaml';path.write_text(yaml.safe_dump(config,sort_keys=False))
-        command=[sys.executable,'-B','-u','-m','torch.distributed.run','--standalone','--nnodes=1','--nproc-per-node=2','--max-restarts=0']
+        command=[sys.executable,'-B','-u','-m','torch.distributed.run','--standalone','--nnodes=1',f'--nproc-per-node={world_size}','--max-restarts=0']
         if args.variant=='original':
             command += [str(frozen/'scripts/run_original_scratch.py'),'--source-root',str(original)]
             shared.write_json(destination/'original_provenance.json',config['experiment_protocol'])
@@ -202,14 +209,14 @@ def prepare(args):
             checkpoint_dir=str(CODE_ROOT/'results/checkpoints'/f"Cus_100_CS_{cfg['data']['num_charging_stations']}"/config['run_name']/f'seed_{args.seed}'))
         if preflight:spec['preflight']=value
         else:spec.update(value)
-    protocol=dict(cfg['experiment_protocol']);protocol.update(global_batch=args.batch_per_gpu*2,n_traj=50,
+    protocol=dict(cfg['experiment_protocol']);protocol.update(global_batch=args.batch_per_gpu*world_size,n_traj=50,
         num_minibatches=4,ppo_update_epochs=5,learning_rate=args.learning_rate,lr_schedule='constant',
         eval_interval=args.eval_interval,eval_n_traj=50,eval_batch_size=16,validation_instances=1000,
-        epochs=args.epochs,expert_rows_at_prepare=expert_count,world_size_per_arm=2,original_commit=scratch.ORIGINAL_COMMIT,
+        epochs=args.epochs,expert_rows_at_prepare=expert_count,world_size_per_arm=world_size,original_commit=scratch.ORIGINAL_COMMIT,
         initial_evaluation_pairs=[],initial_evaluation_consistency_scope='different architectures need not have identical epoch-zero policy',
         best_checkpoint_caveat='Native original best uses distance among feasible cases; modern best prioritizes feasibility. Compare common epochs or choose periodic checkpoints by the same feasibility-first rule.',
         evaluation_references='Absent Gurobi references only exclude gap metrics; never exclude those validation instances.',
-        gpu_preflight=dict(epochs=2,world_size=2,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=5,validation_instances=4))
+        gpu_preflight=dict(epochs=2,world_size=world_size,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=5,validation_instances=4))
     manifest=dict(created_at_utc=shared.now(),initialization_mode='scratch',init_checkpoint=None,init_checkpoint_sha256=None,
         source_init_checkpoint=None,source_init_epoch=None,code_root=str(frozen),source=source,additional_sources=additional,
         inputs=inputs,arms={args.variant:spec},gpus=gpus,protocol=protocol,
@@ -293,7 +300,7 @@ def supervise(experiment):
                 if idle>=manifest['idle_checks']:
                     acquired=lock_gpu_pair(cards,manifest['gpus'])
                     if acquired is not None:
-                        locks=acquired  # owns both locks even if the recheck raises
+                        locks=acquired  # owns all requested GPU locks even if the recheck raises
                         rechecked=shared.gpu_snapshot()
                         if all(shared.idle_gpu(rechecked[g]) for g in manifest['gpus']):
                             spawn('preflight')
@@ -324,7 +331,7 @@ def supervise(experiment):
         status.update(state='failed',error=f'{type(error).__name__}: {error}',finished_at_utc=shared.now())
         detail.update(state='failed',error=status['error']);snapshot();traceback.print_exc();raise
     finally:
-        # A failed supervisor must keep its GPU pair until torchrun and the
+        # A failed supervisor must keep its GPU locks until torchrun and the
         # process group have exited, including SIGKILL escalation if needed.
         while process is not None and process.poll() is None:
             shared.terminate_group(process)
@@ -342,6 +349,7 @@ def make_parser():
                         help='graph replaces the optimized static encoder; current preserves the existing experiment')
     parser.add_argument('--supervise',type=Path)
     parser.add_argument('--gpus',default='0,1')
+    parser.add_argument('--single-gpu',action='store_true',help='Require exactly one GPU ID for this task')
     parser.add_argument('--seed',type=int,default=3010)
     parser.add_argument('--epochs',type=int,default=1500)
     parser.add_argument('--eval-interval',type=int,default=50)

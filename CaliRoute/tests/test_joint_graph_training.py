@@ -1,4 +1,4 @@
-"""Real CPU/Gloo graph-policy PPO/SL updates, search, physical norms and evaluation.
+"""Real serial CPU and CPU/Gloo graph-policy updates, search, norms and evaluation.
 
 Small routing fixtures retain the production five PPO passes/four minibatches.
 No CUDA context or long-lived training process is created by these tests.
@@ -51,9 +51,10 @@ def _bundle(path, instances):
         pickle.dump({'instances': instances}, handle)
 
 
-def _worker(rank, rendezvous, output):
+def _worker(rank, rendezvous, output, world_size):
     torch.set_num_threads(1)
-    dist.init_process_group('gloo', init_method=f'file://{rendezvous}', rank=rank, world_size=2)
+    if world_size > 1:
+        dist.init_process_group('gloo', init_method=f'file://{rendezvous}', rank=rank, world_size=world_size)
     try:
         sys.path.insert(0, str(ROOT))
         from offline2online import trainer
@@ -89,7 +90,9 @@ def _worker(rank, rendezvous, output):
             fingerprint.update(value.detach().cpu().contiguous().numpy().tobytes())
         graph_change = {name: float((value.detach() - captured['initial_graph'][name]).abs().max())
                        for name, value in agent.named_parameters() if name in captured['initial_graph']}
-        record = dict(rank=rank, parameter_sha256=fingerprint.hexdigest(), checkpoint=str(checkpoint),
+        record = dict(rank=rank, world_size=agent._distributed_context.world_size,
+            process_group_initialized=dist.is_initialized(),
+            parameter_sha256=fingerprint.hexdigest(), checkpoint=str(checkpoint),
             optimizer_steps=agent._distributed_context.optimizer_steps, finite_weights=finite_weights,
             finite_gradients=captured['finite_gradients'], gradient_max_abs=captured['gradient_max_abs'],
             graph_parameter_max_change=graph_change,
@@ -97,21 +100,25 @@ def _worker(rank, rendezvous, output):
             actor_state={key: value.detach().cpu().tolist() for key, value in normalizer.actor.state_dict().items()},
             critic_state={key: value.detach().cpu().tolist() for key, value in normalizer.critic.state_dict().items()})
         (Path(output) / f'rank{rank}_completed.json').write_text(json.dumps(record, indent=2))
-        dist.barrier()
+        if world_size > 1:
+            dist.barrier()
     finally:
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 @pytest.mark.parametrize('task', ['vrptw', 'evrptw'])
-def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tmp_path, task):
+@pytest.mark.parametrize('world_size', [1, 2])
+def test_real_joint_graph_trainer_updates_search_and_physical_evaluation(tmp_path, task, world_size):
     sys.path.insert(0, str(ROOT / 'scripts'))
     import run_evrptw_dual_scratch as launch
-    rows = [[_payload(f'{task}_rank{rank}_{index}', task) for index in range(4)] for rank in range(2)]
+    rows = [[_payload(f'{task}_rank{rank}_{index}', task) for index in range(4)] for rank in range(world_size)]
     for rank, instances in enumerate(rows):
         _bundle(tmp_path / f'train/rank{rank}/instances.pkl', instances)
-    experts = rows[0] + rows[1]
+    experts = [instance for rank_rows in rows for instance in rank_rows]
     _bundle(tmp_path / 'experts/instances.pkl', experts)
-    _bundle(tmp_path / 'val/instances.pkl', [rows[0][0], rows[1][0]])
+    validation = [rows[0][0], rows[-1][1]]
+    _bundle(tmp_path / 'val/instances.pkl', validation)
     expert_path = tmp_path / 'experts/expert_solutions.csv'
     with expert_path.open('w') as handle:
         writer = csv.DictWriter(handle, fieldnames=['instance_id', 'feasible', 'objective_distance_km', 'vehicle_count', 'routes_json'])
@@ -120,10 +127,11 @@ def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tm
             writer.writerow(dict(instance_id=instance['instance_id'], feasible=True,
                 objective_distance_km=2.9, vehicle_count=1, routes_json='[[0, 1, 2, 0]]'))
     base = yaml.safe_load((ROOT / 'configs/experiments/physics_exploration_vrptw100.yaml').read_text())
-    for rank in range(2):
+    for rank in range(world_size):
         cfg = launch.build_config(base, variant='optimized', encoder_variant='graph', task=task,
-            output=tmp_path / 'arm', run_name=f'GRAPH_{task.upper()}_DUAL_CPU', data_root=tmp_path,
-            seed=31, epochs=1, eval_interval=1, batch_per_gpu=4, chunk_size=2, expert_chunk_size=4)
+            output=tmp_path / 'arm', run_name=f'GRAPH_{task.upper()}_{world_size}RANK_CPU', data_root=tmp_path,
+            seed=31, epochs=1, eval_interval=1, batch_per_gpu=4, chunk_size=2, expert_chunk_size=4,
+            world_size=world_size)
         cfg['data'].update(num_customers=2, num_charging_stations=1 if task == 'evrptw' else 0,
             train_dataset_path=str(tmp_path / f'train/rank{rank}/instances.pkl'))
         cfg['model'].update(embedding_dim=16, n_encode_layers=2)
@@ -145,11 +153,13 @@ def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tm
         NUMBA_CACHE_DIR=str(tmp_path / 'numba'))
     for key in ('RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT'):
         env.pop(key, None)
-    executed = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--run-workers', str(tmp_path)],
+    executed = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--run-workers', str(tmp_path), str(world_size)],
         cwd=ROOT, env=env, text=True, capture_output=True, timeout=180)
     assert executed.returncode == 0, executed.stdout[-9000:] + executed.stderr[-9000:]
-    records = [json.loads((tmp_path / f'rank{rank}_completed.json').read_text()) for rank in range(2)]
+    records = [json.loads((tmp_path / f'rank{rank}_completed.json').read_text()) for rank in range(world_size)]
     for record in records:
+        assert record['world_size'] == world_size
+        assert record['process_group_initialized'] == (world_size > 1)
         assert record['optimizer_steps'] == 20  # Five complete passes, four minibatches.
         assert record['finite_weights'] and record['finite_gradients'] and record['actor_updates'] > 0
         for suffix in ('input_road_projection.0.weight', 'layers.0.qkv.weight',
@@ -157,18 +167,20 @@ def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tm
             name = GRAPH_PREFIX + suffix
             assert record['gradient_max_abs'][name] > 0, name
             assert record['graph_parameter_max_change'][name] > 0, name
-    for key in ('parameter_sha256', 'actor_state', 'critic_state', 'graph_parameter_max_change'):
-        assert records[0][key] == records[1][key], key
+    if world_size > 1:
+        for key in ('parameter_sha256', 'actor_state', 'critic_state', 'graph_parameter_max_change'):
+            assert records[0][key] == records[1][key], key
     checkpoint = torch.load(records[0]['checkpoint'], map_location='cpu', weights_only=False)
     assert checkpoint['epoch'] == 1 and 'reward_normalization_state' in checkpoint
     signature = checkpoint['model_integration_signature']
     assert signature['use_joint_graph_encoder'] and signature['joint_graph_edge_dim'] == 32
     assert signature['joint_graph_dropout'] == 0.0 and not signature['use_edge_relation_encoder']
     assert any(name.startswith(GRAPH_PREFIX) for name in checkpoint['model_state_dict'])
-    for rank in range(2):
+    for rank in range(world_size):
         monitors = [json.loads(line) for line in (tmp_path / 'arm/monitoring' / f'monitor_rank_{rank}.jsonl').read_text().splitlines()]
         assert len(monitors) == 1
         monitor = monitors[0]
+        assert monitor['world_size'] == world_size and monitor['rank'] == rank
         assert monitor['optimizer_steps_epoch'] == 20 and monitor['amp_skipped_steps_epoch'] == 0
         assert monitor['model_integration']['use_joint_graph_encoder']
         assert monitor['exploration']['branch_search_sampled_trajectories'] == 2
@@ -176,7 +188,7 @@ def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tm
         assert monitor['exploration']['branch_search_completed_trajectories'] == 2
     for epoch in (0, 1):
         evaluated = [json.loads(line) for line in (tmp_path / 'evaluations' / f'epoch_{epoch:04d}.jsonl').read_text().splitlines()]
-        assert len(evaluated) == 2
+        assert len(evaluated) == len(validation)
         for item in evaluated:
             assert item['feasible'] and item['route_validation']['checked'] and item['route_validation']['valid']
             assert item['route_validation']['travel_time_source'] == 'provided_travel_time_matrix_s'
@@ -185,6 +197,11 @@ def test_real_joint_graph_dual_trainer_updates_search_and_physical_evaluation(tm
                 assert item['route_validation']['energy_source'] == 'provided_energy_matrix_kwh'
 
 
-if __name__ == '__main__' and len(sys.argv) == 3 and sys.argv[1] == '--run-workers':
+if __name__ == '__main__' and len(sys.argv) == 4 and sys.argv[1] == '--run-workers':
     location = Path(sys.argv[2])
-    mp.spawn(_worker, args=(str(location / 'gloo_init'), str(location)), nprocs=2, join=True)
+    requested_world_size = int(sys.argv[3])
+    worker_args = (str(location / 'gloo_init'), str(location), requested_world_size)
+    if requested_world_size == 1:
+        _worker(0, *worker_args)
+    else:
+        mp.spawn(_worker, args=worker_args, nprocs=requested_world_size, join=True)

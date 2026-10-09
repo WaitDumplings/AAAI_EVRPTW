@@ -48,30 +48,35 @@ include graph gradient/update norms, edge gates, edge-update/value magnitudes,
 directionality and attention entropy. Old checkpoints cannot initialize this
 architecture; use scratch, or a checkpoint with the identical graph profile.
 
-From `CaliRoute/`, choose a task for the two A6000 cards:
+From `CaliRoute/`, run two independent jobs on the two A6000 cards, one task per card:
 
 ```bash
-bash scripts/run_graph_rdi100_dual.sh vrptw --gpus 0,1 --seed 3011 --epochs 1500
-# Or run EVRPTW100 on the pair (sequentially if both use the same GPUs):
-bash scripts/run_graph_rdi100_dual.sh evrptw --gpus 0,1 --seed 3011 --epochs 1500
+bash scripts/run_graph_rdi100_single.sh evrptw --gpus 0 --seed 3011 --epochs 1500
+bash scripts/run_graph_rdi100_single.sh vrptw --gpus 1 --seed 3011 --epochs 1500
 # Inspect configs without reserving a GPU or starting training:
-bash scripts/run_graph_rdi100_dual.sh evrptw --prepare-only
+bash scripts/run_graph_rdi100_single.sh evrptw --prepare-only
 ```
 
-Defaults are per-GPU batch32, n-traj50, PPO5, LR1e-4, chunk8, expert chunk64,
-validation1000/best-of-50 every50 epochs. These are **conservative launch values**,
+Single-card defaults are batch64, n-traj50, PPO5, LR1e-4, chunk8, expert chunk64,
+validation1000/best-of-50 every50 epochs. Global rollout batch is 64 instances
+(3200 trajectories), matching the previous two-rank batch32 setting. Exploration
+uses up to eight instances times eight trajectories every five epochs, retaining
+the global 64-trajectory search budget. Each task has its own sampler and archive.
+These are **conservative launch values**,
 not tuned A6000 allocations. The remote agent can set `--batch-per-gpu`,
 `--chunk-size`, and `--expert-chunk-size`. Match global batch, seed, trajectories,
 passes and validation protocol with the current-encoder control; time chunks may
 differ to fit memory. For that control use the same shell with
 `--encoder-variant current`. Run names and manifests distinguish the variants.
-Each background job owns both GPUs, performs a full-allocation two-epoch preflight
+Each background job owns only its selected GPU, performs a full-allocation two-epoch preflight
 (with search every preflight epoch), then discards its state and starts formal
-training from scratch. Passing both task commands queues the second until both
-cards are idle. No existing local training job is stopped.
+training from scratch. Both task commands can run concurrently on their separate
+cards; the single-card wrapper rejects a list of two GPUs. No existing local
+training job is stopped. The optional `run_graph_rdi100_dual.sh` still supports
+one task on a synchronized pair, with batch32 per rank by default.
 
 Local checks include unit/integration contracts, full-size real Cus100 input
-forward/backward and actual two-rank CPU/Gloo training for both tasks, including
+forward/backward and actual single-process and two-rank CPU/Gloo training for both tasks, including
 20 optimizer updates/rank, expert SL, exploration, normalization, independent
 evaluation and checkpoint round trips. CUDA/NCCL and A6000 memory/throughput
 verification are performed by the on-server preflight, not inferred from CPU tests.
