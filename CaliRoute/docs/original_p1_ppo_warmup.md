@@ -64,7 +64,13 @@ unit of 43.638668060302734 km (audited from the original VRPTW100 training-set
 scale). Distance, time and energy features come from the environment matrices,
 not coordinate-derived Euclidean distances. No scale is fitted on val/test or
 recomputed for a different customer count. Both arms retain original reward
-normalization; this is not the final reward/generalization ablation.
+normalization; this is not the final reward/generalization ablation. Both independent
+validation scorers use explicit time matrices; these exactly equal D/v on all
+1000 current validation instances. The modern runtime also retains numerically
+stable FP32/log-domain SL clipping and nonfinite rejection. Its best checkpoint
+prioritizes feasibility, while the original minimizes distance among evaluations
+with positive feasibility. Compare matched epochs with matched feasibility; the
+experiment is not a byte-identical trainer ablation.
 
 ## Launch and monitoring
 
