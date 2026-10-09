@@ -1,4 +1,4 @@
-"""One A6000 per task preserves the global scratch and search budgets."""
+"""One GPU per task uses the declared scratch and search budgets."""
 from __future__ import annotations
 
 import json
@@ -78,14 +78,16 @@ def test_single_card_shell_selects_its_task_gpu_and_allows_tuning(tmp_path, task
     assert defaults.variant == 'optimized' and defaults.encoder_variant == 'graph'
     assert defaults.launch and not defaults.prepare_only
     assert defaults.seed == 3011 and defaults.epochs == 1500
-    assert defaults.batch_per_gpu == 64 and defaults.chunk_size == 8
-    assert defaults.expert_chunk_size == 64
+    assert defaults.batch_per_gpu == 32 and defaults.chunk_size == 120
+    assert defaults.expert_chunk_size == 128
     tuned = parse('--prepare-only', '--gpus', '3', '--batch-per-gpu', '96', '--chunk-size', '16',
-                  '--expert-chunk-size', '128', '--epochs', '300', '--encoder-variant', 'current')
+                  '--expert-chunk-size', '128', '--epochs', '300', '--encoder-variant', 'current',
+                  '--after-run', str(tmp_path / 'previous'))
     assert tuned.prepare_only and not tuned.launch
     assert tuned.gpus == '3' and tuned.batch_per_gpu == 96
     assert tuned.chunk_size == 16 and tuned.expert_chunk_size == 128
     assert tuned.epochs == 300 and tuned.encoder_variant == 'current'
+    assert tuned.after_run == [tmp_path / 'previous']
 
 
 def test_single_gpu_guard_rejects_a_pair_before_probing_hardware_or_writing_outputs(tmp_path, monkeypatch):
@@ -120,7 +122,7 @@ def test_two_independent_single_task_preparations_have_separate_gpus_sources_and
                 num_charging_stations=20 if task == 'evrptw' else 0)))
             (folder / ('expert_solutions.csv' if split == 'train' else 'gurobi_summary.csv')).write_text('instance_id\nfixture_0\n')
         args = launch.make_parser().parse_args(['--task', task, '--variant', 'optimized', '--encoder-variant', 'graph',
-            '--seed', '3011', '--prepare-only', '--single-gpu', '--gpus', str(gpu), '--batch-per-gpu', '64', '--data-root', str(data),
+            '--seed', '3011', '--prepare-only', '--single-gpu', '--gpus', str(gpu), '--batch-per-gpu', '32', '--data-root', str(data),
             '--base-config', str(ROOT / 'configs/experiments/physics_exploration_vrptw100.yaml')])
         run = launch.prepare(args)
         runs.append(run)
@@ -132,12 +134,15 @@ def test_two_independent_single_task_preparations_have_separate_gpus_sources_and
         assert manifest['additional_sources'] == {}
         protocol = manifest['protocol']
         assert protocol['world_size'] == protocol['world_size_per_arm'] == 1
-        assert protocol['global_batch'] == 64 and protocol['n_traj'] == 50
-        assert protocol['global_trajectories_per_rollout'] == 3200
+        assert protocol['global_batch'] == 32 and protocol['n_traj'] == 50
+        assert protocol['global_trajectories_per_rollout'] == 1600
+        assert protocol['global_instances_per_optimizer_step'] == 8
         assert protocol['search_budget']['max_instances_per_rank'] == 8
         assert protocol['search_budget']['max_global_trajectories'] == 64
         assert protocol['gpu_preflight']['world_size'] == 1
-        assert protocol['gpu_preflight']['batch_per_rank'] == 64
+        assert protocol['gpu_preflight']['batch_per_rank'] == 32
+        assert protocol['gpu_preflight']['eval_batch_size'] == 16
+        assert protocol['gpu_preflight']['eval_n_traj'] == 50
         spec = manifest['arms']['optimized']
         assert spec['required_validation_epochs'] == list(range(0, 1501, 50))
         for stage in (spec, spec['preflight']):
@@ -148,7 +153,7 @@ def test_two_independent_single_task_preparations_have_separate_gpus_sources_and
             assert config['model']['use_joint_graph_encoder']
             assert config['data']['problem_type'] == task
             assert config['experiment_protocol']['world_size'] == 1
-            assert config['training']['num_envs_per_gpu'] == 64
+            assert config['training']['num_envs_per_gpu'] == 32
             assert config['training']['monitor_output_dir'] == str(Path(stage['output_dir']) / 'monitoring')
             assert config['offline']['exploration_instances'] == 8
             launch.scratch.assert_scratch(config)

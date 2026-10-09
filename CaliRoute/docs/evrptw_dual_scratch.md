@@ -71,12 +71,21 @@ comparing the two launchers; repeat with additional seeds before selecting a
 configuration.
 
 Each run first performs a separate two-epoch distributed preflight with its
-formal training batch and reduced validation. Only a passing preflight starts
+formal training batch and one full validation batch of 16 instances with 50
+trajectories each. This exercises the formal evaluation allocation before
+epoch zero. Only a passing preflight starts
 the formal scratch run. All preflight weights, optimizer state, replay and
 normalization statistics are discarded. Local CPU/Gloo and toy-instance checks
 are the verification scope before this remote GPU preflight; they do not prove
 that a full EVRPTW100 batch fits or trains successfully on the target GPUs.
 The existing local four-card jobs are not used or stopped for this check.
+
+For an ordered comparison on the same pair, append `--after-run /path/to/first/run`
+to the second command. The path is the experiment directory printed by the
+first command. The second run waits for successful completion without reserving
+the pair; failed or interrupted prerequisites prevent it from starting. Repeat
+`--after-run` when a comparison block depends on multiple earlier runs. GPU locks
+alone prevent overlap but do not guarantee which queued run starts first.
 
 `tests/test_evrptw_dual_training.py` also runs the actual optimized trainer with
 two CPU/Gloo ranks, a small synthetic dataset and a 16-dimensional network.

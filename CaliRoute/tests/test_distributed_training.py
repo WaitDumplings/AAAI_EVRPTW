@@ -1,10 +1,63 @@
 from pathlib import Path
 import random
+from unittest.mock import Mock
 import numpy as np
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from offline2online.distributed import DistributedContext, rank_seed, capture_local_training_state, restore_local_training_state
+
+
+@pytest.mark.parametrize("requested,local_rank,world_size,expected", [
+    ("cuda", "0", 1, "cuda:0"),
+    (torch.device("cuda"), "0", 1, "cuda:0"),
+    (None, "0", 1, "cuda:0"),
+    ("cuda", None, 1, "cuda:2"),
+    (None, None, 1, "cuda:2"),
+    ("cuda:3", "0", 1, "cuda:3"),
+    ("cuda", "1", 2, "cuda:1"),
+    ("cuda:3", "1", 2, "cuda:1"),
+])
+def test_initialize_resolves_cuda_index_without_allocating_gpu(monkeypatch, requested, local_rank, world_size, expected):
+    monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    monkeypatch.setenv("RANK", "0")
+    if local_rank is None:
+        monkeypatch.delenv("LOCAL_RANK", raising=False)
+    else:
+        monkeypatch.setenv("LOCAL_RANK", local_rank)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    current_device = Mock(return_value=2)
+    set_device = Mock()
+    initialize = Mock()
+    monkeypatch.setattr(torch.cuda, "current_device", current_device)
+    monkeypatch.setattr(torch.cuda, "set_device", set_device)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(dist, "init_process_group", initialize)
+    context = DistributedContext.initialize(requested)
+    assert context.device == expected
+    assert context.world_size == world_size
+    set_device.assert_called_once_with(torch.device(expected))
+    if expected == "cuda:2":
+        current_device.assert_called_once_with()
+    else:
+        current_device.assert_not_called()
+    assert initialize.call_count == (world_size > 1)
+    if world_size > 1:
+        assert initialize.call_args.kwargs["backend"] == "nccl"
+
+
+def test_initialize_explicit_cpu_does_not_touch_cuda(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    current_device, set_device = Mock(), Mock()
+    monkeypatch.setattr(torch.cuda, "current_device", current_device)
+    monkeypatch.setattr(torch.cuda, "set_device", set_device)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    assert DistributedContext.initialize("cpu").device == "cpu"
+    current_device.assert_not_called()
+    set_device.assert_not_called()
 
 
 class MaskedModel(torch.nn.Module):

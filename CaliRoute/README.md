@@ -48,7 +48,7 @@ include graph gradient/update norms, edge gates, edge-update/value magnitudes,
 directionality and attention entropy. Old checkpoints cannot initialize this
 architecture; use scratch, or a checkpoint with the identical graph profile.
 
-From `CaliRoute/`, run two independent jobs on the two A6000 cards, one task per card:
+From `CaliRoute/`, run two independent jobs on two GPUs, one task per card:
 
 ```bash
 bash scripts/run_graph_rdi100_single.sh evrptw --gpus 0 --seed 3011 --epochs 1500
@@ -57,29 +57,65 @@ bash scripts/run_graph_rdi100_single.sh vrptw --gpus 1 --seed 3011 --epochs 1500
 bash scripts/run_graph_rdi100_single.sh evrptw --prepare-only
 ```
 
-Single-card defaults are batch64, n-traj50, PPO5, LR1e-4, chunk8, expert chunk64,
-validation1000/best-of-50 every50 epochs. Global rollout batch is 64 instances
-(3200 trajectories), matching the previous two-rank batch32 setting. Exploration
+Single-card defaults are **from scratch, seed3011, batch32, n-traj50, PPO5**,
+1500 epochs, LR1e-4, chunk120, expert chunk128, and validation1000/best-of-50 every50
+epochs. Each task's global rollout batch is 32 instances (1600 trajectories).
+Exploration
 uses up to eight instances times eight trajectories every five epochs, retaining
 the global 64-trajectory search budget. Each task has its own sampler and archive.
-These are **conservative launch values**,
-not tuned A6000 allocations. The remote agent can set `--batch-per-gpu`,
-`--chunk-size`, and `--expert-chunk-size`. Match global batch, seed, trajectories,
+On an RTX 6000 Ada 48GB, an initial full EVRPTW update with batch32/chunk120/
+expert chunk128 reached 81.6% peak allocated GPU memory and 82.3% reserved memory,
+with finite parameters after the update. VRPTW's first full-route update at
+batch32 reached 70.2%; batch40/chunk120/expert chunk128 reached 84.9% allocated
+and 88.2% reserved. A batch40 VRPTW run therefore needs `--batch-per-gpu 40`
+on **both** graph and current commands; the script default remains batch32.
+This calibration covers one update; the separate
+two-epoch preflight still checks training, expert updates, search and evaluation.
+Peak memory usage differs from sustained memory usage and GPU compute utilization.
+Memory usage depends on the task and hardware.
+The remote agent can set `--batch-per-gpu`, `--chunk-size`, and
+`--expert-chunk-size`. To target over 80% GPU RAM, measure the full preflight's
+peak allocation and tune the two chunk sizes first while retaining batch32;
+leave headroom for varying routes and expert lengths. A larger batch changes the
+training protocol and must be applied to both encoder variants. Match global batch, seed, trajectories,
 passes and validation protocol with the current-encoder control; time chunks may
 differ to fit memory. For that control use the same shell with
 `--encoder-variant current`. Run names and manifests distinguish the variants.
 Each background job owns only its selected GPU, performs a full-allocation two-epoch preflight
-(with search every preflight epoch), then discards its state and starts formal
+(with search every preflight epoch and one full batch16/best-of-50 validation), then discards its state and starts formal
 training from scratch. Both task commands can run concurrently on their separate
 cards; the single-card wrapper rejects a list of two GPUs. No existing local
 training job is stopped. The optional `run_graph_rdi100_dual.sh` still supports
-one task on a synchronized pair, with batch32 per rank by default.
+one task on a synchronized pair, with batch32 per rank, chunk8 and expert chunk64
+by default.
+
+For ordered encoder comparisons, save the printed graph experiment directories
+and pass each directory to its current-encoder run:
+
+```bash
+bash scripts/run_graph_rdi100_single.sh evrptw --gpus 0 --encoder-variant current \
+  --after-run "$EVRPTW_GRAPH_RUN"
+bash scripts/run_graph_rdi100_single.sh vrptw --gpus 1 --encoder-variant current \
+  --after-run "$VRPTW_GRAPH_RUN"
+```
+
+`EVRPTW_GRAPH_RUN` and `VRPTW_GRAPH_RUN` are the paths printed by the first two
+commands. `--after-run` may be repeated to wait for both tasks before starting a
+second comparison block. It starts only after every prerequisite completes
+successfully; a failed or interrupted prerequisite prevents dependent training.
+The same option orders dual-card runs on one GPU pair. GPU locks prevent overlap,
+while this explicit dependency fixes the order. Use identical seed and global
+batch in both variants, including any overrides.
+
+The launcher finds `AAAI_Dataset/dataset` either inside the repository or beside
+it; `--data-root /path/to/AAAI_Dataset` overrides
+discovery. On this checkout the detected path is `/data/Maojie/AAAI/AAAI_Dataset`.
 
 Local checks include unit/integration contracts, full-size real Cus100 input
 forward/backward and actual single-process and two-rank CPU/Gloo training for both tasks, including
 20 optimizer updates/rank, expert SL, exploration, normalization, independent
-evaluation and checkpoint round trips. CUDA/NCCL and A6000 memory/throughput
-verification are performed by the on-server preflight, not inferred from CPU tests.
+evaluation and checkpoint round trips. The on-server preflight checks the full
+configured CUDA allocation; CPU tests do not establish target-GPU capacity or throughput.
 
 ## EVRPTW100 dual-GPU scratch comparison
 

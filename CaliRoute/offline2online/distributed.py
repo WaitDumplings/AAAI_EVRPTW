@@ -57,7 +57,14 @@ class DistributedContext:
         use_cuda = torch.cuda.is_available() and (requested_device is None or str(requested_device).startswith("cuda"))
         device = f"cuda:{local_rank}" if use_cuda and world_size > 1 else str(requested_device or ("cuda" if use_cuda else "cpu"))
         if device.startswith("cuda"):
-            torch.cuda.set_device(torch.device(device))
+            cuda_device = torch.device(device)
+            if cuda_device.index is None:
+                # torchrun also sets LOCAL_RANK for one worker. Without a
+                # launcher, bare CUDA retains the caller's current device.
+                index = local_rank if "LOCAL_RANK" in os.environ else torch.cuda.current_device()
+                cuda_device = torch.device("cuda", index)
+            device = str(cuda_device)
+            torch.cuda.set_device(cuda_device)
         owns = False
         if world_size > 1 and not dist.is_initialized():
             dist.init_process_group(backend="nccl" if use_cuda else "gloo", timeout=timedelta(minutes=timeout_minutes))

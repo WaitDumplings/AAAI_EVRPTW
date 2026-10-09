@@ -29,6 +29,31 @@ import run_reward_norm_comparison as shared
 import run_scratch_comparison as scratch
 
 
+def default_data_root():
+    """Accept both a dataset inside the checkout's parent and beside the repo."""
+    candidates = (CODE_ROOT.parent / 'AAAI_Dataset', CODE_ROOT.parent.parent / 'AAAI_Dataset')
+    return next((path for path in candidates if (path / 'dataset').is_dir()), candidates[0])
+
+
+def dependency_status(after_runs):
+    """A queued comparison may start only after every preceding run succeeds."""
+    waiting = []
+    for directory in after_runs:
+        path = Path(directory) / 'status.json'
+        try:
+            state = json.loads(path.read_text())['state']
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return 'failed', f'Cannot verify prerequisite {path}: {error}'
+        if state == 'completed':
+            continue
+        if state in ('failed', 'interrupted'):
+            return 'failed', f'Prerequisite {directory} ended with state={state}'
+        if state not in ('prepared', 'waiting_dependency', 'waiting_gpu', 'running'):
+            return 'failed', f'Prerequisite {directory} has unknown state={state!r}'
+        waiting.append(str(directory))
+    return ('waiting', 'Waiting for successful completion: ' + ', '.join(waiting)) if waiting else ('completed', None)
+
+
 def build_config(base, *, variant, output, run_name, data_root, seed=3010,
                  epochs=1500, eval_interval=50, batch_per_gpu=32, chunk_size=8,
                  expert_chunk_size=64, learning_rate=1e-4, task="evrptw",
@@ -52,12 +77,17 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
                             batch_per_gpu=batch_per_gpu,chunk_size=chunk_size,
                             expert_chunk_size=expert_chunk_size).items():
         shared.positive_integer(value,name)
-    if batch_per_gpu % 4 or chunk_size > 201:
-        raise ValueError('batch-per-gpu must divide into four equal minibatches; chunk-size must be <=201')
+    if batch_per_gpu % 4:
+        raise ValueError('batch-per-gpu must divide into four equal minibatches')
+    if chunk_size > horizon:
+        raise ValueError(f'chunk-size must be <={horizon} for {task}')
     output, data_root = Path(output), Path(data_root).resolve()
+    # The inherited VRPTW template has a 201-action horizon. Apply the requested
+    # task's horizon and chunk together below, after constructing that template.
+    template_chunk_size=min(chunk_size, 201)
     cfg=scratch.build_arm(base,arm='legacy' if variant=='original' else 'explore',
         output=output,run_name=run_name,data_root=data_root,seed=seed,epochs=epochs,
-        eval_interval=eval_interval,chunk_size=chunk_size,legacy_chunk_size=chunk_size,
+        eval_interval=eval_interval,chunk_size=template_chunk_size,legacy_chunk_size=template_chunk_size,
         legacy_expert_chunk_size=expert_chunk_size,learning_rate=learning_rate)
     train=data_root/'dataset'/task/'train/Cus100'; val=data_root/'dataset'/task/'val/Cus100'
     cfg['dataset_name']=f'Geo-{task.upper()}-v1'
@@ -89,7 +119,7 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         cfg['evaluation'].pop(key,None)
     cfg['experiment_protocol'].update(phase=f'{task}100_{topology}_from_scratch',arm=variant,task=f'{task}100',
         implementation='legacy' if variant=='original' else 'explore',target_kl=None,
-        seed=seed,epochs=epochs,world_size=world_size,global_instances_per_rollout=batch_per_gpu*world_size,
+        seed=seed,epochs=epochs,world_size=world_size,ppo_chunk_size=chunk_size,global_instances_per_rollout=batch_per_gpu*world_size,
         global_trajectories_per_rollout=batch_per_gpu*world_size*50,
         global_instances_per_optimizer_step=batch_per_gpu*world_size//4,
         batch_controls=dict(instances=batch_per_gpu*world_size,per_rank_instances=batch_per_gpu,trajectories=50,
@@ -117,12 +147,13 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
             initial_evaluation_equivalence_group=None)
     # Replace inherited VRPTW controls rather than describing them as current.
     if variant=='original':
-        changed={'training.num_envs_per_gpu','training.rollout_steps','evaluation.eval_max_steps','evaluation.eval_batch_size'}
+        changed={'training.num_envs_per_gpu','training.rollout_steps','training.ppo_step_chunk_size','evaluation.eval_max_steps','evaluation.eval_batch_size'}
         cfg['experiment_protocol']['protocol_overrides']=[item for item in cfg['experiment_protocol']['protocol_overrides'] if item['parameter'] not in changed]
         cfg['experiment_protocol']['protocol_overrides'].extend([
             dict(parameter='data.problem_type',original='vrptw preset',used=task,reason='requested task; original EVRPTW environment'),
             dict(parameter='training.num_envs_per_gpu',original=128,used=batch_per_gpu,reason='declared per-rank and global rollout budget'),
             dict(parameter='training.rollout_steps',original=120,used=horizon,reason='512 covers EVRPTW native timeout; 201 covers VRPTW customer/depot routes'),
+            dict(parameter='training.ppo_step_chunk_size',original=32,used=chunk_size,reason='declared task-specific time chunk; same minibatch update count'),
             dict(parameter='evaluation.eval_max_steps',original=120,used=horizon,reason='same complete-route horizon for both models'),
             dict(parameter='evaluation.eval_batch_size',original=1000,used=16,reason='common evaluation memory budget'),
             dict(parameter='execution.world_size',original=1,used=world_size,reason='external synchronous execution adapter; original model/loss bytes unchanged'),
@@ -134,12 +165,15 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
 def preflight_config(cfg, output):
     result=copy.deepcopy(cfg);result['run_name']+='_PREFLIGHT'
     result['training'].update(epochs=2,monitor_interval=1,post_update_kl_interval=1,monitor_output_dir=str(output/'monitoring'))
-    result['evaluation'].update(eval_before_training=False,eval_interval=2,eval_limit=4,
-        eval_n_traj=4,eval_batch_size=4,eval_output_dir=str(output/'evaluations'))
+    # Exercise one full evaluation batch: reducing trajectories or batch size
+    # can hide an OOM that otherwise appears at formal epoch zero.
+    validation_instances=result['evaluation']['eval_batch_size']
+    result['evaluation'].update(eval_before_training=False,eval_interval=2,eval_limit=validation_instances,
+        eval_output_dir=str(output/'evaluations'))
     if result['offline'].get('branch_exploration_enabled'):
         result['offline']['exploration_interval']=1
     result['experiment_protocol'].update(phase=cfg['experiment_protocol']['task']+('_dual' if cfg['experiment_protocol']['world_size'] == 2 else '_single')+'_scratch_preflight',epochs=2,
-        validation_instances=4,comparison_scope='full configured training allocation; reduced validation; discard all resulting state')
+        validation_instances=validation_instances,comparison_scope='full training and evaluation allocations; one validation batch; discard all resulting state')
     return result
 
 
@@ -170,6 +204,13 @@ def prepare(args):
         raise ValueError('--single-gpu requires exactly one GPU ID')
     world_size = len(gpus)
     topology = 'DUAL' if world_size == 2 else 'SINGLE'
+    after_runs = list(dict.fromkeys(str(path.resolve()) for path in args.after_run))
+    for directory in after_runs:
+        if not (Path(directory) / 'manifest.json').is_file():
+            raise ValueError(f'--after-run requires an experiment directory with manifest.json: {directory}')
+    dependency_state, reason = dependency_status(after_runs)
+    if dependency_state == 'failed':
+        raise ValueError(reason)
     hardware=shared.probe_requested_gpus(gpus)
     if not 1<=args.poll_seconds<=60 or not 2<=args.idle_checks<=10:
         raise ValueError('poll-seconds must be 1..60, idle-checks 2..10')
@@ -203,7 +244,7 @@ def prepare(args):
         command += ['--config',str(path),'--seed',str(args.seed),'--device','cuda']
         value=dict(config=str(path),config_sha256=shared.digest(path),output_dir=str(destination),
             code_root=str(original if args.variant=='original' else frozen),command=command,
-            epochs=2 if preflight else args.epochs,validation_instances=4 if preflight else 1000,
+            epochs=2 if preflight else args.epochs,validation_instances=config['evaluation']['eval_limit'] if preflight else 1000,
             required_validation_epochs=[2] if preflight else shared.validation_epochs(args.epochs,args.eval_interval),
             log_dir=str(CODE_ROOT/'results/logs'/f"Cus_100_CS_{cfg['data']['num_charging_stations']}"/config['run_name']/f'seed_{args.seed}'),
             checkpoint_dir=str(CODE_ROOT/'results/checkpoints'/f"Cus_100_CS_{cfg['data']['num_charging_stations']}"/config['run_name']/f'seed_{args.seed}'))
@@ -216,11 +257,14 @@ def prepare(args):
         initial_evaluation_pairs=[],initial_evaluation_consistency_scope='different architectures need not have identical epoch-zero policy',
         best_checkpoint_caveat='Native original best uses distance among feasible cases; modern best prioritizes feasibility. Compare common epochs or choose periodic checkpoints by the same feasibility-first rule.',
         evaluation_references='Absent Gurobi references only exclude gap metrics; never exclude those validation instances.',
-        gpu_preflight=dict(epochs=2,world_size=world_size,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=5,validation_instances=4))
+        gpu_preflight=dict(epochs=2,world_size=world_size,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=5,
+            validation_instances=cfg['evaluation']['eval_batch_size'],eval_batch_size=cfg['evaluation']['eval_batch_size'],
+            eval_n_traj=cfg['evaluation']['eval_n_traj']))
     manifest=dict(created_at_utc=shared.now(),initialization_mode='scratch',init_checkpoint=None,init_checkpoint_sha256=None,
         source_init_checkpoint=None,source_init_epoch=None,code_root=str(frozen),source=source,additional_sources=additional,
         inputs=inputs,arms={args.variant:spec},gpus=gpus,protocol=protocol,
-        hardware_at_prepare=list(hardware.values()) if hardware is not None else None,poll_seconds=args.poll_seconds,idle_checks=args.idle_checks)
+        hardware_at_prepare=list(hardware.values()) if hardware is not None else None,poll_seconds=args.poll_seconds,idle_checks=args.idle_checks,
+        after_runs=after_runs)
     shared.write_json(experiment/'manifest.json',manifest)
     shared.write_json(experiment/'status.json',dict(state='prepared',arms={args.variant:dict(state='prepared')}))
     shared.verify_manifest(manifest)
@@ -286,6 +330,19 @@ def supervise(experiment):
         print(shared.now(),arm,stage,'GPUs',detail['gpu'],'pid',process.pid,flush=True)
     try:
         while True:
+            dependency_state, reason = dependency_status(manifest.get('after_runs', []))
+            if process is None and dependency_state == 'failed':
+                detail.update(state='failed', error=reason)
+                status.update(state='failed', error=reason, finished_at_utc=shared.now())
+                snapshot()
+                break
+            if process is None and dependency_state == 'waiting':
+                status.update(state='waiting_dependency', dependency_wait_reason=reason)
+                idle=0
+            else:
+                status.pop('dependency_wait_reason', None)
+                if process is None:
+                    status['state']='waiting_gpu'
             cards=None
             try:
                 cards=shared.gpu_snapshot();shared.validate_requested_gpus(manifest['gpus'],cards)
@@ -294,7 +351,7 @@ def supervise(experiment):
                     h.write(json.dumps(dict(time_utc=shared.now(),gpus=list(cards.values()),stage=detail.get('stage')))+'\n')
             except (OSError,subprocess.SubprocessError,ValueError,KeyError,IndexError) as error:
                 cards=None;idle=0;status['gpu_poll_warning']=f'{type(error).__name__}: {error}'
-            if process is None and not stopped and cards is not None:
+            if process is None and not stopped and cards is not None and dependency_state == 'completed':
                 available=all(shared.idle_gpu(cards[g]) for g in manifest['gpus']);idle=idle+1 if available else 0
                 status['consecutive_idle_pair_checks']=idle
                 if idle>=manifest['idle_checks']:
@@ -358,8 +415,10 @@ def make_parser():
     parser.add_argument('--expert-chunk-size',type=int,default=64)
     parser.add_argument('--learning-rate',type=float,default=1e-4)
     parser.add_argument('--base-config',type=Path,default=CODE_ROOT/'configs/experiments/physics_exploration_vrptw100.yaml')
-    parser.add_argument('--data-root',type=Path,default=CODE_ROOT.parent/'AAAI_Dataset')
+    parser.add_argument('--data-root',type=Path,default=default_data_root())
     parser.add_argument('--run-id')
+    parser.add_argument('--after-run',type=Path,action='append',default=[],metavar='EXPERIMENT_DIR',
+                        help='Wait for this experiment to complete successfully before reserving GPUs; repeat for multiple prerequisites')
     parser.add_argument('--poll-seconds',type=int,default=10)
     parser.add_argument('--idle-checks',type=int,default=3)
     mode=parser.add_mutually_exclusive_group();mode.add_argument('--prepare-only',action='store_true');mode.add_argument('--launch',action='store_true')

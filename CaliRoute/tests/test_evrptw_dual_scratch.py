@@ -64,8 +64,9 @@ def test_two_rank_defaults_have_same_global_budget_and_complete_evaluation(tmp_p
     for key in ('num_envs_per_gpu', 'n_traj', 'rollout_steps', 'ppo_update_epochs', 'num_minibatches', 'ppo_step_chunk_size'):
         assert preflight['training'][key] == train[key]
     assert preflight['training']['epochs'] == 2
-    assert preflight['evaluation']['eval_limit'] == 4
-    assert preflight['evaluation']['eval_n_traj'] == 4
+    assert preflight['evaluation']['eval_limit'] == 16
+    assert preflight['evaluation']['eval_batch_size'] == evaluation['eval_batch_size']
+    assert preflight['evaluation']['eval_n_traj'] == evaluation['eval_n_traj']
 
 
 @pytest.fixture
@@ -111,7 +112,7 @@ def test_cpu_prepare_never_loads_weights_or_launches_and_freezes_torchrun_comman
         assert 'torch.distributed.run' in command
         assert '--nproc-per-node=2' in command and '--max-restarts=0' in command
         assert '/Cus_100_CS_20/' in stage['checkpoint_dir']
-        assert stage['validation_instances'] == (4 if stage is spec['preflight'] else 1000)
+        assert stage['validation_instances'] == (16 if stage is spec['preflight'] else 1000)
         if dual.variant == 'original':
             source = manifest['additional_sources']['original']
             assert source['source']['git_commit'] == launch.scratch.ORIGINAL_COMMIT
@@ -299,3 +300,87 @@ def test_vrptw_dual_uses_requested_task_seed_and_fixed_five_passes(tmp_path, var
         preflight = launch.preflight_config(config, tmp_path / 'preflight')
         assert preflight['offline']['exploration_interval'] == 1
         assert train['require_complete_feasible_rollouts']
+
+
+@pytest.mark.parametrize(('task', 'horizon'), [('evrptw', 512), ('vrptw', 201)])
+@pytest.mark.parametrize('variant', ['original', 'optimized'])
+def test_chunk_tuning_is_bounded_by_the_requested_task_horizon(tmp_path, task, horizon, variant):
+    arguments = dict(variant=variant, output=tmp_path, run_name='CHUNK_TEST',
+                     data_root=tmp_path, task=task)
+    config = launch.build_config(base_config(), chunk_size=horizon, **arguments)
+    assert config['training']['ppo_step_chunk_size'] == horizon
+    assert config['experiment_protocol']['ppo_chunk_size'] == horizon
+    if variant == 'original':
+        override = next(item for item in config['experiment_protocol']['protocol_overrides']
+                        if item['parameter'] == 'training.ppo_step_chunk_size')
+        assert override['used'] == horizon
+    with pytest.raises(ValueError, match=f'chunk-size must be <={horizon}'):
+        launch.build_config(base_config(), chunk_size=horizon + 1, **arguments)
+
+
+def test_dataset_default_discovers_both_supported_layouts_with_explicit_override(tmp_path, monkeypatch):
+    root = tmp_path / 'repository' / 'CaliRoute'
+    monkeypatch.setattr(launch, 'CODE_ROOT', root)
+    nested = root.parent / 'AAAI_Dataset'
+    adjacent = root.parent.parent / 'AAAI_Dataset'
+    assert launch.make_parser().parse_args([]).data_root == nested
+    (adjacent / 'dataset').mkdir(parents=True)
+    assert launch.make_parser().parse_args([]).data_root == adjacent
+    (nested / 'dataset').mkdir(parents=True)
+    assert launch.make_parser().parse_args([]).data_root == nested
+    assert launch.make_parser().parse_args(['--data-root', str(tmp_path / 'custom')]).data_root == tmp_path / 'custom'
+
+
+def add_prerequisite(dual, state='running'):
+    previous = dual.run.parent / 'PREVIOUS'
+    previous.mkdir()
+    shared.write_json(previous / 'manifest.json', {})
+    shared.write_json(previous / 'status.json', dict(state=state))
+    manifest = dict(dual.manifest, after_runs=[str(previous)])
+    shared.write_json(dual.run / 'manifest.json', manifest)
+    return previous
+
+
+def test_prerequisite_is_frozen_during_preparation(dual):
+    dual.args.after_run = [dual.run]
+    dual.args.run_id = 'FOLLOWUP'
+    followup = launch.prepare(dual.args)
+    manifest = json.loads((followup / 'manifest.json').read_text())
+    assert manifest['after_runs'] == [str(dual.run)]
+    assert manifest['protocol']['seed'] == dual.manifest['protocol']['seed']
+    assert manifest['protocol']['global_batch'] == dual.manifest['protocol']['global_batch']
+    assert not dual.parent.launches
+
+
+def test_sequential_comparison_waits_without_reserving_idle_gpus(dual, monkeypatch):
+    previous = add_prerequisite(dual)
+    owned, launches = supervisor_mocks(monkeypatch)
+    def acquire(*args):
+        assert json.loads((previous / 'status.json').read_text())['state'] == 'completed'
+        return owned
+    monkeypatch.setattr(launch, 'lock_gpu_pair', acquire)
+    waiting_observed = []
+    def finish_previous(_):
+        status = json.loads((dual.run / 'status.json').read_text())
+        if status['state'] == 'waiting_dependency':
+            waiting_observed.append(status['dependency_wait_reason'])
+            assert not launches
+            shared.write_json(previous / 'status.json', dict(state='completed'))
+    monkeypatch.setattr(launch.time, 'sleep', finish_previous)
+    launch.supervise(dual.run)
+    assert len(waiting_observed) == len(launches) == 1
+    assert all(lock.closed for lock in owned)
+
+
+@pytest.mark.parametrize('state', ['failed', 'interrupted'])
+def test_failed_prerequisite_never_launches_or_acquires_gpus(dual, monkeypatch, state):
+    previous = add_prerequisite(dual)
+    monkeypatch.setattr(shared, 'gpu_snapshot', cards)
+    monkeypatch.setattr(launch, 'lock_gpu_pair', lambda *a: pytest.fail('Acquired GPU for dependent failure'))
+    monkeypatch.setattr(launch.subprocess, 'Popen', lambda *a, **k: pytest.fail('Launched after dependent failure'))
+    monkeypatch.setattr(launch.time, 'sleep',
+                        lambda _: shared.write_json(previous / 'status.json', dict(state=state)))
+    launch.supervise(dual.run)
+    result = json.loads((dual.run / 'status.json').read_text())
+    assert result['state'] == 'failed'
+    assert f'state={state}' in result['error']

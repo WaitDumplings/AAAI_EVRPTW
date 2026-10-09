@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One task, one GPU; default EVRPTW on GPU0, VRPTW on GPU1.
+# One task, one GPU, 32 instances; default EVRPTW on GPU0, VRPTW on GPU1.
 set -euo pipefail
 usage() {
   echo "Usage: bash scripts/run_graph_rdi100_single.sh vrptw|evrptw [--gpus 0|1] [--epochs 1500] [--prepare-only] [launcher options]"
@@ -17,7 +17,7 @@ CODE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${CODE_ROOT}/../.venv/bin/python}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then PYTHON_BIN="python3"; fi
 arguments=(--task "${task}" --variant optimized --encoder-variant graph --single-gpu
-  --seed "${SEED:-3011}" --batch-per-gpu 64 --chunk-size 8 --expert-chunk-size 64
+  --seed "${SEED:-3011}" --batch-per-gpu 32 --chunk-size 120 --expert-chunk-size 128
   --gpus "${GPUS:-${default_gpu}}")
 if [[ -n "${DATA_ROOT:-}" ]]; then arguments+=(--data-root "${DATA_ROOT}"); fi
 if [[ -n "${RUN_ID:-}" ]]; then arguments+=(--run-id "${RUN_ID}"); fi
