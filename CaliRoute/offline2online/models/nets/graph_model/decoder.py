@@ -3,6 +3,7 @@ from torch import nn
 
 from .routing_adapters import PostChargeAdapter
 from caliroute.plugins.agda import AdaptiveGraphAttention
+from caliroute.plugins.resource_isolation import (feature_resource_mask, project_raw_features, resource_flags)
 from caliroute.plugins.physical_decision import ResourceDecisionAdapter, candidate_transitions
 
 from ...nets.graph_model.multi_head_attention import (
@@ -21,10 +22,11 @@ class DriverQueryEncoder(nn.Module):
     DynamicGraphKVEncoder on the key/value/action side.
     """
 
-    def __init__(self, embedding_dim: int):
+    def __init__(self, embedding_dim: int, use_resource_isolation=False):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
         self.feature_dim = 12
+        self.use_resource_isolation = bool(use_resource_isolation)
         self.state_proj = nn.Sequential(
             nn.LayerNorm(self.feature_dim),
             nn.Linear(self.feature_dim, embedding_dim),
@@ -143,7 +145,8 @@ class DriverQueryEncoder(nn.Module):
             ],
             dim=-1,
         )
-        state_context = self.state_proj(features)
+        active = feature_resource_mask(state.states, features, "driver") if self.use_resource_isolation else None
+        state_context = project_raw_features(self.state_proj, features, active)
         return self.query_proj(torch.cat([graph_context, current_node, state_context], dim=-1))
 
 
@@ -642,10 +645,13 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             current_node_idx=current_node_idx,
             prev_node_idx=prev_node_idx,
         )
+        candidate_mask = (feature_resource_mask(state.states, candidate_features, "candidate")
+                          if self.use_resource_isolation else None)
         if self.optimize_dynamic_projections and not (
             self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key
         ):
-            return super().forward(node_embeddings, None, candidate_features, node_projections=node_projections)
+            return super().forward(node_embeddings, None, candidate_features, node_projections=node_projections,
+                                   candidate_feature_mask=candidate_mask)
 
         current_node = self._gather_node(node_embeddings, current_node_idx)
 
@@ -678,7 +684,9 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             route_mask=route_mask,
             current_node_idx=current_node_idx,
         )
-        state_token = self.state_proj(system_features)
+        system_mask = (feature_resource_mask(state.states, system_features, "system")
+                       if self.use_resource_isolation else None)
+        state_token = project_raw_features(self.state_proj, system_features, system_mask)
 
         tokens = torch.stack(
             [
@@ -694,8 +702,13 @@ class DynamicGraphKVEncoder(AdaptiveGraphAttention):
             ],
             dim=2,
         )
+        token_mask = None
+        if self.use_resource_isolation:
+            token_mask = torch.zeros(tokens.shape[:3], dtype=torch.bool, device=tokens.device)
+            token_mask[:, :, 5] = ~resource_flags(state.states)[:, 0, None]
         return super().forward(node_embeddings, tokens, candidate_features,
-                               state_token=state_token, node_projections=node_projections)
+                               state_token=state_token, node_projections=node_projections,
+                               candidate_feature_mask=candidate_mask, token_mask=token_mask)
 
 
 
@@ -736,6 +749,7 @@ class Decoder(nn.Module):
         agda_physical_candidate_features=False,
         agda_smooth_distance_features=False,
         use_resource_decoder=False,
+        use_resource_isolation=False,
         decoder_observation_mode="feasible",
         edge_relation_dim=16,
         use_edge_relation_encoder=False,
@@ -744,6 +758,7 @@ class Decoder(nn.Module):
 
         self.embedding_dim = embedding_dim
         self.problem = problem
+        self.use_resource_isolation = bool(use_resource_isolation)
 
         # project node embeddings -> (attention K, attention V, action key)
         self.project_node_embeddings = nn.Linear(
@@ -758,7 +773,7 @@ class Decoder(nn.Module):
         del step_context_dim
 
         # driver-side query and candidate-side dynamic graph encoder
-        self.driver_query_encoder = DriverQueryEncoder(embedding_dim)
+        self.driver_query_encoder = DriverQueryEncoder(embedding_dim, use_resource_isolation=use_resource_isolation)
         self.dynamic_graph_kv_encoder = DynamicGraphKVEncoder(
             embedding_dim=embedding_dim,
             n_heads=dynamic_decision_heads,
@@ -772,6 +787,7 @@ class Decoder(nn.Module):
             agda_hidden_dim=agda_hidden_dim,
             agda_physical_candidate_features=agda_physical_candidate_features,
             agda_smooth_distance_features=agda_smooth_distance_features,
+            use_resource_isolation=use_resource_isolation,
         )
 
         # glimpse + pointer
@@ -804,6 +820,7 @@ class Decoder(nn.Module):
                 self.resource_decoder = ResourceDecisionAdapter(
                     embedding_dim, observation_mode=decoder_observation_mode,
                     use_resources=use_resource_decoder,
+                    use_resource_isolation=use_resource_isolation,
                     use_edge_relations=use_edge_relation_encoder,
                     edge_relation_dim=edge_relation_dim,
                 )
@@ -881,7 +898,10 @@ class Decoder(nn.Module):
             node_projections=node_projections,
         )
         if self.post_charge_adapter is not None:
-            action_bias = action_bias + self.post_charge_adapter(state, node_embeddings)
+            charge_bias = self.post_charge_adapter(state, node_embeddings)
+            if self.use_resource_isolation and torch.is_tensor(charge_bias):
+                charge_bias = torch.where(resource_flags(state.states)[:, 0, None, None], charge_bias, 0.)
+            action_bias = action_bias + charge_bias
         if self.resource_decoder is not None:
             extra = cached_embeddings[5] if len(cached_embeddings) > 5 else {}
             query_delta, physical_key_delta, physical_bias_delta = self.resource_decoder(

@@ -28,7 +28,9 @@ def module_update_snapshot(agent):
     for name, param in agent.named_parameters():
         if not param.requires_grad:
             continue
-        group = ('joint_graph' if 'joint_graph_encoder' in name else
+        group = ('directed_profile' if 'directed_road_profile' in name else
+                 'directed_score' if 'directed_score_mixer' in name else
+                 'joint_graph' if 'joint_graph_encoder' in name else
                  'static_fusion' if 'static_fusion' in name else
                  'edge_relations' if any(part in name for part in ('edge_relation_encoder', 'edge_relation_adapter')) else
                  'resource_decoder' if 'resource_decoder' in name else

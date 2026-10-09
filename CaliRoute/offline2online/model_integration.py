@@ -16,6 +16,7 @@ FLAGS = ('use_typed_static_fusion', 'use_edge_relation_encoder',
          'use_edge_value_messages', 'use_edge_state_updates', 'use_resource_decoder')
 FEATURE_FLAGS = ('agda_physical_candidate_features', 'agda_smooth_distance_features')
 JOINT_GRAPH_FLAG = 'use_joint_graph_encoder'
+LIGHT_FLAGS = ('use_resource_isolation', 'use_directed_road_profile', 'use_directed_score_mixer')
 
 
 def _canonical_model(model):
@@ -43,6 +44,25 @@ def _canonical_model(model):
         # Optional keys preserve all pre-graph v1 signatures when disabled.
         result.update(use_joint_graph_encoder=True, joint_graph_edge_dim=graph_dimension,
                       joint_graph_dropout=0.0)
+    for name in LIGHT_FLAGS:
+        value = model.get(name, False)
+        if not isinstance(value, bool):
+            raise ValueError(f'{name} must be a boolean')
+        if value:
+            result[name] = True  # preserve old checkpoint signatures when disabled
+    for flag, dimension_name, default in (
+        ('use_directed_road_profile', 'directed_profile_hidden_dim', 32),
+        ('use_directed_score_mixer', 'directed_score_hidden', 8),
+    ):
+        value = model.get(dimension_name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f'{dimension_name} must be a positive integer')
+        if result.get(flag):
+            result[dimension_name] = value
+    if joint_graph and any(result.get(name) for name in LIGHT_FLAGS[1:]):
+        raise ValueError('Directed P1 adapters target the original encoder, not joint graph')
+    if result.get('use_directed_score_mixer') and result['use_edge_value_messages']:
+        raise ValueError('Directed score mixer cannot use separate edge-value attention weights')
     dimension = model.get('edge_relation_dim', 16)
     if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
         raise ValueError('edge_relation_dim must be a positive integer')
@@ -59,13 +79,13 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG))
+    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, *LIGHT_FLAGS))
 
 
 def signature(cfg):
     model = cfg.get('model', {}) or {}
     result = {'schema': SCHEMA, **_canonical_model(model)}
-    if any(result[name] for name in FLAGS) or result.get(JOINT_GRAPH_FLAG, False):
+    if any(result[name] for name in FLAGS) or any(result.get(name) for name in (JOINT_GRAPH_FLAG, 'use_resource_isolation', 'use_directed_score_mixer')):
         from .input_normalization import signature as input_signature
         inputs = input_signature(cfg)
         if not inputs['use_physical_input_context']:
@@ -117,6 +137,9 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
     if source != target and (source.get(JOINT_GRAPH_FLAG, False) or target.get(JOINT_GRAPH_FLAG, False)):
         raise ValueError('Joint graph architecture changed; graph checkpoints require an identical '
                          'model integration profile. Start the new architecture from scratch.')
+    if source != target and any(source.get(name) or target.get(name) for name in LIGHT_FLAGS):
+        raise ValueError('P0/P1 architecture or resource semantics changed; require an identical '
+                         'model integration profile or start from scratch.')
     if resume and source != target:
         raise ValueError('Model integration changed on resume; use weights-only initialization')
     if resume:

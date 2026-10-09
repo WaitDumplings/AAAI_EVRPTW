@@ -45,10 +45,11 @@ def _contexts(states, batch, nodes, reference):
 class TypedStaticFusion(nn.Module):
     """Semantic branches + resource-conditioned FiLM and graph-token residual."""
 
-    def __init__(self, embedding_dim, hidden_dim=32):
+    def __init__(self, embedding_dim, hidden_dim=32, use_resource_isolation=False):
         super().__init__()
         _positive_int(embedding_dim, 'embedding_dim')
         _positive_int(hidden_dim, 'hidden_dim')
+        self.use_resource_isolation = bool(use_resource_isolation)
         self.geometry = _branch(2, hidden_dim, embedding_dim)
         self.time = _branch(3, hidden_dim, embedding_dim)
         self.load = _branch(1, hidden_dim, embedding_dim)
@@ -76,7 +77,12 @@ class TypedStaticFusion(nn.Module):
         if not bool(torch.isfinite(xy).all() & torch.isfinite(time_features).all()
                     & torch.isfinite(demand).all()):
             raise ValueError('Typed static features must contain finite active values')
-        typed = (self.geometry(xy) + self.time(time_features) + self.load(demand)
+        time_hidden = self.time(time_features)
+        load_hidden = self.load(demand)
+        if self.use_resource_isolation:
+            time_hidden = torch.where(graph[:, None, 8:9] > .5, time_hidden, 0.)
+            load_hidden = torch.where(graph[:, None, 7:8] > .5, load_hidden, 0.)
+        typed = (self.geometry(xy) + time_hidden + load_hidden
                  + self.road(node) + self.node_type(F.one_hot(node_type, 3).to(embeddings)))
         gamma, beta = self.resource_film(graph).chunk(2, dim=-1)
         # Bound multiplicative modulation while keeping exact identity at zero.

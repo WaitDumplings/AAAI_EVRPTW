@@ -9,11 +9,13 @@ import torch.nn as nn
 from .nets.graph_model.decoder import Decoder
 from .nets.graph_model.embedding import AutoEmbedding
 from .nets.graph_model.encoder import GraphAttentionEncoder
+from caliroute.plugins.directed_structure import DirectedRoadProfileFusion, build_directed_pair_features
 from .nets.graph_model.routing_adapters import DirectedEdgeBias
 from caliroute.plugins.rdi import RoadDistanceInjection
 from caliroute.plugins.input_encoding import PhysicalInputContextAdapter
 from caliroute.plugins.physical_static import TypedStaticFusion, DirectedPhysicalRelationEncoder
 from caliroute.plugins.joint_graph import JointGraphEncoder
+from caliroute.plugins.resource_isolation import sanitize_resource_inputs
 
 
 class Problem:
@@ -116,11 +118,14 @@ def orthogonal_init(layer: nn.Module, gain: float = 1.0) -> None:
 class StateWrapper:
     """Adapt EVRPTW-DB Gymnasium observations to the Ablation graph model."""
 
-    def __init__(self, states: dict[str, Any], device: str | torch.device, problem: str = "evrptw"):
+    def __init__(self, states: dict[str, Any], device: str | torch.device, problem: str = "evrptw",
+                 use_resource_isolation: bool = False):
         self.device = device
         self.problem = problem
         states = prepare_observation_batch(states)
         self.states = {key: _to_tensor(value, device=device) for key, value in states.items()}
+        if use_resource_isolation:
+            self.states = sanitize_resource_inputs(self.states)
         if problem == "evrptw":
             self._build_evrptw_state()
 
@@ -218,6 +223,11 @@ class Backbone(nn.Module):
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
         use_resource_decoder: bool = False,
+        use_resource_isolation: bool = False,
+        use_directed_road_profile: bool = False,
+        directed_profile_hidden_dim: int = 32,
+        use_directed_score_mixer: bool = False,
+        directed_score_hidden: int = 8,
         use_joint_graph_encoder: bool = False,
         joint_graph_edge_dim: int = 32,
         joint_graph_dropout: float = 0.,
@@ -227,6 +237,14 @@ class Backbone(nn.Module):
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
         self.device = device
         self.problem = Problem(problem_name)
+        self.use_resource_isolation = bool(use_resource_isolation)
+        self.use_directed_score_mixer = bool(use_directed_score_mixer)
+        if use_joint_graph_encoder and (use_directed_road_profile or use_directed_score_mixer):
+            raise ValueError("Directed P1 adapters target the original encoder, not the joint graph encoder")
+        if use_directed_score_mixer and not use_physical_input_context:
+            raise ValueError("Directed P1 score mixer requires explicit physical resource context")
+        if use_resource_isolation and not use_physical_input_context:
+            raise ValueError("Resource isolation requires use_physical_input_context=True")
         if (use_typed_static_fusion or use_edge_relation_encoder or use_resource_decoder or use_joint_graph_encoder) and not use_physical_input_context:
             raise ValueError('Stage-2 integration requires use_physical_input_context=True')
         if (use_edge_value_messages or use_edge_state_updates) and not use_edge_relation_encoder:
@@ -248,6 +266,12 @@ class Backbone(nn.Module):
             'agda_physical_candidate_features': bool(agda_physical_candidate_features),
             'agda_smooth_distance_features': bool(agda_smooth_distance_features),
         }
+        if use_resource_isolation:
+            self.model_integration_settings["use_resource_isolation"] = True
+        if use_directed_road_profile:
+            self.model_integration_settings.update(use_directed_road_profile=True, directed_profile_hidden_dim=directed_profile_hidden_dim)
+        if use_directed_score_mixer:
+            self.model_integration_settings.update(use_directed_score_mixer=True, directed_score_hidden=directed_score_hidden)
         if use_joint_graph_encoder and (use_edge_relation_encoder or use_edge_value_messages or use_edge_state_updates):
             raise ValueError('Joint graph encoder replaces the old edge relation encoder and its value/update switches')
         if use_joint_graph_encoder:
@@ -271,6 +295,8 @@ class Backbone(nn.Module):
                 embed_dim=embedding_dim,
                 n_layers=n_encode_layers,
                 use_sdpa=use_encoder_sdpa,
+                use_directed_score_mixer=use_directed_score_mixer,
+                directed_score_hidden=directed_score_hidden,
                 use_edge_relation_encoder=use_edge_relation_encoder,
                 edge_relation_dim=edge_relation_dim,
                 use_edge_value_messages=use_edge_value_messages,
@@ -296,6 +322,7 @@ class Backbone(nn.Module):
             agda_physical_candidate_features=agda_physical_candidate_features,
             agda_smooth_distance_features=agda_smooth_distance_features,
             use_resource_decoder=use_resource_decoder,
+            use_resource_isolation=use_resource_isolation,
             decoder_observation_mode=decoder_observation_mode,
             use_edge_relation_encoder=use_edge_relation_encoder or use_joint_graph_encoder,
             edge_relation_dim=effective_edge_dim,
@@ -326,10 +353,14 @@ class Backbone(nn.Module):
                     hidden_dim=physical_input_context_hidden_dim,
                 )
 
+        self.directed_road_profile = None
+        if use_directed_road_profile:
+            with torch.random.fork_rng(devices=[]):
+                self.directed_road_profile = DirectedRoadProfileFusion(embedding_dim, directed_profile_hidden_dim)
         self.static_fusion = None
         if use_typed_static_fusion:
             with torch.random.fork_rng(devices=[]):
-                self.static_fusion = TypedStaticFusion(embedding_dim)
+                self.static_fusion = TypedStaticFusion(embedding_dim, use_resource_isolation=use_resource_isolation)
         self.edge_relation_encoder = None
         if use_edge_relation_encoder or use_joint_graph_encoder:
             with torch.random.fork_rng(devices=[]):
@@ -445,7 +476,8 @@ class Backbone(nn.Module):
         return bias
 
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
-        return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
+        return StateWrapper(obs, device=self.device, problem=self.problem.NAME,
+                            use_resource_isolation=self.use_resource_isolation)
 
     def _encode_from_state(self, state: StateWrapper, use_mask: bool = False):
         node_mask = state.states.get("instance_mask") if use_mask else None
@@ -468,6 +500,16 @@ class Backbone(nn.Module):
             node_embeddings = node_embeddings + self.physical_input_adapter(
                 node_context, state.states["graph_input_context"]
             )
+        if self.directed_road_profile is not None:
+            node_embeddings = self.directed_road_profile(
+                node_embeddings, state.states["edge_distance"], node_mask=node_mask)
+        directed_pairs = None
+        if self.use_directed_score_mixer:
+            resources = state.states["graph_input_context"]
+            directed_pairs = build_directed_pair_features(
+                state.states["edge_distance"], travel_time=state.states.get("edge_time"),
+                energy=state.states.get("edge_energy"), time_active=resources[:, 8],
+                energy_active=resources[:, 6], node_mask=node_mask)
         graph_context = None
         if self.static_fusion is not None:
             node_embeddings, graph_context = self.static_fusion(
@@ -486,11 +528,12 @@ class Backbone(nn.Module):
         else:
             encoded_nodes, edge_relations = self.encoder(
                 node_embeddings,
-                mask=None,
+                mask=node_mask if self.use_directed_score_mixer else None,
                 attn_bias=self._build_attn_bias(state),
                 graph_context=graph_context,
                 edge_relations=edge_relations,
                 return_edge_relations=True,
+                directed_pair_features=directed_pairs,
             )
         cached = self.decoder._precompute(encoded_nodes, mask=node_mask)
         if edge_relations is not None:
@@ -598,6 +641,11 @@ class Agent(nn.Module):
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
         use_resource_decoder: bool = False,
+        use_resource_isolation: bool = False,
+        use_directed_road_profile: bool = False,
+        directed_profile_hidden_dim: int = 32,
+        use_directed_score_mixer: bool = False,
+        directed_score_hidden: int = 8,
         use_joint_graph_encoder: bool = False,
         joint_graph_edge_dim: int = 32,
         joint_graph_dropout: float = 0.,
@@ -641,6 +689,11 @@ class Agent(nn.Module):
             use_edge_value_messages=use_edge_value_messages,
             use_edge_state_updates=use_edge_state_updates,
             use_resource_decoder=use_resource_decoder,
+            use_resource_isolation=use_resource_isolation,
+            use_directed_road_profile=use_directed_road_profile,
+            directed_profile_hidden_dim=directed_profile_hidden_dim,
+            use_directed_score_mixer=use_directed_score_mixer,
+            directed_score_hidden=directed_score_hidden,
             use_joint_graph_encoder=use_joint_graph_encoder,
             joint_graph_edge_dim=joint_graph_edge_dim,
             joint_graph_dropout=joint_graph_dropout,

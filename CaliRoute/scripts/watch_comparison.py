@@ -187,6 +187,14 @@ def render(path, reference_km=None, reference_epochs=None, compare_with=None):
     table(['Arm', 'GPU', 'State', 'Epoch', 'Latest km@epoch', 'Eval FR',
            'Best ckpt km@epoch', 'Train KL', 'Clip%', 'LR'], rows)
 
+    if protocol.get('ppo_warmup_epochs'):
+        warmup = int(protocol['ppo_warmup_epochs'])
+        print(f'\nSchedule: epochs 1-{warmup} pure PPO; epoch {warmup+1} onward SL-PPO; same optimizer.')
+        table(['Arm', 'Training phase', 'Phase epoch'], [
+            [name, (arm.get('latest_train_row') or {}).get('training_phase', '--'),
+             fmt((arm.get('latest_train_row') or {}).get('phase_epoch'), 0)]
+            for name, arm in arms.items()])
+
     # New diagnostics are optional. Keep old snapshots and the main table
     # unchanged; a missing measurement must not be presented as zero drift.
     if any(any(key in (arm.get('latest_train_row') or {})

@@ -134,6 +134,9 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
 def preflight_config(cfg, output):
     result=copy.deepcopy(cfg);result['run_name']+='_PREFLIGHT'
     result['training'].update(epochs=2,monitor_interval=1,post_update_kl_interval=1,monitor_output_dir=str(output/'monitoring'))
+    if result['training'].get('ppo_warmup_epochs', 0):
+        result['training']['ppo_warmup_epochs'] = 1  # exercise PPO -> SL transition; discard state
+        result['experiment_protocol'].update(ppo_warmup_epochs=1, slppo_epochs=1)
     result['evaluation'].update(eval_before_training=False,eval_interval=2,eval_limit=4,
         eval_n_traj=4,eval_batch_size=4,eval_output_dir=str(output/'evaluations'))
     if result['offline'].get('branch_exploration_enabled'):
@@ -162,7 +165,7 @@ def dataset_inputs(data_root, task="evrptw"):
     return inputs,expert_count
 
 
-def prepare(args):
+def prepare(args, *, config_builder=build_config):
     gpus=shared.parse_gpus(args.gpus)
     if len(gpus) not in (1, 2):
         raise ValueError('One or two distinct GPU IDs are required per model')
@@ -182,7 +185,7 @@ def prepare(args):
     base=yaml.safe_load(args.base_config.resolve().read_text())
     # Validate requested settings before creating output or copying source.
     output=experiment/args.variant
-    cfg=build_config(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
+    cfg=config_builder(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
         data_root=data_root,seed=args.seed,epochs=args.epochs,eval_interval=args.eval_interval,
         batch_per_gpu=args.batch_per_gpu,chunk_size=args.chunk_size,expert_chunk_size=args.expert_chunk_size,learning_rate=args.learning_rate,task=args.task,
         encoder_variant=args.encoder_variant,world_size=world_size)
@@ -210,13 +213,14 @@ def prepare(args):
         if preflight:spec['preflight']=value
         else:spec.update(value)
     protocol=dict(cfg['experiment_protocol']);protocol.update(global_batch=args.batch_per_gpu*world_size,n_traj=50,
-        num_minibatches=4,ppo_update_epochs=5,learning_rate=args.learning_rate,lr_schedule='constant',
+        num_minibatches=cfg['training']['num_minibatches'],ppo_update_epochs=cfg['training']['ppo_update_epochs'],learning_rate=args.learning_rate,lr_schedule='constant',
         eval_interval=args.eval_interval,eval_n_traj=50,eval_batch_size=16,validation_instances=1000,
         epochs=args.epochs,expert_rows_at_prepare=expert_count,world_size_per_arm=world_size,original_commit=scratch.ORIGINAL_COMMIT,
         initial_evaluation_pairs=[],initial_evaluation_consistency_scope='different architectures need not have identical epoch-zero policy',
-        best_checkpoint_caveat='Native original best uses distance among feasible cases; modern best prioritizes feasibility. Compare common epochs or choose periodic checkpoints by the same feasibility-first rule.',
+        best_checkpoint_caveat=cfg['experiment_protocol'].get('best_checkpoint_caveat', 'Native original best uses distance among feasible cases; modern best prioritizes feasibility. Compare common epochs or choose periodic checkpoints by the same feasibility-first rule.'),
         evaluation_references='Absent Gurobi references only exclude gap metrics; never exclude those validation instances.',
-        gpu_preflight=dict(epochs=2,world_size=world_size,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=5,validation_instances=4))
+        gpu_preflight=dict(epochs=2,world_size=world_size,batch_per_rank=args.batch_per_gpu,n_traj=50,ppo_passes=cfg['training']['ppo_update_epochs'],validation_instances=4,
+            ppo_warmup_epochs=1 if cfg['training'].get('ppo_warmup_epochs',0) else 0))
     manifest=dict(created_at_utc=shared.now(),initialization_mode='scratch',init_checkpoint=None,init_checkpoint_sha256=None,
         source_init_checkpoint=None,source_init_epoch=None,code_root=str(frozen),source=source,additional_sources=additional,
         inputs=inputs,arms={args.variant:spec},gpus=gpus,protocol=protocol,

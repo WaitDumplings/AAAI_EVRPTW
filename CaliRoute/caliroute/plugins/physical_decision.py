@@ -169,11 +169,13 @@ def _safe_attention(scores, valid):
 class ResourceDecisionAdapter(nn.Module):
     """Trajectory-independent, zero-output-initialized physical decision plugin."""
     def __init__(self, embedding_dim, *, hidden_dim=32, observation_mode='feasible',
-                 use_resources=True, use_edge_relations=False, edge_relation_dim=16):
+                 use_resources=True, use_edge_relations=False, edge_relation_dim=16,
+                 use_resource_isolation=False):
         super().__init__()
         if observation_mode not in {'feasible', 'dual'}:
             raise ValueError("decoder_observation_mode must be 'feasible' or 'dual'")
         self.use_resources = bool(use_resources)
+        self.use_resource_isolation = bool(use_resource_isolation)
         self.use_edge_relations = bool(use_edge_relations)
         self.observation_mode = observation_mode
         self.hidden_dim = int(hidden_dim)
@@ -226,7 +228,13 @@ class ResourceDecisionAdapter(nn.Module):
                        for key, flag in (('current_time', 8), ('current_load', 7), ('current_battery', 6))]
             resource = torch.cat((graph[:, None].expand(B, T, 10), *scalars), -1)
             resource = torch.asinh(resource).to(self.resource_gates.weight.dtype)
-            gates = self.resource_gates(resource).softmax(-1)
+            gate_logits = self.resource_gates(resource)
+            if self.use_resource_isolation:
+                active = torch.stack((graph[:, 8] > .5, graph[:, 6] > .5,
+                                      graph[:, 7] > .5, torch.ones_like(graph[:, 6], dtype=torch.bool),
+                                      torch.ones_like(graph[:, 6], dtype=torch.bool)), -1)
+                gate_logits = gate_logits.masked_fill(~active[:, None], float("-inf"))
+            gates = gate_logits.softmax(-1)
             projected = []
             active_flags = {'time': graph[:, 8], 'energy': graph[:, 6], 'capacity': graph[:, 7]}
             for index, (group, names) in enumerate(CANDIDATE_FEATURE_GROUPS.items()):
@@ -237,7 +245,10 @@ class ResourceDecisionAdapter(nn.Module):
                 projection = self.typed_projections[group]
                 encoded = projection(torch.asinh(raw).to(projection[0].weight.dtype))
                 if group in active_flags:
-                    encoded = encoded * active_flags[group][:, None, None, None].to(encoded.dtype)
+                    if self.use_resource_isolation:
+                        encoded = torch.where(active_flags[group][:, None, None, None] > .5, encoded, 0.)
+                    else:
+                        encoded = encoded * active_flags[group][:, None, None, None].to(encoded.dtype)
                 projected.append(encoded * gates[..., index, None, None])
             hidden = sum(projected)
             scale, shift = self.resource_film(resource).chunk(2, -1)

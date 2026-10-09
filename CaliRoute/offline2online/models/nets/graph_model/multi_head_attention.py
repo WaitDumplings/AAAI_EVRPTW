@@ -3,6 +3,7 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from caliroute.plugins.directed_structure import DirectedContentScoreMixer
 
 ################################ Decoder Attention ################################
 class AttentionScore(nn.Module):
@@ -159,18 +160,42 @@ class MultiHeadAttentionEncoder(nn.Module):
         mask:  [B, Nk] (bool)
         attn_bias: optional [B, Nq, Nk] (broadcast-safe)
     """
-    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False):
+    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False,
+                 use_directed_score_mixer=False, directed_score_hidden=8):
         super().__init__()
         self.n_heads = n_heads
         self.use_sdpa = bool(use_sdpa)
         self.attentionScore = Vanilla_AttentionScore()
         self.project_out = nn.Linear(embedding_dim, embedding_dim, bias=False)
+        self.directed_score_mixer = None
+        if use_directed_score_mixer:
+            with torch.random.fork_rng(devices=[]):
+                self.directed_score_mixer = DirectedContentScoreMixer(n_heads, directed_score_hidden)
 
-    def forward(self, query, key, value, mask=None, attn_bias=None):
+    def forward(self, query, key, value, mask=None, attn_bias=None,
+                directed_pair_features=None):
         # Split into multiple heads
         query_heads = self._make_heads(query)   # [H,B,Nq,D_head]
         key_heads   = self._make_heads(key)     # [H,B,Nk,D_head]
         value_heads = self._make_heads(value)   # [H,B,Nk,D_head]
+
+        if self.directed_score_mixer is not None:
+            if directed_pair_features is None:
+                raise ValueError('Directed score mixer requires directed_pair_features')
+            # Explicit scores are necessary for content/edge interactions. Keep
+            # logits and softmax in FP32 under AMP; value/output stay host dtype.
+            with torch.autocast(device_type=query.device.type, enabled=False):
+                scores = torch.matmul(query_heads.float(), key_heads.float().transpose(-2, -1))
+                scores = scores / math.sqrt(query_heads.size(-1))
+                scores = self.directed_score_mixer(scores, directed_pair_features)
+                if attn_bias is not None:
+                    bias = attn_bias.unsqueeze(0) if attn_bias.dim() == 3 else attn_bias.permute(1, 0, 2, 3)
+                    scores = scores + bias.float()
+                if mask is not None:
+                    scores = scores.masked_fill(mask[None, :, None, :].bool(), float('-inf'))
+                weights = scores.softmax(-1)
+            out_heads = torch.matmul(weights.to(value_heads.dtype), value_heads)
+            return self.project_out(self._unmake_heads(out_heads))
 
         if self.use_sdpa:
             # Only the encoder uses standard scaled-dot-product attention.
@@ -226,14 +251,19 @@ class MultiHeadAttentionProj(nn.Module):
         mask: [B, Nk] (bool)
         attn_bias: Optional attention bias, e.g. [B, Nq, Nk]
     """
-    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False):
+    def __init__(self, embedding_dim, n_heads=8, use_sdpa=False,
+                 use_directed_score_mixer=False, directed_score_hidden=8):
         super().__init__()
         self.queryEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.keyEncoder   = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.valueEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.MHA = MultiHeadAttentionEncoder(embedding_dim, n_heads, use_sdpa=use_sdpa)
+        self.MHA = MultiHeadAttentionEncoder(
+            embedding_dim, n_heads, use_sdpa=use_sdpa,
+            use_directed_score_mixer=use_directed_score_mixer,
+            directed_score_hidden=directed_score_hidden,
+        )
 
-    def forward(self, q, h=None, mask=None, attn_bias=None):
+    def forward(self, q, h=None, mask=None, attn_bias=None, directed_pair_features=None):
         if h is None:
             h = q  # self-attention case
 
@@ -243,5 +273,6 @@ class MultiHeadAttentionProj(nn.Module):
         value = self.valueEncoder(h)
 
         # Multi-head attention with optional bias
-        out = self.MHA(query, key, value, mask=mask, attn_bias=attn_bias)
+        out = self.MHA(query, key, value, mask=mask, attn_bias=attn_bias,
+                       directed_pair_features=directed_pair_features)
         return out

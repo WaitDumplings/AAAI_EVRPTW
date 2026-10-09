@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager, nullcontext
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import itertools
 import json
 import math
@@ -57,6 +57,7 @@ from .model_integration import (configure as configure_model_integration,
                                 load_checkpoint_profile as load_model_integration_profile,
                                 signature as model_integration_signature)
 from .training_schedule import apply_epoch_schedule
+from scripts.ppo_warmup import PPOWarmupSchedule, PHASE_FIELDS
 from .ppo_protocol import (reduction_mode, chunk_weight as ppo_chunk_weight,
                            reduce_step_means, fresh_policy_kl, rollout_quality_diagnostics,
                            protocol_signature, validate_protocol)
@@ -216,6 +217,7 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "seed": int(seed),
             "config": cfg,
             "ppo_protocol_signature": protocol_signature(cfg),
+            "training_phase": PPOWarmupSchedule(cfg).checkpoint_metadata(epoch),
             "model_state_dict": inference_model_state(agent),
             **input_checkpoint_metadata(agent, cfg),
             **model_integration_checkpoint_metadata(agent, cfg),
@@ -1651,7 +1653,12 @@ def _evaluate_fixed_dataset_impl(agent: Agent, cfg: dict[str, Any], seed: int, e
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_cvrp_route_validation"
                 elif problem_type == "vrptw":
-                    row["route_validation"] = _validate_vrptw_eval_route(instance, row, prefer_explicit_edge_matrices=bool(cfg.get('env', {}).get('prefer_explicit_edge_matrices', False)))
+                    # Scoring may use authoritative edge seconds independently
+                    # of the policy's historical training/decode physics.
+                    row["route_validation"] = _validate_vrptw_eval_route(
+                        instance, row, prefer_explicit_edge_matrices=bool(eval_cfg.get(
+                            'prefer_explicit_edge_matrices', cfg.get('env', {}).get('prefer_explicit_edge_matrices', False))),
+                    )
                     row["feasible"] = bool(row["feasible"] and row["route_validation"]["valid"])
                     row["feasibility_source"] = "environment_success_and_independent_vrptw_route_validation"
                 elif problem_type == "evrptw" and cfg.get("env", {}).get("charging_mode", "fixed_full") == "fixed_full":
@@ -4349,6 +4356,7 @@ def train_from_config(
     run_session_start = time.perf_counter()
     run_session_id = f"{os.getpid()}-{time.time_ns()}"
     cfg = deep_update(cfg, overrides or {})
+    ppo_warmup = PPOWarmupSchedule(cfg)
     _apply_solution_level_aliases(cfg)
     model_integration_signature(cfg)
     input_normalization_signature(cfg)  # Fail before creating devices, datasets or optimizers.
@@ -4490,6 +4498,11 @@ def train_from_config(
             use_physical_input_context=bool(model_cfg.get("use_physical_input_context", False)),
             physical_input_context_hidden_dim=int(model_cfg.get("physical_input_context_hidden_dim", 32)),
             use_typed_static_fusion=bool(model_cfg.get("use_typed_static_fusion", False)),
+            use_resource_isolation=bool(model_cfg.get("use_resource_isolation", False)),
+            use_directed_road_profile=bool(model_cfg.get("use_directed_road_profile", False)),
+            use_directed_score_mixer=bool(model_cfg.get("use_directed_score_mixer", False)),
+            directed_profile_hidden_dim=int(model_cfg.get("directed_profile_hidden_dim", 32)),
+            directed_score_hidden=int(model_cfg.get("directed_score_hidden", 8)),
             use_edge_relation_encoder=bool(model_cfg.get("use_edge_relation_encoder", False)),
             edge_relation_dim=int(model_cfg.get("edge_relation_dim", 16)),
             use_joint_graph_encoder=bool(model_cfg.get("use_joint_graph_encoder", False)),
@@ -5143,6 +5156,7 @@ def train_from_config(
                          'group_cost_std_km_mean', 'near_zero_cost_group_fraction',
                          'sample_best10_to_bestK_gain_km', 'first_action_unique_fraction',
                          'rollout_trajectory_feasible_fraction'])
+    train_fields.extend(PHASE_FIELDS)
     train_fields.extend(DISTRIBUTED_TRAIN_FIELDS)
     train_fields.extend(["run_elapsed_seconds", "run_session_id", "run_elapsed_scope", "global_rollout_samples_seen", "sample_draw_scope"])
     train_fields.extend(["global_unique_instances_per_rollout", "global_duplicate_instances_per_rollout", "global_instance_ids_observed", "global_instance_ids_missing"])
@@ -5214,7 +5228,7 @@ def train_from_config(
             f"use_decomposed_critic={use_decomposed_critic} "
             f"advantage_mode={advantage_mode_name} "
             f"mixed_precision={amp_enabled} "
-            f"offline_method={offline_method} use_gae={use_gae} gae_lambda={gae_lambda} "
+            f"offline_method={offline_method} ppo_warmup_epochs={ppo_warmup.epochs} use_gae={use_gae} gae_lambda={gae_lambda} "
             f"use_route_segmented_gae={use_route_segmented_gae} "
             f"use_oracle_ordering_hint={use_oracle_ordering_hint} "
             f"use_priority_sampler={use_priority_sampler} "
@@ -5285,6 +5299,11 @@ def train_from_config(
             )
         distributed.barrier()
         for epoch in range(resume_start_epoch, epochs + 1):
+            phase_info = ppo_warmup.fields(epoch)
+            in_ppo_warmup = ppo_warmup.warming(epoch)
+            offline_method = phase_info['effective_offline_method']
+            if ppo_warmup.epochs and epoch in (resume_start_epoch, ppo_warmup.epochs + 1):
+                print('[TrainingPhase] ' + json.dumps(dict(epoch=epoch, **phase_info), sort_keys=True), flush=True)
             epoch_start = time.perf_counter()
             distributed.reset_epoch()
             epoch_schedule = apply_epoch_schedule(cfg, optimizer, epoch)
@@ -5544,14 +5563,10 @@ def train_from_config(
                             policy_best_objectives[instance_id] = min(
                                 policy_best_objectives.get(instance_id, float('inf')), verified_best)
                 else:
-                    advantages, adv_info = _apply_auxiliary_advantages(
-                        advantages,
-                        batch,
-                        cfg,
-                        envs,
-                        expert_buffer,
-                        device,
-                    )
+                    if not in_ppo_warmup:
+                        advantages, adv_info = _apply_auxiliary_advantages(
+                            advantages, batch, cfg, envs, expert_buffer, device,
+                        )
                     if use_decomposed_critic:
                         actor_mean, actor_std = _stats(advantages, batch.valid)
                         decomposed_info["adv_actor_mean"] = actor_mean
@@ -5695,6 +5710,8 @@ def train_from_config(
                 sl_route_counts: list[float] = []
                 sl_minibatches_per_ppo_epoch = int(offline_cfg.get("sl_minibatches_per_ppo_epoch", 0) or 0)
                 notclose_coef = float(offline_cfg.get("notclose_coef", offline_cfg.get("premature_close_coef", 0.0)) or 0.0)
+                if in_ppo_warmup:
+                    notclose_coef = 0.0
                 notclose_losses: list[float] = []
                 notclose_points: list[float] = []
                 notclose_candidate_points: list[float] = []
@@ -5702,6 +5719,8 @@ def train_from_config(
                 notclose_depot_action_ratios: list[float] = []
                 notclose_avg_route_sizes: list[float] = []
                 member_coef = float(offline_cfg.get("member_coef", offline_cfg.get("onpolicy_member_coef", 0.0)) or 0.0)
+                if in_ppo_warmup:
+                    member_coef = 0.0
                 member_targets = (
                     _prepare_onpolicy_member_targets(batch, envs, expert_buffer, cfg)
                     if member_coef > 0.0 and expert_buffer is not None
@@ -5712,6 +5731,8 @@ def train_from_config(
                 member_candidate_points: list[float] = []
                 member_active_ratios: list[float] = []
                 anchor_coef = float(offline_cfg.get("anchor_coef", offline_cfg.get("onpolicy_anchor_coef", 0.0)) or 0.0)
+                if in_ppo_warmup:
+                    anchor_coef = 0.0
                 anchor_targets = (
                     _prepare_onpolicy_anchor_targets(batch, envs, expert_buffer, cfg)
                     if anchor_coef > 0.0 and expert_buffer is not None
@@ -6367,6 +6388,8 @@ def train_from_config(
                 checkpoint_interval=checkpoint_interval,
                 latest_checkpoint_interval=latest_checkpoint_interval,
             )
+            if ppo_warmup.epochs and epoch == ppo_warmup.epochs:
+                checkpoint_plan = replace(checkpoint_plan, archive=True)
             should_eval = checkpoint_plan.evaluate
             should_checkpoint = checkpoint_plan.archive
             train_wall_time_s = time.perf_counter() - epoch_start
@@ -6477,6 +6500,7 @@ def train_from_config(
                     "samples_seen": pool.sample_count + sample_count_offset,
                     **distributed_metrics,
                     "train_mode": offline_method,
+                    **phase_info,
                     **protocol_info, **rollout_quality_info,
                     "reward_mean": reward_mean,
                     "policy_loss": float(loss_arr[:, 0].mean()),
@@ -6547,6 +6571,7 @@ def train_from_config(
             append_monitor_row(monitor_path, {
                 "epoch": epoch, "rank": distributed.rank, "world_size": distributed.world_size,
                 "sampling_seed": sampling_seed, "diagnostics_sampled": monitor_sampled,
+                **phase_info,
                 "sampled_instance_ids": sampled_instance_ids,
                 "parameter_sync": epoch_parameter_sync,
                 "gradient_diagnostic_scope": "first_update_first_chunk_common_action_query_head for PPO/SL; expert/replay compare with all-chunk PPO gradient on the first sampled minibatch, after loss coefficients and before global gradient clipping; local rank, common action_query_proj head only",

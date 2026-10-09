@@ -57,6 +57,8 @@ class MultiHeadAttentionLayer(nn.Module):
         edge_relation_dim: int = 16,
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
+        use_directed_score_mixer: bool = False,
+        directed_score_hidden: int = 8,
     ):
         super().__init__()
 
@@ -64,6 +66,8 @@ class MultiHeadAttentionLayer(nn.Module):
             embedding_dim=embedding_dim,
             n_heads=n_heads,
             use_sdpa=use_sdpa,
+            use_directed_score_mixer=use_directed_score_mixer,
+            directed_score_hidden=directed_score_hidden,
         )
 
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -74,6 +78,8 @@ class MultiHeadAttentionLayer(nn.Module):
             hidden_dim=feed_forward_hidden,
         )
 
+        if use_directed_score_mixer and use_edge_value_messages:
+            raise ValueError('Directed score mixing and legacy edge value messages cannot be combined')
         self.edge_relation_adapter = None
         if use_edge_relation_encoder:
             # Preserve initialization of every preexisting host parameter.
@@ -83,7 +89,8 @@ class MultiHeadAttentionLayer(nn.Module):
                     use_values=use_edge_value_messages, use_updates=use_edge_state_updates,
                 )
 
-    def forward(self, x, attn_bias=None, edge_relations=None):
+    def forward(self, x, attn_bias=None, edge_relations=None,
+                directed_pair_features=None, node_mask=None):
         # Attention block (Pre-LN); old path executes unchanged when disabled.
         h = self.norm1(x)
         effective_bias = attn_bias
@@ -95,7 +102,8 @@ class MultiHeadAttentionLayer(nn.Module):
             if effective_bias is not None and effective_bias.dim() == 3:
                 effective_bias = effective_bias.unsqueeze(1)
             effective_bias = relation_bias if effective_bias is None else effective_bias + relation_bias
-        attention_output = self.attn(h, mask=None, attn_bias=effective_bias)
+        attention_output = self.attn(h, mask=node_mask, attn_bias=effective_bias,
+                                     directed_pair_features=directed_pair_features)
         if adapter is not None and adapter.value_out is not None:
             attention_output = attention_output + adapter.value_message(edge_relations, h, self.attn, effective_bias)
         x = x + attention_output
@@ -127,10 +135,13 @@ class GraphAttentionEncoder(nn.Module):
         edge_relation_dim: int = 16,
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
+        use_directed_score_mixer: bool = False,
+        directed_score_hidden: int = 8,
     ):
         super().__init__()
 
         self.embed_dim = embed_dim
+        self.use_directed_score_mixer = bool(use_directed_score_mixer)
 
         self.graph_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         nn.init.xavier_uniform_(self.graph_token)
@@ -146,6 +157,8 @@ class GraphAttentionEncoder(nn.Module):
                     edge_relation_dim=edge_relation_dim,
                     use_edge_value_messages=use_edge_value_messages,
                     use_edge_state_updates=use_edge_state_updates,
+                    use_directed_score_mixer=use_directed_score_mixer,
+                    directed_score_hidden=directed_score_hidden,
                 )
                 for _ in range(n_layers)
             ]
@@ -195,19 +208,29 @@ class GraphAttentionEncoder(nn.Module):
         return x, attn_bias
 
     def forward(self, x, mask=None, attn_bias=None, graph_context=None,
-                edge_relations=None, return_edge_relations=False):
+                edge_relations=None, return_edge_relations=False,
+                directed_pair_features=None):
         """
         x: [B, N, D]
-        mask: ignored by design in current graph-token-only setup
+        mask: legacy path ignores; directed mixer interprets True as padded node
         attn_bias: [B, N, N] or [B, H, N, N]
         """
+        node_mask = None
+        if self.use_directed_score_mixer and mask is not None:
+            if mask.shape != x.shape[:2]:
+                raise ValueError('mask must have shape [B,N] with True for padding')
+            x = torch.where(mask[..., None].bool(), 0., x)
+            node_mask = torch.nn.functional.pad(mask.bool(), (1, 0), value=False)
         x, attn_bias = self._prepend_graph_token(x, attn_bias=attn_bias, graph_context=graph_context)
         for layer in self.layers:
-            x = layer(x, attn_bias=attn_bias, edge_relations=edge_relations)
+            x = layer(x, attn_bias=attn_bias, edge_relations=edge_relations,
+                      directed_pair_features=directed_pair_features, node_mask=node_mask)
             if layer.edge_relation_adapter is not None:
                 edge_relations = layer.edge_relation_adapter.update_relations(edge_relations, x)
 
         x = self.final_norm(x)   # [B, N+1, D]
+        if node_mask is not None:
+            x = torch.where(node_mask[..., None], 0., x)
         return (x, edge_relations) if return_edge_relations else x
 
     @staticmethod

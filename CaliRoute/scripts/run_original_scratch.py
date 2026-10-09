@@ -34,6 +34,10 @@ _runtime_spec = importlib.util.spec_from_file_location(
     '_original_external_distributed', Path(__file__).with_name('original_distributed.py'))
 _distributed = importlib.util.module_from_spec(_runtime_spec)
 _runtime_spec.loader.exec_module(_distributed)
+_warmup_spec = importlib.util.spec_from_file_location(
+    '_original_ppo_warmup', Path(__file__).with_name('ppo_warmup.py'))
+_warmup = importlib.util.module_from_spec(_warmup_spec)
+_warmup_spec.loader.exec_module(_warmup)
 
 PROJECT_PREFIXES = ('offline2online', 'EVRPTW_Benchmark', 'evrptw_core',
                     'evrptw_hierarchy', 'caliroute', 'ablation')
@@ -172,9 +176,11 @@ def run_original_scratch(source_root, config_path, seed, device):
     if not isinstance(cfg, dict):
         raise ValueError('Original baseline configuration must be a mapping')
     assert_scratch_config(cfg)
+    warmup_schedule = _warmup.PPOWarmupSchedule(cfg)
     trainer, origins = _import_original(source_root)
     runtime = _distributed.OriginalDistributedRuntime(cfg, seed, device, config_path.parent)
     context, device = runtime.context, runtime.device
+    warmup_runtime = _warmup.OriginalPPOWarmupRuntime(warmup_schedule, is_primary=context.is_primary)
     fixed_seed = int(cfg.get('evaluation', {}).get('eval_seed', 17_000_000 + int(seed)))
     if fixed_seed < 0:
         raise ValueError('eval_seed must be nonnegative')
@@ -198,8 +204,12 @@ def run_original_scratch(source_root, config_path, seed, device):
         'trajectory_distribution_metrics': 'original environment-only feasibility; independent validation applies to the selected minimum route',
         'monitoring_capabilities': {'original_train_csv': True, 'global_rank_metrics': context.enabled,
                                    'post_update_kl': False, 'plugin_gradient_diagnostics': False},
-        'training_model_optimizer_loss_environment': 'unchanged archived functions; external gradient synchronization and constant-zero auxiliary backward guard when distributed',
+        'training_model_optimizer_loss_environment': 'unchanged archived model/loss/environment implementation; external gradient synchronization and constant-zero auxiliary backward guard when distributed; optional explicit PPO warmup phase gates',
         'checkpoint_selection': 'unchanged original trainer; epoch zero is not eligible',
+        'ppo_warmup_schedule': dict(epochs=warmup_schedule.epochs, configured_method=warmup_schedule.method,
+                                   helper_sha256=hashlib.sha256(Path(_warmup.__file__).read_bytes()).hexdigest(),
+                                   transition='same model and optimizer; no checkpoint reload/reset',
+                                   adapter='external epoch predicate/auxiliary gates; archived source files unchanged'),
         'state': 'starting', 'completed_eval_epochs': [],
     }
     _write_metadata(metadata_path, metadata)
@@ -324,6 +334,8 @@ def run_original_scratch(source_root, config_path, seed, device):
         def __init__(self, handle, fieldnames, *args, **kwargs):
             fields = list(fieldnames)
             self._is_train = 'policy_loss' in fields and 'reward_mean' in fields
+            if self._is_train and warmup_schedule.epochs:
+                fields.extend(key for key in _warmup.PHASE_FIELDS if key not in fields)
             if self._is_train and context.enabled:
                 fields.extend(key for key in _distributed.EXTRA_TRAIN_FIELDS if key not in fields)
             self._is_eval = ('eval_status' in fields and 'eval_avg_objective_distance_km' in fields
@@ -341,6 +353,8 @@ def run_original_scratch(source_root, config_path, seed, device):
             if self._is_train and context.enabled and isinstance(row.get('epoch'), (int, np.integer)):
                 row = dict(row)
                 row.update(runtime.finish_epoch(row))
+            if self._is_train and warmup_schedule.epochs and isinstance(row.get('epoch'), (int, np.integer)):
+                row = warmup_runtime.finish_epoch(trainer, row, seed)
             return super().writerow(row)
 
         def writeheader(self):
@@ -360,6 +374,7 @@ def run_original_scratch(source_root, config_path, seed, device):
         raise RuntimeError('Original scratch adapter forbids every initialization/resume/reference checkpoint load')
 
     runtime.install(trainer)
+    warmup_runtime.install(trainer)
     trainer.Agent = CapturedAgent
     trainer._configure_dataset_reward_scale = configure_scale
     trainer.evaluate_fixed_dataset = evaluate
@@ -399,6 +414,7 @@ def run_original_scratch(source_root, config_path, seed, device):
         csv.DictWriter = original_writer
         for name, function in load_functions.items():
             setattr(trainer, name, function)
+        warmup_runtime.uninstall(trainer)
         runtime.uninstall(trainer)
 
 
