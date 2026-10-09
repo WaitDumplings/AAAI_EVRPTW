@@ -148,7 +148,7 @@ def main():
     parser = shared.make_parser()
     parser.description = __doc__
     parser.set_defaults(task='vrptw', variant='optimized', encoder_variant='graph',
-                        seed=3011, batch_per_gpu=None, chunk_size=24, expert_chunk_size=64)
+                        seed=3011, batch_per_gpu=None, chunk_size=56, expert_chunk_size=64)
     args = parser.parse_args()
     if args.supervise:
         shared.supervise(args.supervise.resolve())
