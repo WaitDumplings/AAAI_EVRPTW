@@ -86,3 +86,20 @@ def test_preflight_diagnostics_never_appear_as_formal_training(tmp_path, capsys)
     output = render(tmp_path, capsys, data)
     assert 'running/preflight' in output
     assert 'PPO update diagnostics' not in output
+
+
+def test_separate_dual_runs_only_show_common_completed_epoch(tmp_path, capsys):
+    protocol = dict(task='vrptw100', seed=3011, epochs=1500, global_batch=64,
+        n_traj=50, ppo_update_epochs=5, eval_interval=50, eval_n_traj=50, validation_instances=1000)
+    row = {watch.DISTANCE: 230, 'eval_feasible_rate': 1, 'eval_num_instances': 1000}
+    first = dict(protocol=protocol, arms={'original': {}}, matched_validation_epochs={
+        '50': {'original': row}, '100': {'original': row}})
+    second = dict(protocol=protocol, arms={'optimized': {}}, matched_validation_epochs={
+        '50': {'optimized': {**row, watch.DISTANCE: 225}}})
+    output = render(tmp_path, capsys, watch.combined_snapshot(first, second))
+    assert 'Latest common complete validation: epoch 50' in output
+    assert '230.00' in output and '225.00' in output
+    assert 'epoch 100 (km' not in output
+    second['protocol'] = {**protocol, 'task': 'evrptw100'}
+    with pytest.raises(ValueError, match='protocol task'):
+        watch.combined_snapshot(first, second)
