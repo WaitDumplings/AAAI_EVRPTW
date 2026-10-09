@@ -10,6 +10,72 @@ PPO backbone -> SL-PPO
 `SL-PPO` is the proposed method. `PPO`, `DAPG`, and `AWBC` are comparison
 methods that share the same backbone and environment interface.
 
+## Joint node-edge graph encoder experiment (VRPTW100 / EVRPTW100)
+
+`--encoder-variant graph` adds a new graph encoder to the existing **explore**
+training bundle. It keeps physical input normalization, reward, PPO5, AGDA and
+independent search settings fixed. It is an architecture experiment, with no
+claim of superior accuracy or speed before paired training results are available.
+
+The encoder adds directed incoming/outgoing road summaries to the typed node
+embedding. Every layer uses compact edge states for per-head attention bias,
+post-softmax gates and edge-value messages, then updates those edge states from
+separate source/target projections, reverse edges, node interactions and global
+context. Final edge states feed the existing resource decoder. Both tasks use
+256-dimensional nodes, two layers and 32-dimensional edge states by default.
+
+The design draws on [UniteFormer (NeurIPS 2025)](https://papers.nips.cc/paper_files/paper/2025/hash/86ddf3543ad437d71c37e510f41b1a53-Abstract-Conference.html)
+for joint routing node/edge encoding, [GRIT (ICML 2023)](https://proceedings.mlr.press/v202/ma23c.html)
+for evolving pair representations and edge-valued messages, and
+[EGT (KDD 2022)](https://arxiv.org/abs/2108.03348) for edge channels and gates.
+This implementation combines selected mechanisms; it does not reproduce these
+papers, add RRWP/degree encodings, or inherit their benchmark/theoretical claims.
+A complete terminal-to-terminal road-cost matrix is not the original street graph.
+
+Physical D/T/E remain authoritative and directed: there is no Euclidean fallback,
+no customer-count scaling, and no averaging of forward and reverse roads. Latent
+LayerNorm never changes environmental distance/time/energy units. Structural
+attention may exchange information between currently infeasible moves; environment
+and decoder action masks still enforce feasibility. Invalid costs are excluded
+before learned arithmetic; inactive battery/time fields do not affect encoding.
+
+Edge memory is `O(B*N*N*32)`, shared across trajectories. Attention still costs
+`O(B*heads*N*N)`; the implementation explicitly forms attention weights and cannot
+use the old encoder's fused SDPA path. Edge values aggregate in the small edge
+space before node projection, without an `N*N*node_width` value tensor. Zero
+dropout and no batch running statistics preserve cached PPO replay. Diagnostics
+include graph gradient/update norms, edge gates, edge-update/value magnitudes,
+directionality and attention entropy. Old checkpoints cannot initialize this
+architecture; use scratch, or a checkpoint with the identical graph profile.
+
+From `CaliRoute/`, choose a task for the two A6000 cards:
+
+```bash
+bash scripts/run_graph_rdi100_dual.sh vrptw --gpus 0,1 --seed 3011 --epochs 1500
+# Or run EVRPTW100 on the pair (sequentially if both use the same GPUs):
+bash scripts/run_graph_rdi100_dual.sh evrptw --gpus 0,1 --seed 3011 --epochs 1500
+# Inspect configs without reserving a GPU or starting training:
+bash scripts/run_graph_rdi100_dual.sh evrptw --prepare-only
+```
+
+Defaults are per-GPU batch32, n-traj50, PPO5, LR1e-4, chunk8, expert chunk64,
+validation1000/best-of-50 every50 epochs. These are **conservative launch values**,
+not tuned A6000 allocations. The remote agent can set `--batch-per-gpu`,
+`--chunk-size`, and `--expert-chunk-size`. Match global batch, seed, trajectories,
+passes and validation protocol with the current-encoder control; time chunks may
+differ to fit memory. For that control use the same shell with
+`--encoder-variant current`. Run names and manifests distinguish the variants.
+Each background job owns both GPUs, performs a full-allocation two-epoch preflight
+(with search every preflight epoch), then discards its state and starts formal
+training from scratch. Passing both task commands queues the second until both
+cards are idle. No existing local training job is stopped.
+
+Local checks include unit/integration contracts, full-size real Cus100 input
+forward/backward and actual two-rank CPU/Gloo training for both tasks, including
+20 optimizer updates/rank, expert SL, exploration, normalization, independent
+evaluation and checkpoint round trips. CUDA/NCCL and A6000 memory/throughput
+verification are performed by the on-server preflight, not inferred from CPU tests.
+
 ## EVRPTW100 dual-GPU scratch comparison
 
 Use one pair of GPUs for the original `f388343` SL-PPO model/loss with an external

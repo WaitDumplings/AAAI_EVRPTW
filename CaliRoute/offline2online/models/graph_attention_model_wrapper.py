@@ -13,6 +13,7 @@ from .nets.graph_model.routing_adapters import DirectedEdgeBias
 from caliroute.plugins.rdi import RoadDistanceInjection
 from caliroute.plugins.input_encoding import PhysicalInputContextAdapter
 from caliroute.plugins.physical_static import TypedStaticFusion, DirectedPhysicalRelationEncoder
+from caliroute.plugins.joint_graph import JointGraphEncoder
 
 
 class Problem:
@@ -217,13 +218,16 @@ class Backbone(nn.Module):
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
         use_resource_decoder: bool = False,
+        use_joint_graph_encoder: bool = False,
+        joint_graph_edge_dim: int = 32,
+        joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
         self.device = device
         self.problem = Problem(problem_name)
-        if (use_typed_static_fusion or use_edge_relation_encoder or use_resource_decoder) and not use_physical_input_context:
+        if (use_typed_static_fusion or use_edge_relation_encoder or use_resource_decoder or use_joint_graph_encoder) and not use_physical_input_context:
             raise ValueError('Stage-2 integration requires use_physical_input_context=True')
         if (use_edge_value_messages or use_edge_state_updates) and not use_edge_relation_encoder:
             raise ValueError('Edge value messages/updates require use_edge_relation_encoder=True')
@@ -244,20 +248,34 @@ class Backbone(nn.Module):
             'agda_physical_candidate_features': bool(agda_physical_candidate_features),
             'agda_smooth_distance_features': bool(agda_smooth_distance_features),
         }
+        if use_joint_graph_encoder and (use_edge_relation_encoder or use_edge_value_messages or use_edge_state_updates):
+            raise ValueError('Joint graph encoder replaces the old edge relation encoder and its value/update switches')
+        if use_joint_graph_encoder:
+            self.model_integration_settings.update(use_joint_graph_encoder=True,
+                joint_graph_edge_dim=joint_graph_edge_dim, joint_graph_dropout=joint_graph_dropout)
+        self.use_joint_graph_encoder = bool(use_joint_graph_encoder)
+        effective_edge_dim = joint_graph_edge_dim if use_joint_graph_encoder else edge_relation_dim
         self.use_encoder_distance_bias = bool(use_encoder_distance_bias)
         self.supports_static_rollout_cache = bool(use_static_rollout_cache)
         self.cache_static_observations = bool(cache_static_observations)
         self.embedding = AutoEmbedding(self.problem.NAME, {"embedding_dim": embedding_dim})
-        self.encoder = GraphAttentionEncoder(
-            n_heads=n_heads,
-            embed_dim=embedding_dim,
-            n_layers=n_encode_layers,
-            use_sdpa=use_encoder_sdpa,
-            use_edge_relation_encoder=use_edge_relation_encoder,
-            edge_relation_dim=edge_relation_dim,
-            use_edge_value_messages=use_edge_value_messages,
-            use_edge_state_updates=use_edge_state_updates,
-        )
+        self.joint_graph_encoder = None
+        if use_joint_graph_encoder:
+            self.encoder = None
+            self.joint_graph_encoder = JointGraphEncoder(
+                embedding_dim=embedding_dim, edge_dim=joint_graph_edge_dim,
+                n_heads=n_heads, n_layers=n_encode_layers, dropout=joint_graph_dropout)
+        else:
+            self.encoder = GraphAttentionEncoder(
+                n_heads=n_heads,
+                embed_dim=embedding_dim,
+                n_layers=n_encode_layers,
+                use_sdpa=use_encoder_sdpa,
+                use_edge_relation_encoder=use_edge_relation_encoder,
+                edge_relation_dim=edge_relation_dim,
+                use_edge_value_messages=use_edge_value_messages,
+                use_edge_state_updates=use_edge_state_updates,
+            )
         self.decoder = Decoder(
             embedding_dim=embedding_dim,
             step_context_dim=embedding_dim + 5,
@@ -279,8 +297,8 @@ class Backbone(nn.Module):
             agda_smooth_distance_features=agda_smooth_distance_features,
             use_resource_decoder=use_resource_decoder,
             decoder_observation_mode=decoder_observation_mode,
-            use_edge_relation_encoder=use_edge_relation_encoder,
-            edge_relation_dim=edge_relation_dim,
+            use_edge_relation_encoder=use_edge_relation_encoder or use_joint_graph_encoder,
+            edge_relation_dim=effective_edge_dim,
         )
 
         self.dist_bias_scale = nn.Parameter(torch.tensor(1.0))
@@ -313,9 +331,9 @@ class Backbone(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.static_fusion = TypedStaticFusion(embedding_dim)
         self.edge_relation_encoder = None
-        if use_edge_relation_encoder:
+        if use_edge_relation_encoder or use_joint_graph_encoder:
             with torch.random.fork_rng(devices=[]):
-                self.edge_relation_encoder = DirectedPhysicalRelationEncoder(edge_relation_dim)
+                self.edge_relation_encoder = DirectedPhysicalRelationEncoder(effective_edge_dim)
 
     def _build_node_type(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
@@ -386,6 +404,46 @@ class Backbone(nn.Module):
             unreachable = unreachable.unsqueeze(1)
         return attn_bias.masked_fill(unreachable, -1e9)
 
+    def _build_joint_attn_bias(self, state, valid):
+        """Road prior for representation learning, separate from action feasibility.
+
+        Graph inputs must supply authoritative road D/T/E. Invalid or inactive
+        costs are selected out before learned arithmetic; no Euclidean fallback
+        or battery-capacity hard mask is used for structural communication.
+        """
+        states = dict(state.states)
+        graph = states['graph_input_context']
+        distance = states['edge_distance'].float()
+        if distance.ndim == 2:
+            distance = distance.unsqueeze(0)
+        distance = torch.where(valid, distance, 0.)
+        states['edge_distance'] = distance
+        for key, flag in (('edge_time', 8), ('edge_energy', 6)):
+            value = states[key].float()
+            if value.ndim == 2:
+                value = value.unsqueeze(0)
+            states[key] = torch.where(valid & (graph[:, None, None, flag] > .5), value, 0.)
+        for key in ('time_window', 'service_time'):
+            value = states[key]
+            active = (graph[:, 8] > .5).reshape(-1, *([1] * (value.ndim - 1)))
+            states[key] = torch.where(active, value, 0.)
+        capacity = states['battery_capacity']
+        active = (graph[:, 6] > .5).reshape(-1, *([1] * (capacity.ndim - 1)))
+        states['battery_capacity'] = torch.where(active, capacity, torch.ones_like(capacity))
+        node_type = self._build_node_type(state.observations)
+        pair_id = node_type.unsqueeze(2) * 3 + node_type.unsqueeze(1)
+        bias = self.type_pair_bias(pair_id).squeeze(-1)
+        if self.use_encoder_distance_bias:
+            bias = bias - self.dist_bias_scale * distance
+        if self.residual_edge_bias is not None:
+            bias = bias.unsqueeze(1) + self.residual_edge_bias(states)
+        if self.rdi_adapter is not None:
+            bias = bias.unsqueeze(1) + self.rdi_adapter(distance=distance,
+                travel_time=states['edge_time'], energy=states['edge_energy'],
+                time_windows=states['time_window'], service_time=states['service_time'],
+                battery_capacity=states['battery_capacity'], base_bias=bias)
+        return bias
+
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
         return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
 
@@ -420,14 +478,20 @@ class Backbone(nn.Module):
             edge_relations, edge_valid = self.edge_relation_encoder(
                 state.states, self._build_node_type(state.observations)
             )
-        encoded_nodes, edge_relations = self.encoder(
-            node_embeddings,
-            mask=None,
-            attn_bias=self._build_attn_bias(state),
-            graph_context=graph_context,
-            edge_relations=edge_relations,
-            return_edge_relations=True,
-        )
+        if self.joint_graph_encoder is not None:
+            encoded_nodes, edge_relations = self.joint_graph_encoder(
+                node_embeddings, edge_relations, edge_valid, state.states['graph_input_context'],
+                node_mask=node_mask, graph_context=graph_context,
+                attn_bias=self._build_joint_attn_bias(state, edge_valid))
+        else:
+            encoded_nodes, edge_relations = self.encoder(
+                node_embeddings,
+                mask=None,
+                attn_bias=self._build_attn_bias(state),
+                graph_context=graph_context,
+                edge_relations=edge_relations,
+                return_edge_relations=True,
+            )
         cached = self.decoder._precompute(encoded_nodes, mask=node_mask)
         if edge_relations is not None:
             auxiliary = dict(cached[5]) if len(cached) > 5 else {}
@@ -534,6 +598,9 @@ class Agent(nn.Module):
         use_edge_value_messages: bool = False,
         use_edge_state_updates: bool = False,
         use_resource_decoder: bool = False,
+        use_joint_graph_encoder: bool = False,
+        joint_graph_edge_dim: int = 32,
+        joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
     ):
         super().__init__()
@@ -574,6 +641,9 @@ class Agent(nn.Module):
             use_edge_value_messages=use_edge_value_messages,
             use_edge_state_updates=use_edge_state_updates,
             use_resource_decoder=use_resource_decoder,
+            use_joint_graph_encoder=use_joint_graph_encoder,
+            joint_graph_edge_dim=joint_graph_edge_dim,
+            joint_graph_dropout=joint_graph_dropout,
             decoder_observation_mode=decoder_observation_mode,
         )
         self.actor = Actor()

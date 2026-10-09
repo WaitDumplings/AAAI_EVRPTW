@@ -40,6 +40,16 @@ def model(config):
     ({'decoder_observation_mode': 'dual'}, 'requires'),
     ({'use_edge_value_messages': True}, 'require'),
     ({'use_edge_state_updates': True}, 'require'),
+    ({'use_joint_graph_encoder': 'false'}, 'boolean'),
+    ({'joint_graph_edge_dim': 0}, 'positive integer'),
+    ({'joint_graph_edge_dim': True}, 'positive integer'),
+    ({'joint_graph_edge_dim': 16.5}, 'positive integer'),
+    ({'joint_graph_dropout': .1}, 'deterministic cached PPO'),
+    ({'joint_graph_dropout': float('nan')}, 'deterministic cached PPO'),
+    ({'joint_graph_dropout': True}, 'deterministic cached PPO'),
+    ({'use_joint_graph_encoder': True, 'use_edge_relation_encoder': True}, 'replaces'),
+    ({'use_joint_graph_encoder': True, 'use_edge_value_messages': True}, 'replaces'),
+    ({'use_joint_graph_encoder': True, 'use_edge_state_updates': True}, 'replaces'),
 ])
 def test_invalid_architecture_fails_early(changes, match):
     with pytest.raises(ValueError, match=match):
@@ -143,3 +153,117 @@ def test_changed_architecture_after_initialization_cannot_be_saved(tmp_path):
     changed['model']['decoder_observation_mode'] = 'feasible'
     with pytest.raises(ValueError, match='profile|changed'):
         trainer.save_checkpoint(tmp_path/'bad.pt', net, torch.optim.Adam(net.parameters()), changed, 1, 3009)
+
+
+def graph_cfg(**changes):
+    options = dict(use_joint_graph_encoder=True, joint_graph_edge_dim=32,
+                   joint_graph_dropout=0.0, use_resource_decoder=True,
+                   decoder_observation_mode='dual')
+    options.update(changes)
+    return cfg(**options)
+
+
+def test_joint_graph_requires_physical_inputs_and_records_effective_edge_width():
+    with pytest.raises(ValueError, match='physical input context'):
+        integration.signature({'model': {'use_joint_graph_encoder': True}})
+    profile = integration.signature(graph_cfg())
+    assert profile['use_joint_graph_encoder'] is True
+    assert profile['joint_graph_edge_dim'] == 32
+    assert profile['joint_graph_dropout'] == 0.0
+    assert integration.enabled(profile)
+
+
+def test_graph_disabled_retains_exact_pre_graph_v1_signature():
+    original = integration.signature(cfg(use_resource_decoder=True))
+    assert set(original) == {
+        'schema', 'use_typed_static_fusion', 'use_edge_relation_encoder',
+        'use_edge_value_messages', 'use_edge_state_updates', 'use_resource_decoder',
+        'agda_physical_candidate_features', 'agda_smooth_distance_features',
+        'edge_relation_dim', 'decoder_observation_mode',
+    }
+    explicit_disabled = cfg(use_resource_decoder=True, use_joint_graph_encoder=False,
+                            joint_graph_edge_dim=64, joint_graph_dropout=0.0)
+    assert integration.signature(explicit_disabled) == original
+    # Pre-feature stage-two checkpoints may omit the two AGDA booleans.
+    saved = {key: value for key, value in original.items() if key not in integration.FEATURE_FLAGS}
+    assert integration.checkpoint_profile({'config': explicit_disabled,
+                                          'model_integration_signature': saved}) == original
+
+
+@pytest.mark.parametrize('resume', [False, True])
+@pytest.mark.parametrize('source_graph,target_graph', [(False, True), (True, False)])
+def test_graph_architecture_migration_is_rejected_before_model_or_optimizer_mutation(
+        tmp_path, resume, source_graph, target_graph):
+    old_config = cfg(use_resource_decoder=True, decoder_observation_mode='dual')
+    source_config = graph_cfg() if source_graph else old_config
+    target_config = graph_cfg() if target_graph else old_config
+    source = model(source_config)
+    checkpoint = tmp_path/'architecture.pt'
+    trainer.save_checkpoint(checkpoint, source, torch.optim.Adam(source.parameters(), lr=.007),
+                            source_config, 1, 3011)
+    target = model(target_config)
+    before = copy.deepcopy(target.state_dict())
+    optimizer = torch.optim.Adam(target.parameters(), lr=.02)
+    with pytest.raises(ValueError, match='from scratch'):
+        if resume:
+            trainer._load_training_checkpoint(target, optimizer, checkpoint, 'cpu', strict=False)
+        else:
+            trainer._load_agent_checkpoint(target, checkpoint, 'cpu', strict=False)
+    assert optimizer.param_groups[0]['lr'] == .02
+    assert not hasattr(target, '_model_integration_initialization')
+    for name, value in before.items():
+        torch.testing.assert_close(target.state_dict()[name], value, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize('resume', [False, True])
+@pytest.mark.parametrize('change', [
+    {'joint_graph_edge_dim': 16}, {'decoder_observation_mode': 'feasible'},
+])
+def test_graph_signature_changes_are_rejected_even_for_weights_only(tmp_path, resume, change):
+    source_config = graph_cfg()
+    source = model(source_config)
+    checkpoint = tmp_path/'graph.pt'
+    trainer.save_checkpoint(checkpoint, source, torch.optim.Adam(source.parameters()),
+                            source_config, 1, 3011)
+    target_config = graph_cfg(**change)
+    target = model(target_config)
+    before = copy.deepcopy(target.state_dict())
+    with pytest.raises(ValueError, match='identical'):
+        if resume:
+            trainer._load_training_checkpoint(target, torch.optim.Adam(target.parameters()),
+                                              checkpoint, 'cpu', strict=False)
+        else:
+            trainer._load_agent_checkpoint(target, checkpoint, 'cpu', strict=False)
+    for name, value in before.items():
+        torch.testing.assert_close(target.state_dict()[name], value, atol=0, rtol=0)
+
+
+def test_matching_graph_checkpoints_roundtrip_weights_and_full_resume(tmp_path):
+    config = graph_cfg()
+    source = model(config)
+    checkpoint = tmp_path/'graph.pt'
+    trainer.save_checkpoint(checkpoint, source, torch.optim.Adam(source.parameters(), lr=.007),
+                            config, 2, 3011)
+    target = model(config)
+    info = trainer._load_agent_checkpoint(target, checkpoint, 'cpu', strict=True)
+    assert not info['model_integration']['migrated']
+    assert not info['missing_keys'] and not info['unexpected_keys']
+    optimizer = torch.optim.Adam(target.parameters(), lr=.02)
+    info = trainer._load_training_checkpoint(target, optimizer, checkpoint, 'cpu')
+    assert optimizer.param_groups[0]['lr'] == .007
+    assert info['model_integration']['load'] == 'full_resume'
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(target.state_dict()[name], value, atol=0, rtol=0)
+
+
+def test_joint_graph_metadata_required_and_dimension_tampering_rejected():
+    config = graph_cfg()
+    checkpoint = {'config': config, 'model_integration_signature': integration.signature(config)}
+    assert integration.checkpoint_profile(checkpoint) == integration.signature(config)
+    missing = {'config': config}
+    for require_metadata in (False, True):
+        with pytest.raises(ValueError, match='missing'):
+            integration.checkpoint_profile(missing, require_metadata=require_metadata)
+    checkpoint['config'] = graph_cfg(joint_graph_edge_dim=16)
+    with pytest.raises(ValueError, match='does not match'):
+        integration.checkpoint_profile(checkpoint)

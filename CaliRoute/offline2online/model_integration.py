@@ -3,15 +3,19 @@
 Weights-only initialization may add the explicitly supported zero-output modules.
 Full training resume must preserve their configuration, including parameter-free
 observation-mask semantics. Existing stage-one checkpoints remain compatible.
+The joint graph encoder is a separately initialized architecture, not a residual
+migration adapter: its checkpoints can only load into the same graph profile.
 """
 from __future__ import annotations
 
 import copy
+import math
 
 SCHEMA = 'physical_model_integration_v1'
 FLAGS = ('use_typed_static_fusion', 'use_edge_relation_encoder',
          'use_edge_value_messages', 'use_edge_state_updates', 'use_resource_decoder')
 FEATURE_FLAGS = ('agda_physical_candidate_features', 'agda_smooth_distance_features')
+JOINT_GRAPH_FLAG = 'use_joint_graph_encoder'
 
 
 def _canonical_model(model):
@@ -21,6 +25,24 @@ def _canonical_model(model):
         if not isinstance(value, bool):
             raise ValueError(f'{name} must be a boolean')
         result[name] = value
+    joint_graph = model.get(JOINT_GRAPH_FLAG, False)
+    if not isinstance(joint_graph, bool):
+        raise ValueError('use_joint_graph_encoder must be a boolean')
+    graph_dimension = model.get('joint_graph_edge_dim', 32)
+    if (isinstance(graph_dimension, bool) or not isinstance(graph_dimension, int)
+            or graph_dimension < 1):
+        raise ValueError('joint_graph_edge_dim must be a positive integer')
+    graph_dropout = model.get('joint_graph_dropout', 0.0)
+    if (isinstance(graph_dropout, bool) or not isinstance(graph_dropout, (int, float))
+            or not math.isfinite(graph_dropout) or graph_dropout != 0.0):
+        raise ValueError('joint_graph_dropout must be zero for deterministic cached PPO')
+    if joint_graph:
+        if any(result[name] for name in ('use_edge_relation_encoder', 'use_edge_value_messages',
+                                         'use_edge_state_updates')):
+            raise ValueError('use_joint_graph_encoder replaces the legacy edge relation encoder/messages/updates')
+        # Optional keys preserve all pre-graph v1 signatures when disabled.
+        result.update(use_joint_graph_encoder=True, joint_graph_edge_dim=graph_dimension,
+                      joint_graph_dropout=0.0)
     dimension = model.get('edge_relation_dim', 16)
     if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
         raise ValueError('edge_relation_dim must be a positive integer')
@@ -37,13 +59,13 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS))
+    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG))
 
 
 def signature(cfg):
     model = cfg.get('model', {}) or {}
     result = {'schema': SCHEMA, **_canonical_model(model)}
-    if any(result[name] for name in FLAGS):
+    if any(result[name] for name in FLAGS) or result.get(JOINT_GRAPH_FLAG, False):
         from .input_normalization import signature as input_signature
         inputs = input_signature(cfg)
         if not inputs['use_physical_input_context']:
@@ -71,7 +93,7 @@ def checkpoint_profile(checkpoint, *, require_metadata=True):
     computed = signature(checkpoint.get('config', {}) or {})
     saved = checkpoint.get('model_integration_signature')
     if saved is None:
-        if require_metadata and enabled(computed):
+        if computed.get(JOINT_GRAPH_FLAG, False) or (require_metadata and enabled(computed)):
             raise ValueError('Stage-two checkpoint is missing its model integration signature')
         return computed
     if isinstance(saved, dict):
@@ -88,10 +110,13 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
     target = getattr(agent, '_model_integration_signature', None)
     if target is None:
         actual = _canonical_model(getattr(getattr(agent, 'backbone', None), 'model_integration_settings', {}))
-        if enabled(source) or any(actual[name] for name in (*FLAGS, *FEATURE_FLAGS)):
+        if enabled(source) or enabled(actual):
             raise ValueError('Configure the target model integration before loading stage-two weights')
         target = source
     _check_agent(agent, target)
+    if source != target and (source.get(JOINT_GRAPH_FLAG, False) or target.get(JOINT_GRAPH_FLAG, False)):
+        raise ValueError('Joint graph architecture changed; graph checkpoints require an identical '
+                         'model integration profile. Start the new architecture from scratch.')
     if resume and source != target:
         raise ValueError('Model integration changed on resume; use weights-only initialization')
     if resume:

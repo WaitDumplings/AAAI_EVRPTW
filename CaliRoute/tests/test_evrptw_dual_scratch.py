@@ -272,3 +272,30 @@ def test_transient_gpu_query_does_not_terminate_live_torchrun(dual, monkeypatch)
     launch.supervise(dual.run)
     assert state['queries_after_spawn'] >= 2
     assert len(launches) == 1 and all(lock.closed for lock in owned)
+
+
+@pytest.mark.parametrize('variant', ['original', 'optimized'])
+def test_vrptw_dual_uses_requested_task_seed_and_fixed_five_passes(tmp_path, variant):
+    config = launch.build_config(base_config(), variant=variant, output=tmp_path / variant,
+        run_name='VRPTW_DUAL', data_root=tmp_path / 'AAAI_Dataset', task='vrptw', seed=3011,
+        chunk_size=32, expert_chunk_size=128)
+    train, ev, protocol = config['training'], config['evaluation'], config['experiment_protocol']
+    assert config['data']['problem_type'] == 'vrptw'
+    assert config['data']['num_charging_stations'] == 0
+    assert '/dataset/vrptw/train/Cus100' in config['data']['train_dataset_path']
+    assert '/dataset/vrptw/val/Cus100' in ev['eval_path']
+    assert train['rollout_steps'] == ev['eval_max_steps'] == 201
+    assert train['ppo_update_epochs'] == 5 and train['target_kl'] is None
+    assert train['num_envs_per_gpu'] == 32 and train['n_traj'] == 50
+    assert train['epochs'] == 1500 and ev['eval_seed'] == 17003011
+    assert protocol['task'] == 'vrptw100' and protocol['global_instances_per_rollout'] == 64
+    assert protocol['implementation'] == ('legacy' if variant == 'original' else 'explore')
+    launch.scratch.assert_scratch(config)
+    if variant == 'optimized':
+        assert train['post_init_seed'] == 3011
+        assert config['offline']['branch_exploration_enabled']
+        assert config['offline']['exploration_interval'] == 5
+        # The short preflight must exercise search, even before epoch five.
+        preflight = launch.preflight_config(config, tmp_path / 'preflight')
+        assert preflight['offline']['exploration_interval'] == 1
+        assert train['require_complete_feasible_rollouts']

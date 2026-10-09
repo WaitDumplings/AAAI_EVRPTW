@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two synchronous GPUs for one EVRPTW100 original/optimized scratch run.
+"""Two synchronous GPUs for one EVRPTW100 or VRPTW100 original/optimized scratch run.
 
 Shell wrappers launch in the background. Original weights, models and losses
 come from f388343; an external adapter supplies distributed execution and
@@ -31,9 +31,18 @@ import run_scratch_comparison as scratch
 
 def build_config(base, *, variant, output, run_name, data_root, seed=3010,
                  epochs=1500, eval_interval=50, batch_per_gpu=32, chunk_size=8,
-                 expert_chunk_size=64, learning_rate=1e-4):
+                 expert_chunk_size=64, learning_rate=1e-4, task="evrptw",
+                 encoder_variant="current"):
+    if task not in ('evrptw', 'vrptw'):
+        raise ValueError('task must be evrptw or vrptw')
+    charging_stations = 20 if task == 'evrptw' else 0
+    horizon = 512 if task == 'evrptw' else 201
     if variant not in ('original','optimized'):
         raise ValueError('variant must be original or optimized')
+    if encoder_variant not in ('current', 'graph'):
+        raise ValueError('encoder_variant must be current or graph')
+    if encoder_variant == 'graph' and variant != 'optimized':
+        raise ValueError('The graph encoder requires --variant optimized; the original baseline is unchanged')
     if isinstance(seed,bool) or not isinstance(seed,int) or not 0 <= seed < 2**32:
         raise ValueError('seed must be an integer in [0, 2**32)')
     for name, value in dict(epochs=epochs, eval_interval=eval_interval,
@@ -47,13 +56,13 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         output=output,run_name=run_name,data_root=data_root,seed=seed,epochs=epochs,
         eval_interval=eval_interval,chunk_size=chunk_size,legacy_chunk_size=chunk_size,
         legacy_expert_chunk_size=expert_chunk_size,learning_rate=learning_rate)
-    train=data_root/'dataset/evrptw/train/Cus100'; val=data_root/'dataset/evrptw/val/Cus100'
-    cfg['dataset_name']='Geo-EVRPTW-v1'
-    cfg['data'].update(problem_type='evrptw',num_customers=100,num_charging_stations=20,
+    train=data_root/'dataset'/task/'train/Cus100'; val=data_root/'dataset'/task/'val/Cus100'
+    cfg['dataset_name']=f'Geo-{task.upper()}-v1'
+    cfg['data'].update(problem_type=task,num_customers=100,num_charging_stations=charging_stations,
         train_dataset_path=str(train),train_sample_mode='shuffle_cycle')
     cfg['env'].update(charging_mode='fixed_full',max_steps_factor=4)
-    cfg['training'].update(num_envs_per_gpu=batch_per_gpu,n_traj=50,rollout_steps=512,
-        ppo_update_epochs=5,num_minibatches=4,gradient_accumulation_steps=1,
+    cfg['training'].update(num_envs_per_gpu=batch_per_gpu,n_traj=50,rollout_steps=horizon,
+        ppo_update_epochs=5,target_kl=None,num_minibatches=4,gradient_accumulation_steps=1,
         ppo_step_chunk_size=chunk_size,checkpoint_interval=50,
         distributed_timeout_minutes=120,monitor_interval=10,
         monitor_output_dir=str(output/'monitoring'),profile_timing=True)
@@ -63,22 +72,28 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
     if variant=='original':
         cfg['offline']['original_share_static_expert_observations']=True
     if variant=='optimized':
-        cfg['training']['require_complete_feasible_rollouts']=False
+        cfg['training']['require_complete_feasible_rollouts']=task != 'evrptw'
         cfg['offline']['exploration_instances']=4  # two ranks: at most 64 search trajectories/event
+        cfg['model']['use_joint_graph_encoder'] = encoder_variant == 'graph'
+        if encoder_variant == 'graph':
+            cfg['model'].update(joint_graph_edge_dim=32, joint_graph_dropout=0.0,
+                use_edge_relation_encoder=False, use_edge_value_messages=False,
+                use_edge_state_updates=False)
     cfg['evaluation'].update(eval_path=str(val),gurobi_summary_path=str(val/'gurobi_summary.csv'),
-        eval_max_steps=512,eval_n_traj=50,eval_batch_size=16,eval_save_routes=True,
+        eval_max_steps=horizon,eval_n_traj=50,eval_batch_size=16,eval_save_routes=True,
         eval_before_training=True,eval_seed=17000000+seed,eval_output_dir=str(output/'evaluations'))
     for key in ('eval_limit','eval_num_batches'):
         cfg['evaluation'].pop(key,None)
-    cfg['experiment_protocol'].update(phase='evrptw100_dual_from_scratch',arm=variant,task='evrptw100',
+    cfg['experiment_protocol'].update(phase=f'{task}100_dual_from_scratch',arm=variant,task=f'{task}100',
+        implementation='legacy' if variant=='original' else 'explore',target_kl=None,
         seed=seed,epochs=epochs,world_size=2,global_instances_per_rollout=batch_per_gpu*2,
         global_trajectories_per_rollout=batch_per_gpu*2*50,
         global_instances_per_optimizer_step=batch_per_gpu*2//4,
         batch_controls=dict(instances=batch_per_gpu*2,per_rank_instances=batch_per_gpu,trajectories=50,
-                            minibatches=4,ppo_passes=5,rollout_steps=512),
-        env_action_limit=484,physical_charging_stations=20,charging_mode='fixed_full',
+                            minibatches=4,ppo_passes=5,rollout_steps=horizon),
+        env_action_limit=4*(101+charging_stations),physical_charging_stations=charging_stations,charging_mode='fixed_full',
         initial_evaluation_equivalence_group=None,
-        evaluation='same independent fixed-full physical validator; fixed isolated RNG; all 1000 validation instances, references optional per instance',
+        evaluation=f'same independent {task} route validator; fixed isolated RNG; all 1000 validation instances, references optional per instance',
         distributed_execution='mean of rank-local masked objectives; scaled gradient averaging at optimizer boundaries; rank-local sampler and policy memory',
         expert_coverage='Missing experts do not remove PPO instances; actual reference counts are recorded at preparation',
         input_units='native original training-set D0' if variant=='original' else 'fixed physical unit 43.638668060302734 km; distance/time/energy remain dimensionally consistent',
@@ -87,18 +102,28 @@ def build_config(base, *, variant, output, run_name, data_root, seed=3010,
         comparison_scope='before/after complete implementations from scratch under common sampling and update budget; not an isolated architecture ablation',
         extra_search_enabled=variant=='optimized',
         search_budget=dict(interval=5,max_instances_per_rank=4,trajectories_per_instance=8,max_global_trajectories=64) if variant=='optimized' else None)
+    cfg['experiment_protocol'].update(encoder_variant=encoder_variant,
+        architecture=dict(use_joint_graph_encoder=encoder_variant == 'graph',
+            joint_graph_edge_dim=32 if encoder_variant == 'graph' else None,
+            joint_graph_dropout=0.0 if encoder_variant == 'graph' else None,
+            training_bundle='legacy' if variant == 'original' else 'explore'))
+    if encoder_variant == 'graph':
+        cfg['experiment_protocol'].update(
+            comparison_scope='architecture ablation against current explore: replace static graph embedding/encoder and matching latent edge projections; preserve physical input units, reward, PPO, AGDA and exploration settings',
+            graph_edge_decoder='evolved joint graph edge states feed the existing resource decoder; old edge-relation encoder is disabled',
+            initial_evaluation_equivalence_group=None)
     # Replace inherited VRPTW controls rather than describing them as current.
     if variant=='original':
         changed={'training.num_envs_per_gpu','training.rollout_steps','evaluation.eval_max_steps','evaluation.eval_batch_size'}
         cfg['experiment_protocol']['protocol_overrides']=[item for item in cfg['experiment_protocol']['protocol_overrides'] if item['parameter'] not in changed]
         cfg['experiment_protocol']['protocol_overrides'].extend([
-            dict(parameter='data.problem_type',original='vrptw preset',used='evrptw',reason='requested task; original EVRPTW environment'),
+            dict(parameter='data.problem_type',original='vrptw preset',used=task,reason='requested task; original EVRPTW environment'),
             dict(parameter='training.num_envs_per_gpu',original=128,used=batch_per_gpu,reason='two-rank common global rollout budget'),
-            dict(parameter='training.rollout_steps',original=120,used=512,reason='cover the EVRPTW environment native 484-action limit'),
-            dict(parameter='evaluation.eval_max_steps',original=120,used=512,reason='same complete-episode horizon for both models'),
+            dict(parameter='training.rollout_steps',original=120,used=horizon,reason='512 covers EVRPTW native timeout; 201 covers VRPTW customer/depot routes'),
+            dict(parameter='evaluation.eval_max_steps',original=120,used=horizon,reason='same complete-route horizon for both models'),
             dict(parameter='evaluation.eval_batch_size',original=1000,used=16,reason='common evaluation memory budget'),
             dict(parameter='execution.world_size',original=1,used=2,reason='external synchronous execution adapter; original model/loss bytes unchanged'),
-            dict(parameter='offline.original_share_static_expert_observations',original=False,used=True,reason='share identical read-only static expert arrays during construction; retain every sample and original forward/loss; avoid duplicating about 81GiB edge arrays per rank')])
+            dict(parameter='offline.original_share_static_expert_observations',original=False,used=True,reason='share identical read-only static expert arrays during construction; retain every sample and original forward/loss; avoid duplicating static edge arrays per expert step')])
     scratch.assert_scratch(cfg)
     return cfg
 
@@ -110,25 +135,26 @@ def preflight_config(cfg, output):
         eval_n_traj=4,eval_batch_size=4,eval_output_dir=str(output/'evaluations'))
     if result['offline'].get('branch_exploration_enabled'):
         result['offline']['exploration_interval']=1
-    result['experiment_protocol'].update(phase='evrptw100_dual_scratch_preflight',epochs=2,
+    result['experiment_protocol'].update(phase=cfg['experiment_protocol']['task']+'_dual_scratch_preflight',epochs=2,
         validation_instances=4,comparison_scope='full two-rank training allocation; reduced validation; discard all resulting state')
     return result
 
 
-def dataset_inputs(data_root):
+def dataset_inputs(data_root, task="evrptw"):
+    charging_stations = 20 if task == "evrptw" else 0
     inputs={}
     for split, count in [('train',5000),('val',1000)]:
-        directory=data_root/'dataset/evrptw'/split/'Cus100'
+        directory=data_root/'dataset'/task/split/'Cus100'
         names=['instances.pkl','metadata.json','expert_solutions.csv' if split=='train' else 'gurobi_summary.csv']
         for name in names:
             path=directory/name
             if not path.is_file():
                 raise FileNotFoundError(f'Missing {path}; --data-root must be AAAI_Dataset, not its dataset child')
-            inputs[f'evrptw/{split}/Cus100/{name}']=dict(path=str(path),sha256=shared.digest(path))
+            inputs[f'{task}/{split}/Cus100/{name}']=dict(path=str(path),sha256=shared.digest(path))
         metadata=json.loads((directory/'metadata.json').read_text())
-        if any(int(metadata.get(key,-1))!=value for key,value in dict(num_customers=100,num_charging_stations=20,num_instances=count).items()):
-            raise ValueError(f'Unexpected split metadata: {directory}; require {count} instances of Cus100 CS20')
-    with (data_root/'dataset/evrptw/train/Cus100/expert_solutions.csv').open() as handle:
+        if any(int(metadata.get(key,0 if key=='num_charging_stations' else -1))!=value for key,value in dict(num_customers=100,num_charging_stations=charging_stations,num_instances=count).items()):
+            raise ValueError(f'Unexpected split metadata: {directory}; require {count} instances of Cus100 CS{charging_stations}')
+    with (data_root/'dataset'/task/'train/Cus100/expert_solutions.csv').open() as handle:
         expert_count=sum(1 for _ in csv.DictReader(handle))
     return inputs,expert_count
 
@@ -140,8 +166,9 @@ def prepare(args):
     hardware=shared.probe_requested_gpus(gpus)
     if not 1<=args.poll_seconds<=60 or not 2<=args.idle_checks<=10:
         raise ValueError('poll-seconds must be 1..60, idle-checks 2..10')
-    data_root=args.data_root.resolve();inputs,expert_count=dataset_inputs(data_root)
-    run_id=args.run_id or f'EVRPTW100_DUAL_SCRATCH_{args.variant.upper()}_S{args.seed}_E{args.epochs}_'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())
+    data_root=args.data_root.resolve();inputs,expert_count=dataset_inputs(data_root, args.task)
+    encoder_suffix = '_GRAPH' if args.encoder_variant == 'graph' else ''
+    run_id=args.run_id or f'{args.task.upper()}100_DUAL_SCRATCH_{args.variant.upper()}{encoder_suffix}_S{args.seed}_E{args.epochs}_'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())
     if Path(run_id).name!=run_id or run_id in ('.','..'):
         raise ValueError('run-id must be a fresh directory name')
     experiment=CODE_ROOT/'results/optimization'/run_id
@@ -150,7 +177,8 @@ def prepare(args):
     output=experiment/args.variant
     cfg=build_config(base,variant=args.variant,output=output,run_name=run_id+'_'+args.variant.upper(),
         data_root=data_root,seed=args.seed,epochs=args.epochs,eval_interval=args.eval_interval,
-        batch_per_gpu=args.batch_per_gpu,chunk_size=args.chunk_size,expert_chunk_size=args.expert_chunk_size,learning_rate=args.learning_rate)
+        batch_per_gpu=args.batch_per_gpu,chunk_size=args.chunk_size,expert_chunk_size=args.expert_chunk_size,learning_rate=args.learning_rate,task=args.task,
+        encoder_variant=args.encoder_variant)
     experiment.mkdir(parents=True,exist_ok=False);output.mkdir()
     frozen=experiment/'source/CaliRoute';source=shared.source_snapshot(frozen,include_initialization_assets=False)
     original=experiment/'original_source/CaliRoute';additional={}
@@ -170,8 +198,8 @@ def prepare(args):
             code_root=str(original if args.variant=='original' else frozen),command=command,
             epochs=2 if preflight else args.epochs,validation_instances=4 if preflight else 1000,
             required_validation_epochs=[2] if preflight else shared.validation_epochs(args.epochs,args.eval_interval),
-            log_dir=str(CODE_ROOT/'results/logs/Cus_100_CS_20'/config['run_name']/f'seed_{args.seed}'),
-            checkpoint_dir=str(CODE_ROOT/'results/checkpoints/Cus_100_CS_20'/config['run_name']/f'seed_{args.seed}'))
+            log_dir=str(CODE_ROOT/'results/logs'/f"Cus_100_CS_{cfg['data']['num_charging_stations']}"/config['run_name']/f'seed_{args.seed}'),
+            checkpoint_dir=str(CODE_ROOT/'results/checkpoints'/f"Cus_100_CS_{cfg['data']['num_charging_stations']}"/config['run_name']/f'seed_{args.seed}'))
         if preflight:spec['preflight']=value
         else:spec.update(value)
     protocol=dict(cfg['experiment_protocol']);protocol.update(global_batch=args.batch_per_gpu*2,n_traj=50,
@@ -308,7 +336,10 @@ def supervise(experiment):
 
 def make_parser():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--task',choices=('evrptw','vrptw'),default='evrptw')
     parser.add_argument('--variant',choices=('original','optimized'))
+    parser.add_argument('--encoder-variant', choices=('current', 'graph'), default='current',
+                        help='graph replaces the optimized static encoder; current preserves the existing experiment')
     parser.add_argument('--supervise',type=Path)
     parser.add_argument('--gpus',default='0,1')
     parser.add_argument('--seed',type=int,default=3010)
