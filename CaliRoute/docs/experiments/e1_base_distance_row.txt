@@ -1,0 +1,22 @@
+E1 shared decoder distance row: historical audit and scope
+
+At original commit f388343, DriverQueryEncoder has no independent distance row.
+DynamicGraphKVEncoder._candidate_features reads the directed current-to-candidate,
+candidate-to-depot and added-depot-detour distances (original decoder.py 532-540),
+places them at slots 12, 13, 14 (632-634) in its 30-feature vector, and projects
+them into AGDA action keys and bias. Its disabled forward returns zero (667-668).
+No independent base-distance-row deletion was found: disabling all road encoder
+paths and AGDA leaves the original base unable to observe candidate road distances.
+
+E1 explicitly splits a shared distance-only branch from this candidate pathway.
+It preserves those slots and original clamps, LayerNorm(30), Linear/SiLU forms,
+action-key and scalar-bias insertion points, tanh scales and zero output heads.
+Other slots are zeros; there is no resource input or hand-written negative-distance
+prior. The row uses the already normalized physical directed road matrix without
+additional normalization or Euclidean substitution. Initial outputs are zero;
+the heads learn distance sensitivity from policy training.
+
+model.e1_base_distance_row defaults to False. It is enabled identically for the
+five controlled E1 methods. This is an explicit E1 shared-input protocol completion,
+not a claim that the oldest model already had an independent base row. All old
+recipes and checkpoints keep their previous outputs and signatures when disabled.

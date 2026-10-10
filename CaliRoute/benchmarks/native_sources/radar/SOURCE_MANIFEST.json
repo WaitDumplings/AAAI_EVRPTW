@@ -1,0 +1,56 @@
+{
+  "files": [
+    {
+      "path": "ACVRProblemDef.py",
+      "sha256": "84ccdf24e368ecc5171c10d5c2cc5c7e85de7a33bde003f6e5deff3209621ae5"
+    },
+    {
+      "path": "README.md",
+      "sha256": "8daf3b4d5e3603509b71d1b1d6fa87250bbceebcaa104f794cbc9a975c628e5e"
+    },
+    {
+      "path": "acvrp/ACVRPEnv.py",
+      "sha256": "15532ec39d95b09b6aea05038af00fcb76c1740b16312bea3db0868f99f57cbe"
+    },
+    {
+      "path": "acvrp/ACVRPModel.py",
+      "sha256": "69a54eaff6cc705712e1f64c4ac31d4c0f25459e5f2756bfeb56bccaf46acddb"
+    },
+    {
+      "path": "acvrp/ACVRPModel_LIB.py",
+      "sha256": "ffa29c26d006e6210a23d7f7edd740d4b5571672676f0b8ce78b701af041598d"
+    },
+    {
+      "path": "acvrp/ACVRPTester.py",
+      "sha256": "cf69fc9d201a5d8ffca18057fe0a2d5e00134e73eae7eac6fda79ec9a627e621"
+    },
+    {
+      "path": "acvrp/ACVRPTrainer.py",
+      "sha256": "ea221ef528a52f0f4f9c82ad0846c8f67987f644af030debd3efa7ae3a3e07c7"
+    },
+    {
+      "path": "acvrp/test.py",
+      "sha256": "77ecafecb0ea56b3f2bab3ec9ece1c9adfc22718171d05f68eb1c67f4c79aa73"
+    },
+    {
+      "path": "acvrp/time_routing_d_cvrp_eval.py",
+      "sha256": "0a5c2dc6fe54ad21c180601be29adbbc42adb3d3c16b51cad016eb8796166bec"
+    },
+    {
+      "path": "acvrp/train.py",
+      "sha256": "2b9abf0109071755feff25ed9b1a57c9567ab3f17f6b15c378f7d03c7ec4a180"
+    },
+    {
+      "path": "acvrp/train_routing_d.py",
+      "sha256": "fb62f1d6c3609b56dcd9e470e36757b6a4cb6c1be302f1a6d772ec39996054ee"
+    },
+    {
+      "path": "utils/utils.py",
+      "sha256": "9dd2c51784ff28b8b049140707a15d0d29579bcc95773d78b4b2852958e75bf7"
+    }
+  ],
+  "git_head": "74645edb8fce5be2d5889bbb231265526a34de6a",
+  "includes_uncommitted_adapters": true,
+  "sha256": "c3fd4de8ccd1621c3cd69b28870ae3c037c4510f31c6ce2ad87f3a7ec3cf1ecf",
+  "source_root": "/data/Maojie/Github2/RADAR/RADAR"
+}

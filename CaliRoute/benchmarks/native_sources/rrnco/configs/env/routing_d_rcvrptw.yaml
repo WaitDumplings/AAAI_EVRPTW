@@ -1,0 +1,16 @@
+_target_: rrnco.envs.rmtvrp.RMTVRPEnv
+name: rcvrptw
+load_solutions: false
+
+generator_params:
+  _target_: rrnco.envs.rmtvrp.fixed_generator.FixedRMTVRPGenerator
+  data_file: ${paths.root_dir}/data/routing_d/rcvrptw/Cus100/train.npz
+  sample_with_replacement: true
+
+data_dir: ${paths.root_dir}/data/routing_d/rcvrptw/Cus100
+
+val_file: [
+  "val.npz"
+]
+val_dataloader_names: ["val"]
+test_file: ${env.val_file}

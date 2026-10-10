@@ -1,0 +1,148 @@
+E1 / CVRP-Cus100 / seed 3009
+===========================
+Scope: seven scratch-trained methods, train/validation model selection, independent
+1000-instance test. No E2/E3. No learned initialization. Gurobi jobs are untouched.
+
+The method contract is in user_specification.txt. Effective configuration comes
+from e1/configs.py and is frozen under each campaign's runs/METHOD/config.yaml.
+All four enhanced controlled methods use the same graph actor and critic.
+PPO base switches off enhanced RDI/AGDA paths, retaining original query/vehicle/
+node/mask features. See ../experiments/e1_base_distance_row.txt: the original
+candidate distance row lived inside AGDA. This E1 explicitly splits its three
+road features into a common base path for ALL FIVE controlled methods. It does
+not claim the original code already had an independent distance-row interface.
+This is a new from-scratch comparison protocol, not an exact historical-paper run.
+
+Controlled training protocol
+----------------------------
+Global batch 64 = 32 per GPU on two GPUs. 50 trajectories per instance.
+One epoch means one sample/update loop, NOT a pass through 5000 instances.
+1500 online loops = 96,000 instance exposures = 4,800,000 trajectory attempts.
+4 PPO passes x 4 minibatches; gradient accumulation 1; LR 1e-4 constant;
+gamma 0.99; GAE lambda 0.95; fixed passes (target_kl disabled).
+Use FP32 for rollout and probability recomputation. The previous AMP path did
+not establish identical fixed-weight old/new probabilities; do not enable AMP
+unilaterally in one method. A future AMP implementation requires a new protocol.
+
+DAPG retains the committed 3 BC-only warmup loops: 1503 outer loops including
+1500 online loops. Validation offset is 3. The BC work is additional and counted.
+AWBC and DAPG retain committed weighting/gating/objectives, not generic BC.
+The three expert methods share strict replay validation: a corrupted or invalid
+audited route is an error, not a silently dropped record.
+SL-PPO retains step PPO + current-policy complete-solution objective + external
+expert complete-trajectory objective. It has no policy trajectory archive or
+independent exploration branch. Its incumbent is COST ONLY, min(expert, OLD
+policy incumbent), frozen through a batch; valid new costs apply to later visits. Only complete feasible finite-cost policy
+solutions enter solution-level group statistics; partial/truncated failure penalty
+scores no longer contaminate complete-solution group mean/std. This is an
+explicit correctness boundary fix; valid complete batches retain the committed
+group/reference/candidate formulas and weights.
+
+Legacy reward and loss normalization are held fixed for these controlled rows.
+The physical distance unit is the training-set median of d(depot,i)+d(i,depot),
+fitted once without validation/test; its numeric value and training bundle hash
+are frozen and used for input and reward scaling. It is not total route distance
+or customer count. Actual objective is directed road kilometres, including return
+edges, without a fixed vehicle cost. CVRP time/energy constraints are inactive.
+
+Validation: every 3200 online instance exposures (50 controlled loops), same
+1000 validation instances, K=50 candidate attempts. Max decode 201 steps. Best
+selection: feasibility first, then mean independently recomputed feasible km.
+Native RRNCO/RADAR retain native REINFORCE/POMO, 96,000 actual instance exposures,
+K=50 starts and no evaluation augmentation. Their optimizer counts and native
+schedulers are recorded; equal exposures do not imply equal total compute or the
+same optimization algorithm. Architecture/hyperparameters are native defaults
+with E1's explicit budget/data adaptations. Native sources and provenance are
+vendored under benchmarks/native_sources, without datasets or model weights.
+
+Resource allocation (RTX A6000 means the previously stated 2-card server)
+-----------------------------------------------------------------------
+2080ti_a: GPU 0,1 PPO base; GPU 2,3 PPO RDI+AGDA.
+2080ti_b: GPU 0,1 AWBC; GPU 2,3 DAPG.
+2080ti_c: GPU 0,1 SL-PPO; GPU 2,3 reserved.
+a6000: GPU 0 RRNCO; GPU 1 RADAR, native single-process training.
+2080ti_3: all three cards reserved.
+Ten 2080 Ti + two A6000 are assigned; five cards remain available.
+Do not attribute runtime differences across GPU types to algorithms.
+Cus15/50 are NOT launched by this E1. Proposed future allocation: single GPU
+for Cus15/50; benchmark Cus50 dual only if communication overhead is worthwhile.
+Dual-GPU execution is not promised to halve wall time; capture throughput.
+
+Portable server workflow
+------------------------
+Run in CaliRoute, after pulling the E1 branch. Both datasets and results can be
+in the same relative locations on every machine. E1_PYTHON chooses the controlled
+interpreter; default ../.venv/bin/python, otherwise python in current environment.
+Native RRNCO needs its own dependencies; see e1/requirements-rrnco.lock.txt and set
+E1_RRNCO_PYTHON=/absolute/path/to/venv/bin/python when required. No public pretrained
+weights are needed. The native sources are included in git.
+
+Dry run, no training:
+  bash scripts/run_e1_server.sh 2080ti_a
+Explicitly audit, freeze, smoke, and queue assigned methods:
+  bash scripts/run_e1_server.sh 2080ti_a --execute
+Use 2080ti_b / 2080ti_c / a6000 on the corresponding servers.
+E1_DATA_ROOT, E1_AUDIT, E1_CAMPAIGN can override directories. Campaign directories
+must be new. Do not copy a prepared campaign with absolute paths to a new server;
+prepare locally from the same code/data, and compare hashes across machines.
+
+Each server shell audits assets, freezes all seven configs and code, runs ONLY
+its assigned small CPU smoke tests, then starts a detached supervisor. The GPU
+supervisor waits for genuinely idle GPUs (no compute PID), takes cooperative UUID
+locks, and runs a full-width/batch/trajectory/chunk GPU preflight before the formal
+fresh initialization. It never kills unrelated training or Gurobi. A failed
+preflight blocks that method. It does not silently shrink a research batch.
+The suggested chunks (PPO 8, SL expert 32, eval batch 8) are conservative starting
+values, NOT measured 80% VRAM presets. Tune chunk sizes through a NEW prepared
+campaign before formal training; do not edit frozen YAML. Hardware profiling and
+actual GPU throughput must establish whether larger chunks help.
+
+Separate lifecycle stages:
+  bash scripts/run_e1.sh preflight --data-root ../AAAI_Dataset --output results/e1/assets_cvrp100
+  bash scripts/run_e1.sh prepare --audit results/e1/assets_cvrp100/assets_audit.json --campaign results/e1/E1_CVRP100_S3009_V1
+  bash scripts/run_e1.sh smoke --campaign results/e1/E1_CVRP100_S3009_V1 --method all
+  bash scripts/run_e1.sh launch --campaign results/e1/E1_CVRP100_S3009_V1 --server 2080ti_a
+Add --execute ONLY to launch when ready. Preflight/prepare/smoke alone never start
+long training. A --method argument starts one independently chosen row.
+
+Resume: use the same frozen campaign/config and identical rank count, pointing
+--checkpoint at last or its verified independent backup:
+  bash scripts/run_e1.sh resume --campaign CAMPAIGN --method slppo --checkpoint PATH --execute
+Resume runs in the foreground; use tmux/nohup as appropriate. It refuses busy GPUs.
+This restores optimizer, counters, scheduler state/config, sampler and RNG (and
+cost incumbent for SL), not merely actor weights. Checkpoints are atomic and
+SHA-verified into an independent backup directory. Default backups are outside
+the campaign tree but on the same filesystem; this does not protect against whole
+disk loss. --backup-root on prepare can select another mounted filesystem.
+
+Final evaluation and summary
+----------------------------
+Only the validation-selected best checkpoint (or an identical backup) is accepted:
+  bash scripts/run_e1.sh evaluate --campaign CAMPAIGN --method slppo --checkpoint BEST --device cuda:0 --batch-size 1
+  bash scripts/run_e1.sh summarize --campaign CAMPAIGN --gurobi CVRP100_GUROBI_SUMMARY.csv
+Across servers, copy the full campaign trees (including selected checkpoints),
+then add --additional-campaign OTHER_CAMPAIGN for each source. The merger requires
+identical code/data/seed/budget/expert-route semantic hashes and rejects duplicate
+accepted runs of a method; it never chooses a run based on test performance.
+The summary reader rebases campaign artifact paths in memory, so copied trees
+can live at different paths. It never edits the original manifest/config bytes.
+This relocation is for result collection; training/resume uses the original host
+and data paths or requires an explicitly prepared fresh campaign.
+Final test is explicit, not an automatic training/selection stage. All 1000 IDs
+must match the frozen independent test index. K=50 counts every candidate, no
+8x augmentation multiplication or hidden retry. Failed instances retain rows and
+null distances. Each candidate is independently checked for capacity, coverage,
+completion/return, road cost; select the feasible minimum recomputed km.
+reported_cost and recomputed_cost_km are both preserved; mismatches are reported.
+Latency includes in-memory environment/model preprocessing, encoding/SVD, decoding
+and validation; excludes disk IO, raw instance adaptation and checkpoint loading.
+Batch size 1 is single-instance latency; batch >1 is amortized throughput timing.
+Never compare these as the same latency. Model feasible/Gurobi coverage counts are
+reported. Gaps against feasible Gurobi incumbents may be negative and are not
+certified optimality gaps. One training seed cannot supply multi-seed mean +/- SD.
+
+Monitor scheduler_SERVER/status.json, hardware.jsonl and runs/METHOD/train.log.
+Controlled full-state checkpoints/logs live under CAMPAIGN/artifacts; native
+checkpoints/logs under runs/METHOD/native_checkpoints and native_*.jsonl.
+Prepared, CPU-smoke-passed, hardware-preflight-passed, queued, training and complete
+are distinct states. No result is claimed for an untrained or incomplete method.

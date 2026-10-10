@@ -4,6 +4,7 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 import csv
 from dataclasses import dataclass
+import hashlib
 import itertools
 import json
 import math
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import time
 from typing import Any, Sequence
 
@@ -89,6 +91,130 @@ from ablation.dapg import compute_dapg_demo_loss
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+E1_SOLUTION_REFERENCE_CONTRACT = "e1_cost_incumbent_v1"
+
+
+def _e1_solution_reference_enabled(cfg: dict[str, Any]) -> bool:
+    contract = (cfg.get("offline", {}) or {}).get("solution_reference_contract", "legacy")
+    if contract not in ("legacy", E1_SOLUTION_REFERENCE_CONTRACT):
+        raise ValueError(f"Unknown solution_reference_contract: {contract!r}")
+    return contract == E1_SOLUTION_REFERENCE_CONTRACT
+
+
+def _validate_e1_solution_contract(cfg: dict[str, Any]) -> None:
+    """Explicit experiment contract; historical recipes retain their old path."""
+    if not _e1_solution_reference_enabled(cfg):
+        return
+    offline = cfg.get("offline", {}) or {}
+    training = cfg.get("training", {}) or {}
+    if not _is_sl_ppo_method(_offline_method(cfg)):
+        raise ValueError("E1 cost-incumbent contract requires the complete sl_ppo method")
+    if training.get("reward_norm_mode", "legacy") != "legacy":
+        raise ValueError("E1 reference objectives cannot use physical_shared_popart/LOO")
+    for flag in ("policy_replay_enabled", "branch_exploration_enabled", "exploration_enabled"):
+        if offline.get(flag, False):
+            raise ValueError(f"E1 cost-only incumbent forbids offline.{flag}")
+    if not _sl_candidate_enabled(cfg):
+        raise ValueError("E1 SL-PPO must retain the policy/expert solution-level branches")
+    adv = _advantage_config(cfg)
+    if float(offline.get("sl_coef", offline.get("route_loss_coef", .10))) <= 0:
+        raise ValueError("E1 SL-PPO requires a positive solution-level loss coefficient")
+    if float(adv.get("sl_expert_candidate_weight", 2.0)) <= 0:
+        raise ValueError("E1 SL-PPO requires a positive external expert coefficient")
+    if not adv.get("sl_candidate_use_expert_candidate", True):
+        raise ValueError("E1 SL-PPO cannot disable the external expert trajectory branch")
+    if not adv.get("sl_use_memory_incumbent", True):
+        raise ValueError("E1 SL-PPO must retain the cost-only policy incumbent")
+
+
+def _finite_nonnegative_cost(value) -> float | None:
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0.0 else None
+
+
+class _E1CostReferenceSnapshot:
+    """Cost lookup only: never supplies or stores historical policy actions.
+
+    Resolve all identities before deriving any batch advantages, so duplicate
+    draws and missing expert records observe the same old-incumbent snapshot.
+    Actual expert trajectory replay still receives the real expert buffer.
+    """
+    def __init__(self, expert_buffer, incumbent, instance_ids):
+        self.costs = {}
+        for instance_id in dict.fromkeys(instance_ids):
+            expert = (expert_buffer.reference_objective(instance_id)
+                      if expert_buffer is not None else None)
+            available = [_finite_nonnegative_cost(expert),
+                         _finite_nonnegative_cost((incumbent or {}).get(instance_id))]
+            available = [cost for cost in available if cost is not None]
+            self.costs[instance_id] = min(available) if available else None
+
+    def reference_objective(self, instance_id):
+        return self.costs.get(instance_id)
+
+
+def _complete_solution_mask(batch, envs, cfg):
+    """Terminal, fully served, feasible finite-cost solutions; no cutoff costs."""
+    num_envs, n_traj = map(int, batch.actions.shape[1:])
+    objective, success, served = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    dones = getattr(batch, "dones", None)
+    if dones is None or dones.ndim != 3 or dones.shape[0] == 0:
+        raise ValueError("E1 full-solution learning requires terminal rollout flags")
+    complete = dones[-1].detach().cpu().numpy().astype(bool)
+    if complete.shape != objective.shape:
+        raise ValueError("E1 terminal flags do not match rollout trajectories")
+    expected = int(cfg.get("data", {}).get("num_customers", 0))
+    if expected <= 0:
+        raise ValueError("E1 full-solution learning requires a positive customer count")
+    return success & complete & (served == expected) & np.isfinite(objective) & (objective >= 0.0)
+
+
+def _e1_incumbent_identity(pool, cfg):
+    """Bind scalar incumbent state and sampler indices to ordered train inputs."""
+    instances = list(getattr(pool, "instances", ()) or ())
+    if not instances:
+        raise ValueError("E1 cost incumbents require a fixed nonempty train instance pool")
+    ids, fingerprints = [], {}
+    for instance in instances:
+        instance_id = getattr(instance, "instance_id", None)
+        if instance_id is None or str(instance_id) in fingerprints:
+            raise ValueError("E1 training instance identities must be present and unique")
+        instance_id = str(instance_id)
+        digest = hashlib.sha256()
+        for name in ("depot", "customers", "charging_stations", "distance_matrix_km",
+                     "travel_time_matrix_s", "energy_matrix_kwh", "demands_cm3",
+                     "service_time_s", "tw_s"):
+            value = getattr(instance, name, None)
+            digest.update(name.encode())
+            if value is not None:
+                array = np.asarray(value, dtype=np.float64)
+                digest.update(str(array.shape).encode())
+                digest.update(array.tobytes())
+        digest.update(json.dumps({name: getattr(instance, name, None) for name in
+            ("vehicle", "speed_profile", "working_start_s", "working_end_s")},
+            sort_keys=True, default=str).encode())
+        ids.append(instance_id)
+        fingerprints[instance_id] = digest.hexdigest()
+    return {"version": 1, "ordered_instance_ids": ids, "fingerprints": fingerprints,
+            "problem_type": problem_type_from_config(cfg),
+            "num_customers": int(cfg["data"]["num_customers"]),
+            "physical_edge_mode": bool(cfg.get("env", {}).get("prefer_explicit_edge_matrices", False))}
+
+
+def _validate_e1_resume_state(local_state, identity):
+    if local_state.get("policy_incumbent_identity") != identity:
+        raise ValueError("E1 cost-incumbent training instance identity/fingerprint changed on resume")
+    if local_state.get("policy_route_pool") is not None:
+        raise ValueError("E1 resume cannot import historical policy trajectories")
+    if not local_state.get("sampler", {}).get("supported", False):
+        raise ValueError("E1 resume requires a complete supported sampler state")
+    for instance_id, cost in local_state.get("policy_best_objectives", {}).items():
+        if instance_id not in identity["fingerprints"] or _finite_nonnegative_cost(cost) is None:
+            raise ValueError("E1 checkpoint contains an invalid policy incumbent identity or cost")
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -204,6 +330,132 @@ def _optimizer_step(
         context.record_step(float(grad_norm.item()), skipped, max_grad_norm=max_grad_norm)
 
 
+def _training_checkpoint_plan(epoch, epochs, *, eval_interval, checkpoint_interval,
+                              latest_checkpoint_interval=0, eval_epoch_offset=0):
+    if eval_epoch_offset < 0:
+        raise ValueError("evaluation.eval_epoch_offset must be nonnegative")
+    plan = epoch_checkpoint_plan(epoch, epochs, eval_interval=eval_interval,
+        checkpoint_interval=checkpoint_interval, latest_checkpoint_interval=latest_checkpoint_interval)
+    if not eval_epoch_offset:
+        return plan
+    online_epoch = epoch - eval_epoch_offset
+    evaluate = eval_interval > 0 and online_epoch > 0 and (
+        online_epoch % eval_interval == 0 or epoch == epochs)
+    return type(plan)(evaluate=evaluate, archive=plan.archive, latest=plan.latest)
+
+
+EXPERIMENT_BUDGET_FIELDS = (
+    "instance_exposures", "sampled_trajectories", "completed_trajectories",
+    "completed_feasible_trajectories", "valid_decision_steps", "expert_backward_steps",
+    "optimizer_attempts", "optimizer_applied_steps",
+)
+
+
+def _update_experiment_budget(budget, batch, cfg, envs, distributed, expert_steps):
+    """Count actual work; replicated optimizer steps are not multiplied by ranks."""
+    local = {key: 0 for key in EXPERIMENT_BUDGET_FIELDS}
+    if batch is not None:
+        local.update(instance_exposures=int(batch.actions.shape[1]),
+            sampled_trajectories=int(batch.actions.shape[1] * batch.actions.shape[2]),
+            completed_trajectories=int(batch.dones[-1].sum().item()),
+            completed_feasible_trajectories=int(_complete_solution_mask(batch, envs, cfg).sum()),
+            valid_decision_steps=int(batch.valid.sum().item()))
+    local["expert_backward_steps"] = int(expert_steps)
+    local["optimizer_attempts"] = int(distributed.epoch_optimizer_steps + distributed.epoch_amp_skipped_steps)
+    local["optimizer_applied_steps"] = int(distributed.epoch_optimizer_steps)
+    records = distributed.gather_objects(local)
+    for key in EXPERIMENT_BUDGET_FIELDS:
+        values = [record[key] for record in records]
+        if key.startswith("optimizer_"):
+            if len(set(values)) != 1:
+                raise ValueError("Experiment budget detected unsynchronized optimizer step counts")
+            increment = values[0]
+        else:
+            increment = sum(values)
+        budget[key] = int(budget.get(key, 0)) + increment
+    return {f"budget_{key}": value for key, value in budget.items()}
+
+
+def _exact_experiment_resume_signature(cfg):
+    if not (cfg.get("training", {}).get("track_experiment_budget", False)
+            or _e1_solution_reference_enabled(cfg)):
+        return None
+    training = cfg.get("training", {})
+    keys = ("epochs", "num_envs_per_gpu", "n_traj", "rollout_steps", "ppo_update_epochs",
+        "num_minibatches", "gradient_accumulation_steps", "gamma", "gae_lambda", "use_gae",
+        "clip_coef", "vf_coef", "learning_rate", "weight_decay", "max_grad_norm", "target_kl",
+        "mixed_precision", "reward_norm_mode", "ppo_loss_reduction", "bootstrap_truncation",
+        "lr_schedule", "lr_warmup_epochs", "lr_min", "entropy_final_coef")
+    offline = {key: value for key, value in (cfg.get("offline", {}) or {}).items()
+        if not key.startswith(("resume_", "init_", "expert_solution_path", "expert_dataset_path"))}
+    expert_path = _resolve_path(cfg.get("offline", {}).get("expert_solution_path"))
+    return {"version": 1, "training": {key: training.get(key) for key in keys},
+        "entropy_initial_coef": training.get("entropy_initial_coef", training.get("ent_coef", .01)),
+        "offline": offline, "advantage": cfg.get("advantage", {}),
+        "critic": cfg.get("critic", {}), "pbrs": cfg.get("pbrs", {}),
+        "env": dict(cfg.get("env", {})),
+        "expert_source_sha256": _checkpoint_sha256(expert_path) if expert_path is not None and expert_path.is_file() else None,
+        "evaluation": {key: cfg.get("evaluation", {}).get(key) for key in
+            ("eval_n_traj", "eval_decode_mode", "eval_max_steps", "eval_seed", "eval_epoch_offset")}}
+
+
+def _checkpoint_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _backup_checkpoint(path, cfg, epoch, seed):
+    """Verified atomic second copy; a copy failure never removes the primary."""
+    backup_root = cfg.get("training", {}).get("checkpoint_backup_dir")
+    if not backup_root:
+        return None
+    root = Path(backup_root).expanduser().resolve()
+    primary_dir = path.parent.resolve()
+    if root == primary_dir or primary_dir in root.parents:
+        raise ValueError("checkpoint_backup_dir must be outside the primary checkpoint directory")
+    run_name = str(cfg.get("run_name", "O2O_TERRAN_FULL"))
+    if Path(run_name).name != run_name or run_name in {"", ".", ".."}:
+        raise ValueError("Checkpoint backup requires a plain run_name")
+    target = root / run_name / f"seed_{int(seed)}" / path.name
+    if target.resolve() == path.resolve():
+        raise ValueError("Checkpoint backup cannot overwrite the primary file")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    expected = _checkpoint_sha256(path)
+    with path.open("rb") as source, temporary.open("wb") as destination:
+        shutil.copyfileobj(source, destination, length=8 * 1024 * 1024)
+        destination.flush()
+        os.fsync(destination.fileno())
+    if _checkpoint_sha256(temporary) != expected:
+        raise IOError("Checkpoint backup SHA256 verification failed")
+    os.replace(temporary, target)
+    _fsync_directory(target.parent)
+    manifest = dict(version=1, source=str(path.resolve()), backup=str(target),
+        epoch=int(epoch), seed=int(seed), bytes=target.stat().st_size,
+        sha256=expected, verified=True, independent_directory=True,
+        independent_filesystem=os.stat(target.parent).st_dev != os.stat(path.parent).st_dev)
+    manifest_path = target.with_suffix(target.suffix + ".backup.json")
+    temporary_manifest = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    with temporary_manifest.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_manifest, manifest_path)
+    _fsync_directory(target.parent)
+    return manifest
+
+
 def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, cfg: dict[str, Any], epoch: int, seed: int) -> None:
     context = getattr(agent, "_distributed_context", None)
     if context is not None and not context.is_primary:
@@ -216,12 +468,16 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
             "seed": int(seed),
             "config": cfg,
             "ppo_protocol_signature": protocol_signature(cfg),
+            **({"solution_reference_contract": E1_SOLUTION_REFERENCE_CONTRACT}
+               if _e1_solution_reference_enabled(cfg) else {}),
             "model_state_dict": inference_model_state(agent),
             **input_checkpoint_metadata(agent, cfg),
             **model_integration_checkpoint_metadata(agent, cfg),
             **({"reward_normalization_state": agent._reward_normalization.checkpoint_state(agent.critic)}
                if getattr(agent, "_reward_normalization", None) is not None else {}),
             "optimizer_state_dict": optimizer.state_dict(),
+            **({"exact_experiment_resume_signature": agent._exact_experiment_resume_signature}
+               if getattr(agent, "_exact_experiment_resume_signature", None) is not None else {}),
             **({"training_resume_state": agent._training_resume_state}
                if hasattr(agent, "_training_resume_state") else {}),
             **({"policy_route_pool_state": agent.policy_route_pool.state_dict()}
@@ -229,7 +485,13 @@ def save_checkpoint(path: Path, agent: Agent, optimizer: torch.optim.Optimizer, 
         },
         temporary_path,
     )
+    if cfg.get("training", {}).get("checkpoint_backup_dir") or _e1_solution_reference_enabled(cfg):
+        with temporary_path.open("rb") as handle:
+            os.fsync(handle.fileno())
     os.replace(temporary_path, path)
+    if cfg.get("training", {}).get("checkpoint_backup_dir") or _e1_solution_reference_enabled(cfg):
+        _fsync_directory(path.parent)
+    _backup_checkpoint(path, cfg, epoch, seed)
 
 
 def _offline_method(cfg: dict[str, Any]) -> str:
@@ -1062,6 +1324,13 @@ def _load_training_checkpoint(
     model_profile_info = load_model_integration_profile(
         agent, checkpoint, resume=True, checkpoint_path=ckpt_path,
     )
+    expected_exact = getattr(agent, "_exact_experiment_resume_signature", None)
+    if expected_exact != checkpoint.get("exact_experiment_resume_signature"):
+        raise ValueError("Exact experiment training/expert/schedule configuration changed on resume")
+    expected_reference = getattr(agent, "_solution_reference_contract", "legacy")
+    saved_reference = checkpoint.get("solution_reference_contract", "legacy")
+    if expected_reference != saved_reference:
+        raise ValueError("Solution reference contract changed on resume; initialize weights instead")
     expected_protocol = getattr(agent, '_ppo_protocol_signature', None)
     saved_protocol = checkpoint.get('ppo_protocol_signature', protocol_signature(checkpoint.get('config', {})))
     if expected_protocol is not None and saved_protocol != expected_protocol:
@@ -1565,6 +1834,9 @@ def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: 
     was_training = agent.training
     try:
         with _isolated_eval_rng(eval_seed, device):
+            if cfg.get("experiment_protocol", {}).get("schema") == "aaai_e1_cvrp100_v1":
+                from e1.evaluation import evaluate_controlled_agent
+                return evaluate_controlled_agent(agent, cfg, seed=seed, epoch=epoch, device=device)
             return _evaluate_fixed_dataset_impl(agent, cfg, seed, epoch, device, eval_seed=eval_seed)
     finally:
         agent.train(was_training)
@@ -1735,10 +2007,15 @@ def _update_policy_best_objectives(
     policy_best_objectives: dict[str, float],
     batch,
     envs,
+    *, cfg=None, distributed=None,
 ) -> None:
     num_envs = int(batch.actions.size(1))
     n_traj = int(batch.actions.size(2))
     objective, success, _ = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    e1_contract = cfg is not None and _e1_solution_reference_enabled(cfg)
+    if e1_contract:
+        success = _complete_solution_mask(batch, envs, cfg)
+    discovered = {}
     for env_idx, env in enumerate(envs[:num_envs]):
         instance_id = _env_instance_id(env)
         if instance_id is None:
@@ -1747,9 +2024,13 @@ def _update_policy_best_objectives(
         if successful.size == 0:
             continue
         current_best = float(np.min(successful))
-        previous_best = policy_best_objectives.get(instance_id)
-        if previous_best is None or current_best < previous_best:
-            policy_best_objectives[instance_id] = current_best
+        discovered[instance_id] = min(discovered.get(instance_id, float("inf")), current_best)
+    batches = distributed.gather_objects(discovered) if e1_contract and distributed is not None else [discovered]
+    for updates in batches:
+        for instance_id, current_best in updates.items():
+            previous_best = policy_best_objectives.get(instance_id)
+            if previous_best is None or current_best < previous_best:
+                policy_best_objectives[instance_id] = current_best
 
 
 def _init_policy_route_pool(cfg, train_pool):
@@ -2155,6 +2436,9 @@ def _prepare_sl_expert_candidates(
     num_envs = int(batch.actions.size(1))
     n_traj = int(batch.actions.size(2))
     objective, success, _ = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    e1_contract = _e1_solution_reference_enabled(cfg)
+    if e1_contract:
+        success = _complete_solution_mask(batch, envs, cfg)
     adv_clip = float(adv_cfg.get("sl_candidate_clip", 2.0))
     expert_weight = float(adv_cfg.get("sl_expert_candidate_weight", 2.0))
     candidates: list[SolutionCandidate] = []
@@ -2165,6 +2449,8 @@ def _prepare_sl_expert_candidates(
         if traj is None or traj.length <= 0:
             continue
         ref_obj = float(traj.objective_distance_km)
+        if e1_contract and _finite_nonnegative_cost(ref_obj) is None:
+            continue
         stats = _sl_candidate_improvement_stats(objective[env_idx], success[env_idx], ref_obj, adv_cfg)
         if stats is None:
             continue
@@ -3192,6 +3478,14 @@ def _solution_level_advantage_tensors(
     policy_best_objectives: dict[str, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     adv_cfg = _advantage_config(cfg)
+    e1_contract = _e1_solution_reference_enabled(cfg)
+    if e1_contract:
+        policy_best_objectives = {
+            key: cost for key, value in (policy_best_objectives or {}).items()
+            if (cost := _finite_nonnegative_cost(value)) is not None
+        }
+        expert_buffer = _E1CostReferenceSnapshot(
+            expert_buffer, policy_best_objectives, [_env_instance_id(env) for env in envs])
     relative_scale = str(adv_cfg.get("sl_advantage_scale_mode", "absolute")).lower() == "relative"
     use_group = _group_advantage_enabled(cfg)
     use_ref = _reference_advantage_enabled(cfg)
@@ -3199,6 +3493,8 @@ def _solution_level_advantage_tensors(
     num_envs = int(batch.actions.size(1))
     n_traj = int(batch.actions.size(2))
     objective, success, served = _final_info_arrays(batch.final_infos, num_envs, n_traj)
+    if e1_contract:
+        success = _complete_solution_mask(batch, envs, cfg)
     feasible_objective = success & np.isfinite(objective)
     route_adv = np.zeros((num_envs, n_traj), dtype=np.float64)
     info = {
@@ -3234,7 +3530,7 @@ def _solution_level_advantage_tensors(
         num_customers = max(1, int(cfg.get("data", {}).get("num_customers", 1)))
         penalty = float(adv_cfg.get("group_infeasible_penalty", 10.0))
         score = -objective.copy()
-        if relative_scale:
+        if relative_scale or e1_contract:
             # Failed partial-route objectives and a fixed distance penalty must
             # never enter scale-relative group moments. An all-failed group has
             # no on-policy learning signal even when an expert is available.
@@ -3253,9 +3549,9 @@ def _solution_level_advantage_tensors(
         within_stds: list[float] = []
         reference_count = 0
         for env_idx, env in enumerate(envs[:num_envs]):
-            row_mask = feasible_objective[env_idx] if relative_scale else np.isfinite(score[env_idx])
+            row_mask = feasible_objective[env_idx] if relative_scale or e1_contract else np.isfinite(score[env_idx])
             row_values = score[env_idx, row_mask].astype(np.float64, copy=True)
-            if relative_scale and not row_values.size:
+            if (relative_scale or e1_contract) and not row_values.size:
                 valid_counts.append(0)
                 continue
             if include_reference and expert_buffer is not None:
@@ -3269,7 +3565,7 @@ def _solution_level_advantage_tensors(
                     memory_obj = policy_best_objectives.get(instance_id)
                     if memory_obj is not None and np.isfinite(memory_obj) and memory_obj > 0.0:
                         ref_obj = min(float(ref_obj), float(memory_obj)) if ref_obj is not None else float(memory_obj)
-                if ref_obj is not None and np.isfinite(ref_obj) and ref_obj > 0.0:
+                if ref_obj is not None and np.isfinite(ref_obj) and (ref_obj >= 0.0 if e1_contract else ref_obj > 0.0):
                     row_values = np.concatenate([row_values, np.asarray([-float(ref_obj)], dtype=np.float64)])
                     reference_count += 1
             valid_counts.append(int(row_values.size))
@@ -3277,7 +3573,7 @@ def _solution_level_advantage_tensors(
                 continue
             means[env_idx, 0] = float(row_values.mean())
             scale_reference = -float(row_values.mean())
-            if include_reference and expert_buffer is not None and ref_obj is not None and np.isfinite(ref_obj) and ref_obj > 0:
+            if include_reference and expert_buffer is not None and ref_obj is not None and np.isfinite(ref_obj) and (ref_obj >= 0 if e1_contract else ref_obj > 0):
                 scale_reference = float(ref_obj)
             stds[env_idx, 0] = max(float(row_values.std()), _solution_advantage_std_floor(adv_cfg, reference=scale_reference, absolute_key="group_adv_std_floor"))
             within_stds.append(float(row_values.std()))
@@ -3285,7 +3581,7 @@ def _solution_level_advantage_tensors(
         std = stds
         denominator = np.maximum(std, np.finfo(np.float64).tiny) if relative_scale else std + 1e-8
         group_adv = (score - mean) / denominator
-        if relative_scale:
+        if relative_scale or e1_contract:
             group_adv = np.where(feasible_objective, group_adv, 0.0)
         group_adv = np.clip(group_adv, -float(adv_cfg.get("group_adv_clip", 3.0)), float(adv_cfg.get("group_adv_clip", 3.0)))
         group_adv *= float(adv_cfg.get("group_adv_coef", 0.30))
@@ -3300,7 +3596,7 @@ def _solution_level_advantage_tensors(
         sl_candidate_coef = float(adv_cfg.get("sl_candidate_coef", 0.10))
         sl_candidate_rho = max(float(adv_cfg.get("sl_candidate_rho", 0.10)), 1e-8)
         sl_candidate_clip = float(adv_cfg.get("sl_candidate_clip", 2.0))
-        success_only = relative_scale or bool(adv_cfg.get("sl_candidate_success_only", True))
+        success_only = relative_scale or e1_contract or bool(adv_cfg.get("sl_candidate_success_only", True))
         positive_coef = float(adv_cfg.get("sl_candidate_positive_coef", 1.0))
         negative_coef = float(adv_cfg.get("sl_candidate_negative_coef", 1.0))
         sl_candidate_mode = str(adv_cfg.get("sl_candidate_advantage_mode", "remaining_gap")).lower()
@@ -3317,7 +3613,7 @@ def _solution_level_advantage_tensors(
         for env_idx, env in enumerate(envs[:num_envs]):
             instance_id = _env_instance_id(env)
             ref_obj = expert_buffer.reference_objective(instance_id)
-            if ref_obj is None or not np.isfinite(ref_obj) or ref_obj <= 0.0:
+            if ref_obj is None or not np.isfinite(ref_obj) or (ref_obj < 0.0 if e1_contract else ref_obj <= 0.0):
                 continue
             if sl_candidate_mode in {"gap", "gap_reduction", "remaining_gap", "remaining-gap", "improvement"}:
                 stats = _sl_candidate_improvement_stats(objective[env_idx], success[env_idx], float(ref_obj), adv_cfg)
@@ -3393,7 +3689,7 @@ def _solution_level_advantage_tensors(
         ref_clip = float(adv_cfg.get("reference_adv_clip", 2.0))
         ref_coef = float(adv_cfg.get("reference_adv_coef", 0.10))
         ref_rho = max(float(adv_cfg.get("reference_adv_rho", 0.10)), 1e-8)
-        success_only = relative_scale or bool(adv_cfg.get("reference_success_only", True))
+        success_only = relative_scale or e1_contract or bool(adv_cfg.get("reference_success_only", True))
         ref_mode = str(adv_cfg.get("reference_advantage_mode", "absolute")).lower()
         gap_baseline_mode = str(adv_cfg.get("reference_gap_baseline", "mean")).lower()
         gap_floor_ratio = max(float(adv_cfg.get("reference_gap_floor_ratio", 0.01)), 0.0)
@@ -3416,7 +3712,7 @@ def _solution_level_advantage_tensors(
                 memory_obj = policy_best_objectives.get(instance_id)
                 if memory_obj is not None and np.isfinite(memory_obj) and memory_obj > 0.0:
                     ref_obj = min(float(ref_obj), float(memory_obj)) if ref_obj is not None else float(memory_obj)
-            if ref_obj is None or not np.isfinite(ref_obj) or ref_obj <= 0.0:
+            if ref_obj is None or not np.isfinite(ref_obj) or (ref_obj < 0.0 if e1_contract else ref_obj <= 0.0):
                 ref_adv[env_idx] = 0.0
                 gate[env_idx, 0] = 0.0
                 memory_gate[env_idx, 0] = 0.0
@@ -3481,8 +3777,13 @@ def _solution_level_advantage_tensors(
             if memory_gaps:
                 info["ref_memory_gap_mean"] = float(np.mean(memory_gaps))
 
-    if relative_scale:
+    if relative_scale or e1_contract:
         route_adv = np.where(feasible_objective, route_adv, 0.0)
+    if e1_contract:
+        info["sl_reference_contract"] = E1_SOLUTION_REFERENCE_CONTRACT
+        info["sl_reference_available_instances"] = float(sum(
+            value is not None for value in expert_buffer.costs.values()))
+        info["sl_complete_feasible_routes"] = float(feasible_objective.sum())
     info["route_adv_mean"], info["route_adv_std"] = _finite_mean_std(route_adv)
     info.update(numpy_distribution(route_adv, "monitor_route_adv", success))
     return (
@@ -4353,6 +4654,7 @@ def train_from_config(
     run_session_id = f"{os.getpid()}-{time.time_ns()}"
     cfg = deep_update(cfg, overrides or {})
     _apply_solution_level_aliases(cfg)
+    _validate_e1_solution_contract(cfg)
     model_integration_signature(cfg)
     input_normalization_signature(cfg)  # Fail before creating devices, datasets or optimizers.
     train_cfg = cfg["training"]
@@ -4482,6 +4784,7 @@ def train_from_config(
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
+            e1_base_distance_row=bool(model_cfg.get("e1_base_distance_row", False)),
             use_residual_edge_bias=bool(model_cfg.get("use_residual_edge_bias", False)),
             use_rdi_v2=bool(model_cfg.get("use_rdi_v2", False)),
             rdi_hidden_dim=int(model_cfg.get("rdi_hidden_dim", 32)),
@@ -4513,6 +4816,8 @@ def train_from_config(
 
     agent = _make_agent()
     agent._ppo_protocol_signature = protocol_signature(cfg)
+    agent._solution_reference_contract = (cfg.get("offline", {}) or {}).get("solution_reference_contract", "legacy")
+    agent._exact_experiment_resume_signature = _exact_experiment_resume_signature(cfg)
     input_profile = configure_input_normalization(agent, cfg)
     model_profile = configure_model_integration(agent, cfg)
     init_checkpoint_info: dict[str, Any] = {}
@@ -4593,6 +4898,10 @@ def train_from_config(
     set_seed(sampling_seed)
     gamma = float(train_cfg.get("gamma", 0.99))
     epochs = int(train_cfg.get("epochs", 500))
+    requested_stop = train_cfg.get("stop_after_epoch")
+    stop_after_epoch = min(epochs, int(requested_stop)) if requested_stop is not None else epochs
+    if (requested_stop is not None and stop_after_epoch < resume_start_epoch) or stop_after_epoch < 1:
+        raise ValueError("training.stop_after_epoch precedes the resumable training boundary")
     if resume_start_epoch > epochs + 1:
         raise ValueError(f"resume_start_epoch={resume_start_epoch} exceeds epochs={epochs}")
     num_envs_cfg = int(train_cfg.get("num_envs_per_gpu", 128))
@@ -4603,6 +4912,9 @@ def train_from_config(
     checkpoint_interval = int(train_cfg.get("checkpoint_interval", 50))
     latest_checkpoint_interval = int(train_cfg.get("latest_checkpoint_interval", 0) or 0)
     eval_interval = int(eval_cfg.get("eval_interval", 0) or 0)
+    eval_epoch_offset = int(eval_cfg.get("eval_epoch_offset", 0) or 0)
+    if eval_epoch_offset < 0:
+        raise ValueError("evaluation.eval_epoch_offset must be nonnegative")
     debug_enabled = bool(train_cfg.get("debug", False))
     debug_log_every = max(1, int(train_cfg.get("debug_log_every", 1)))
     profile_timing = bool(train_cfg.get("profile_timing", False))
@@ -5151,6 +5463,12 @@ def train_from_config(
     train_fields.extend(["global_unique_instances_per_rollout", "global_duplicate_instances_per_rollout", "global_instance_ids_observed", "global_instance_ids_missing"])
     train_fields.extend(["global_train_feasible_rate", "global_train_avg_best_objective_distance_km", "global_policy_loss", "global_value_loss", "global_entropy", "global_approx_kl"])
     sample_count_offset = 0
+    track_experiment_budget = bool(train_cfg.get("track_experiment_budget", False))
+    experiment_budget = {key: 0 for key in EXPERIMENT_BUDGET_FIELDS}
+    if track_experiment_budget:
+        train_fields.extend(f"budget_{key}" for key in EXPERIMENT_BUDGET_FIELDS)
+        train_fields.append("online_epoch")
+        eval_fields.append("online_epoch")
     append_existing_logs = bool(resume_checkpoint_path and resume_append_logs and resume_start_epoch > 1)
     if append_existing_logs and resume_truncate_logs:
         _truncate_csv_after_epoch(log_path, resume_start_epoch - 1)
@@ -5194,6 +5512,11 @@ def train_from_config(
                     best_eval_objective = float("inf")
                     best_eval_epoch = 0
         policy_best_objectives: dict[str, float] = {}
+        incumbent_identity = _e1_incumbent_identity(pool, cfg) if (_e1_solution_reference_enabled(cfg) or track_experiment_budget) else None
+        if incumbent_identity is not None:
+            identities = distributed.gather_objects(incumbent_identity)
+            if any(identity != incumbent_identity for identity in identities):
+                raise ValueError("E1 distributed cost incumbents require identical ordered training instances on all ranks")
         policy_route_pool = _init_policy_route_pool(cfg, pool)
         if policy_route_pool is not None:
             agent.policy_route_pool = policy_route_pool
@@ -5259,15 +5582,62 @@ def train_from_config(
             # New zero-initialized adapters must not shift the rollout RNG stream.
             set_seed(rank_seed(int(train_cfg["post_init_seed"]), distributed.rank))
         pending_training = getattr(agent, "_pending_training_resume_state", None)
+        if resume_checkpoint_path and incumbent_identity is not None and pending_training is None:
+            raise ValueError("E1 full resume requires sampler/RNG/cost state, not a weights-only checkpoint")
         if pending_training is not None:
             saved_world_size = int(pending_training.get("world_size", 1))
             if saved_world_size != distributed.world_size:
                 raise ValueError(f"Resume world size changed: {saved_world_size} -> {distributed.world_size}; initialize weights instead")
+            if incumbent_identity is not None:
+                _validate_e1_resume_state(pending_training["ranks"][distributed.rank], incumbent_identity)
+            if track_experiment_budget:
+                saved_budget = pending_training.get("experiment_budget")
+                if saved_budget is None:
+                    raise ValueError("Budget-tracked resume requires cumulative experiment counters")
+                experiment_budget.update({key: int(saved_budget[key]) for key in EXPERIMENT_BUDGET_FIELDS})
+            saved_selection = pending_training.get("best_validation_selection")
+            if saved_selection is not None:
+                best_eval_objective = float(saved_selection["objective_distance_km"])
+                best_eval_feasible_rate = float(saved_selection["feasible_rate"])
+                best_eval_epoch = int(saved_selection["epoch"])
             sample_count_offset = restore_local_training_state(
                 pending_training["ranks"][distributed.rank], distributed, pool, expert_buffer,
                 policy_route_pool, policy_best_objectives, scaler,
             )
+            if incumbent_identity is not None:
+                agent._training_resume_state = pending_training
             del agent._pending_training_resume_state
+        # A recovery checkpoint is intentionally saved before validation. Resume
+        # that pending validation before spending the next rollout, with isolated
+        # RNG and the same best-selection state, including backup-only recovery.
+        if incumbent_identity is not None and pending_training is not None and pending_training.get("evaluation_pending"):
+            pending_epoch = int(pending_training["completed_epoch"])
+            resumed_eval = None
+            if distributed.is_primary:
+                resumed_eval = evaluate_fixed_dataset(agent, cfg, seed=seed, epoch=pending_epoch, device=device)
+                if track_experiment_budget:
+                    resumed_eval["online_epoch"] = max(0, pending_epoch - eval_epoch_offset)
+                eval_writer.writerow({"epoch": pending_epoch, **resumed_eval})
+                ef.flush()
+                if _is_better_eval_result(resumed_eval, best_eval_feasible_rate, best_eval_objective):
+                    best_eval_objective = float(resumed_eval["eval_avg_objective_distance_km"])
+                    best_eval_feasible_rate = float(resumed_eval["eval_feasible_rate"])
+                    best_eval_epoch = pending_epoch
+                    pending_training["evaluation_pending"] = False
+                    pending_training["best_validation_selection"] = {
+                        "objective_distance_km": best_eval_objective,
+                        "feasible_rate": best_eval_feasible_rate, "epoch": best_eval_epoch}
+                    save_checkpoint(ckpt_dir / "checkpoint_best.pt", agent, optimizer, cfg, pending_epoch, seed)
+                    (ckpt_dir / "best_checkpoint.json").write_text(json.dumps({
+                        "epoch": best_eval_epoch, "eval_avg_objective_distance_km": best_eval_objective,
+                        "eval_feasible_rate": best_eval_feasible_rate,
+                        "selection": "feasibility_then_distance_v1"}, indent=2))
+            best_eval_objective, best_eval_feasible_rate, best_eval_epoch = distributed.broadcast_object(
+                (best_eval_objective, best_eval_feasible_rate, best_eval_epoch))
+            pending_training["evaluation_pending"] = False
+            pending_training["best_validation_selection"] = {
+                "objective_distance_km": best_eval_objective,
+                "feasible_rate": best_eval_feasible_rate, "epoch": best_eval_epoch}
         initial_eval_start = time.perf_counter()
         initial_eval = _evaluate_before_training(
             agent, cfg, seed, device, resume_checkpoint_path=resume_checkpoint_path,
@@ -5287,7 +5657,7 @@ def train_from_config(
                 f"status={initial_eval.get('eval_status')}",
             )
         distributed.barrier()
-        for epoch in range(resume_start_epoch, epochs + 1):
+        for epoch in range(resume_start_epoch, stop_after_epoch + 1):
             epoch_start = time.perf_counter()
             distributed.reset_epoch()
             epoch_schedule = apply_epoch_schedule(cfg, optimizer, epoch)
@@ -5310,6 +5680,7 @@ def train_from_config(
             set_pbrs_reward_scale(envs, pbrs_scale)
             agent.train()
             offline_updates = 0
+            epoch_expert_backward_steps = 0
             bc_info: dict[str, Any] = {}
             priority_info: dict[str, Any] = {}
             sl_info: dict[str, Any] = {}
@@ -5507,10 +5878,14 @@ def train_from_config(
                 gcbpo_pairs: list[GcbpoPreferencePair] = []
                 gcbpo_candidates: list[GcbpoBranchCandidate] = []
                 if sl_enabled:
+                    # One immutable old-cost snapshot for both policy and expert
+                    # objectives. Current solutions enter memory only afterwards.
+                    reference_incumbents = (dict(policy_best_objectives)
+                        if _e1_solution_reference_enabled(cfg) else policy_best_objectives)
                     if reward_normalization is None:
                         route_adv_tensor, route_success_tensor, adv_info = _solution_level_advantage_tensors(
                             batch, cfg, envs, expert_buffer, device,
-                            policy_best_objectives=policy_best_objectives,
+                            policy_best_objectives=reference_incumbents,
                         )
                     else:
                         route_success_tensor = torch.as_tensor(physical_success, device=device, dtype=torch.bool)
@@ -5525,7 +5900,7 @@ def train_from_config(
                         cfg,
                         envs,
                         expert_buffer,
-                        policy_best_objectives,
+                        reference_incumbents,
                         device,
                     )
                     adv_info.update(sl_candidate_expert_info)
@@ -5534,7 +5909,7 @@ def train_from_config(
                     )
                     # Gate the current batch with historical policy memory only;
                     # the current rollout becomes memory for subsequent epochs.
-                    _update_policy_best_objectives(policy_best_objectives, batch, envs)
+                    _update_policy_best_objectives(policy_best_objectives, batch, envs, cfg=cfg, distributed=distributed)
                     if offline_cfg.get('branch_exploration_enabled', offline_cfg.get('exploration_enabled', False)):
                         from .branch_exploration import run_branch_exploration
                         exploration_info = run_branch_exploration(
@@ -5962,6 +6337,10 @@ def train_from_config(
                                     auxiliary_gradient_sample.sample("expert", sl_coef * expert_loss / group_size)
                                     sampled_expert_routes = float(expert_info["sl_candidate_expert_num_routes"])
                                 _backward(sl_coef * expert_loss / group_size, scaler, amp_enabled)
+                                if track_experiment_budget:
+                                    selected_envs = set(map(int, env_indices))
+                                    epoch_expert_backward_steps += sum(len(candidate.actions)
+                                        for candidate in sl_expert_candidates if candidate.env_idx in selected_envs)
                                 monitor_expert_records.append(expert_info)
                                 sl_candidate_expert_losses.append(float(expert_info["sl_candidate_expert_loss"]))
                                 sl_candidate_expert_ratio_means.append(float(expert_info["sl_candidate_expert_ratio_mean"]))
@@ -6365,11 +6744,14 @@ def train_from_config(
             } if str(device).startswith("cuda") else {}
             eval_row: dict[str, Any] = {}
             eval_wall_time_s = 0.0
-            checkpoint_plan = epoch_checkpoint_plan(
+            checkpoint_plan = _training_checkpoint_plan(
                 epoch, epochs, eval_interval=eval_interval,
                 checkpoint_interval=checkpoint_interval,
                 latest_checkpoint_interval=latest_checkpoint_interval,
+                eval_epoch_offset=eval_epoch_offset,
             )
+            if epoch == stop_after_epoch and stop_after_epoch < epochs:
+                checkpoint_plan = type(checkpoint_plan)(evaluate=checkpoint_plan.evaluate, archive=True, latest=True)
             should_eval = checkpoint_plan.evaluate
             should_checkpoint = checkpoint_plan.archive
             train_wall_time_s = time.perf_counter() - epoch_start
@@ -6406,8 +6788,15 @@ def train_from_config(
                 "global_policy_loss": global_values[2], "global_value_loss": global_values[3],
                 "global_entropy": global_values[4], "global_approx_kl": global_values[5],
             })
+            if track_experiment_budget:
+                distributed_metrics["online_epoch"] = max(0, epoch - eval_epoch_offset)
+                distributed_metrics.update(_update_experiment_budget(
+                    experiment_budget, batch, cfg, envs, distributed,
+                    epoch_expert_backward_steps + int(bc_info.get("bc_steps", 0))))
             if checkpoint_plan.capture_resume_state:
                 local_state = capture_local_training_state(distributed, pool, expert_buffer, policy_route_pool, policy_best_objectives, scaler, sample_count_offset)
+                if incumbent_identity is not None:
+                    local_state["policy_incumbent_identity"] = incumbent_identity
                 rank_states = distributed.gather_objects(local_state)
                 agent._training_resume_state = {
                     "version": 1, "world_size": distributed.world_size, "ranks": rank_states,
@@ -6418,6 +6807,23 @@ def train_from_config(
                     "snapshot_stage": "training_complete_before_evaluation",
                     "evaluation_pending": bool(should_eval),
                 }
+                if track_experiment_budget:
+                    agent._training_resume_state["experiment_budget"] = dict(experiment_budget)
+                    agent._training_resume_state["experiment_budget_semantics"] = (
+                        "global rollout draws and sampled trajectories; completed includes terminal failures; "
+                        "valid_decision_steps uses collector valid mask; expert_backward_steps counts reused "
+                        "teacher-forced actions per gradient evaluation, not unique examples; synchronized "
+                        "optimizer attempts/applied counted once across ranks")
+                if incumbent_identity is not None or train_cfg.get("checkpoint_backup_dir"):
+                    agent._training_resume_state["best_validation_selection"] = {
+                        "objective_distance_km": best_eval_objective,
+                        "feasible_rate": best_eval_feasible_rate, "epoch": best_eval_epoch}
+                    agent._training_resume_state["schedule_state"] = {
+                        "completed_epoch": int(epoch), "next_epoch": int(epoch) + 1,
+                        "last_values": dict(epoch_schedule),
+                        "settings": {key: train_cfg.get(key) for key in (
+                            "epochs", "learning_rate", "lr_schedule", "lr_warmup_epochs", "lr_min",
+                            "entropy_initial_coef", "entropy_final_coef")}}
             if checkpoint_plan.latest:
                 # All optimizer updates are complete. Save before validation so
                 # a validation failure cannot discard this training progress.
@@ -6425,6 +6831,8 @@ def train_from_config(
             if should_eval and distributed.is_primary:
                 eval_start = time.perf_counter()
                 eval_row = evaluate_fixed_dataset(agent, cfg, seed=seed, epoch=epoch, device=device)
+                if track_experiment_budget:
+                    eval_row["online_epoch"] = max(0, epoch - eval_epoch_offset)
                 agent._training_resume_state["evaluation_pending"] = False
                 eval_wall_time_s = time.perf_counter() - eval_start
                 eval_writer.writerow({"epoch": epoch, **eval_row})
@@ -6455,6 +6863,10 @@ def train_from_config(
                     best_eval_objective = eval_obj_f
                     best_eval_feasible_rate = eval_fr_f
                     best_eval_epoch = int(epoch)
+                    if "best_validation_selection" in agent._training_resume_state:
+                        agent._training_resume_state["best_validation_selection"] = {
+                            "objective_distance_km": best_eval_objective,
+                            "feasible_rate": best_eval_feasible_rate, "epoch": best_eval_epoch}
                     best_path = ckpt_dir / "checkpoint_best.pt"
                     save_checkpoint(best_path, agent, optimizer, cfg, epoch, seed)
                     (ckpt_dir / "best_checkpoint.json").write_text(
@@ -6466,6 +6878,10 @@ def train_from_config(
                 eval_payload = distributed.broadcast_object((eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s))
                 eval_row, best_eval_objective, best_eval_feasible_rate, best_eval_epoch, eval_wall_time_s = eval_payload
                 agent._training_resume_state["evaluation_pending"] = False
+                if "best_validation_selection" in agent._training_resume_state:
+                    agent._training_resume_state["best_validation_selection"] = {
+                        "objective_distance_km": best_eval_objective,
+                        "feasible_rate": best_eval_feasible_rate, "epoch": best_eval_epoch}
                 agent.train()
             epoch_wall_time_s = time.perf_counter() - epoch_start
             distributed_metrics.update({
@@ -6580,10 +6996,14 @@ def train_from_config(
             if should_checkpoint:
                 save_checkpoint(ckpt_dir / f"checkpoint_epoch_{epoch:04d}.pt", agent, optimizer, cfg, epoch, seed)
 
-    save_checkpoint(ckpt_dir / "checkpoint_final.pt", agent, optimizer, cfg, epochs, seed)
+    if stop_after_epoch < epochs:
+        completed_path = ckpt_dir / f"checkpoint_epoch_{stop_after_epoch:04d}.pt"
+    else:
+        completed_path = ckpt_dir / "checkpoint_final.pt"
+        save_checkpoint(completed_path, agent, optimizer, cfg, epochs, seed)
     close_pool = getattr(pool, "close", None)
     if callable(close_pool):
         close_pool(terminate=True)
     distributed.barrier()
     distributed.close()
-    return ckpt_dir / "checkpoint_final.pt"
+    return completed_path

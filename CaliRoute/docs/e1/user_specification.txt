@@ -1,0 +1,250 @@
+下面这份可以直接交给 code agent。**本轮只实现和运行 E1：CVRP-Cus100、单 training seed、七个方法从头训练；不混入 E2/E3。**
+
+:chatgpt-content-reference{index="0"}[下载完整执行规格：AAAI E1—CVRP-Cus100 Code Agent 任务书](sandbox:/mnt/data/AAAI_E1_CVRP100_CodeAgent_Spec.md)
+
+完整文档包含逐方法定义、数据合同、专家检查、训练配置、测试项、checkpoint 恢复、推理预算、输出字段和验收标准。下面是主要任务内容。
+
+---
+
+# 给 Code Agent：E1 CVRP-Cus100 实验实现任务
+
+## 1. 任务目标与已知前提
+
+我们需要重建 AAAI 论文主比较表中 **CVRP-Cus100** 的结果。
+
+**所有 learned-model checkpoints 已经丢失，因此本轮模型全部从头训练。** 不要安排加载旧 checkpoint 直接评估，也不要从公开 pretrained checkpoint 初始化来替代重训练。现在所说的“finetune”是调整实现和训练配置，再从头训练。
+
+当前独立 test 正在运行 Gurobi：三个 problems × 三个 scales × 每组 1,000 条，共 9,000 条任务。本轮只使用其中 **CVRP-Cus100 的 1,000 条**进行最终测试。
+
+训练不必等待 test Gurobi 全部完成。**训练与模型选择使用原 train/validation；test 及其 Gurobi 记录不进入训练、expert replay、incumbent 或超参数选择。**
+
+本轮需要交付的是：
+
+> **七个可独立启动、可恢复、可统一评价的 E1 实验配置，以及对应的训练、评估和结果汇总流程。**
+
+## 2. 必须支持的七个实验
+
+| 实验 ID | 论文表格名称 | 架构设置 | 训练方式 | 外部训练专家 |
+|---|---|---|---|---|
+| `ppo_base` | PPO（base） | RDI 关闭，AGDA 关闭 | 原 step-level PPO | 不使用 |
+| `ppo_rdi_agda` | PPO（RDI+AGDA） | RDI、AGDA 开启 | 同一 step-level PPO | 不使用 |
+| `awbc` | AWBC | 与上一行相同 | 提交版本定义的 PPO＋AWBC | 使用 |
+| `dapg` | DAPG | 与上一行相同 | 提交版本定义的 PPO＋DAPG | 使用 |
+| `slppo` | SL-PPO | 与上一行相同 | PPO＋原有 policy/expert solution-level objectives | 使用 |
+| `rrnco` | RRNCO | 保留现有复现版本的原生架构 | 保留其原生训练器 | 不使用 |
+| `radar` | RADAR | 保留现有复现版本的原生架构 | 保留其原生训练器 | 不使用 |
+
+**Gurobi 是正在计算的参照，不是第八个需要重训的模型。不要改变或重启现有 Gurobi 任务。**
+
+### 各配置的实现边界
+
+**PPO（base）只关闭 RDI/AGDA，不额外弱化基础模型。** 保留原本的 query、车辆状态、节点属性、mask，以及原实现已有的道路 distance-row 输入。不要为了对照而删除额外信息，再将其仍称为原来的 base。
+
+**PPO（RDI+AGDA）、AWBC、DAPG、SL-PPO 使用相同 actor。** 不能只为 SL-PPO 增加层数、维度、额外特征或不同 query network。四者的主要差别应当是训练目标及相应经验使用机制。
+
+**AWBC/DAPG 按现有提交版本实现核对。** 不要依据方法名字临时重写一种通用 imitation loss，也不要自动替换成 E3 中计划的 gate-matched BC。
+
+**RRNCO/RADAR 在 E1 中保留原生算法。** 必要的数据与环境适配可以做，但不加入 RDI/AGDA/SL-PPO，不为了 E1 全部改用 PPO。那些改动属于 E2。
+
+## 3. SL-PPO 必须保留当前方法，不引入新机制
+
+本轮 SL-PPO 保持三个部分：
+
+**原 step-level PPO、当前 policy 的完整解学习分支、外部 expert 的完整轨迹分支。**
+
+Policy incumbent **只保存成本**，不新增自身历史轨迹 replay。
+
+参照规则是：
+
+\[
+C_I^{\mathrm{ref}}
+=
+\min\left(
+\text{可用 expert cost},
+\text{可用的旧 policy-incumbent cost}
+\right).
+\]
+
+需要检查：
+
+- 有外部记录时，自身 incumbent 仍可以提供更好的成本参照，不是 `if expert else incumbent`。
+- 没有外部记录时，expert replay 关闭，但符合条件的 policy solution-level learning 不应被一起关闭。
+- 两种参照都不存在时，reference 项按原定义处理，不产生无穷值运算或 NaN。
+- 当前 batch 使用更新前的 incumbent；当前发现的新 best 留给后续访问，不能在同一 batch 内反复改写参照。
+- 只有完整、可行、成本有限的 policy solution 才能更新 incumbent。
+- 保存输出轨迹用于评价，不等于将这些轨迹加入 self-replay。
+
+**不要因为某个分支实现困难，就悄悄关闭它，然后继续用“完整 SL-PPO”命名结果。**
+
+## 4. 启动前先审计数据和专家资产
+
+### 4.1 数据审计
+
+输出 train、validation、test 的实际路径、数量、实例 ID、territory、数据版本和 hash。
+
+所有方法必须使用同一套实例，保持：
+
+**相同道路距离矩阵、客户需求、车辆容量、depot、成本单位和任务约束。**
+
+特别检查外部 adapter：
+
+- 不能把有向道路矩阵对称化，或重新从坐标计算欧式成本。
+- 总距离必须包含每辆车返回 depot 的边。
+- 需求归一化不能改变实际的需求／容量比例。
+- CVRP 不应误启用时间窗、电池或充电约束。
+- 不额外添加固定车辆成本、强制车辆数量等新目标。
+- 解码 cap、失败和截断处理需要明确，不能各方法静默沿用不同规则。
+
+同时实现或复用一个**独立路线 validator**，直接根据实例和输出动作重新计算可行性与距离，不只相信模型内部返回的 reward。
+
+### 4.2 专家资产审计：不能只看有没有 CSV
+
+完整 AWBC/DAPG/SL-PPO 所需的专家资产，不是只有一个最优成本字段，而是：
+
+\[
+\text{训练实例身份}
++
+\text{完整可回放轨迹}
++
+\text{一致的完整解成本}.
+\]
+
+请统计：
+
+| 检查项 | 需要输出 |
+|---|---|
+| 有 Gurobi incumbent 的训练实例 | 数量及比例 |
+| 有完整路线或可恢复 arc variables | 数量及比例 |
+| 能通过独立 validator | 数量及失败原因 |
+| 能在训练环境中完成 teacher forcing | 数量及失败原因 |
+| 重新计算成本与记录成本一致 | 数量、容差及异常 |
+
+如果只有 cost、没有路线，但保存了可恢复的弧变量，可以确定性恢复后验证。**只有成本、无法恢复轨迹时，不能臆造 trajectory，也不能拿 test 轨迹补。**
+
+这种情况下，依赖完整专家的配置明确标记为缺少资产；**PPO、RRNCO、RADAR 等不依赖专家的方法仍可继续。**
+
+三个经验方法使用同一个审计通过的 expert pool。算法自己的 weighting/gating 可以不同，但不能给某个方法提供质量更高或数量更多的原始专家记录。
+
+## 5. 训练配置：公共协议先固定，再开始长任务
+
+以下数值分为**本轮建议默认**和**必须核查项**，不要把建议默认误写成原论文参数。
+
+| 项目 | 本轮要求 |
+|---|---|
+| Training seed | 建议固定为 **3009** |
+| 初始化 | 全部从头训练 |
+| Controlled PPO 的 update epochs | 建议五个受控方法统一为 **4**；明确这是本轮匹配后的配置 |
+| \(\gamma\) | 先核对提交版本和当前代码；前期讨论记录为 0.99，本轮不同时展开 \(\gamma=1\) 消融 |
+| Actor/critic、公共 PPO 参数 | 四个增强 controlled methods 使用匹配配置 |
+| 训练总预算 | 核查 epoch 含义后固定，不能只让所有配置显示同一个 epoch 数 |
+| Train batch、rollout 数、minibatch | Controlled methods 匹配，记录梯度累积和实际样本量 |
+| Validation | 相同实例、周期和 checkpoint 选择规则 |
+| 专家特有参数 | 按现有实现核查并显式配置，不凭记忆补公式 |
+
+**必须明确 epoch 是什么。** 是遍历全部训练实例一遍，还是一次采样／更新循环？不要把配置中的 `1500` 未经核对地解释成 1,500 次完整数据遍历。
+
+对七个方法都记录实际的训练实例暴露次数、完整 rollouts、决策步数、optimizer updates 和运行时间。**相同在线 rollout 预算不等于相同总计算量**；专家 replay 的额外工作也要记录。
+
+开发阶段允许有限的 train/validation 调参，但不以“必须打败所有 baseline”为停止条件。正式配置确定后冻结，不能边跑边覆盖 YAML。
+
+## 6. 正式训练前，每个方法先通过端到端 smoke test
+
+最小流程：
+
+\[
+\text{加载数据}
+\rightarrow
+\text{生成 rollout}
+\rightarrow
+\text{一次参数更新}
+\rightarrow
+\text{validation}
+\rightarrow
+\text{保存}
+\rightarrow
+\text{新进程恢复}.
+\]
+
+重点检查以下行为：
+
+| 测试 | 验收标准 |
+|---|---|
+| 模块开关 | 关闭的模块和 loss 不通过隐藏路径贡献梯度 |
+| PPO 概率重算 | 固定权重、相同状态／动作时，old/new log-probability 一致 |
+| 完成与截断 | 未回 depot、客户未完成等不能冒充完整 solution |
+| 专家回放 | 节点映射、可行 mask、成本和终止状态正确 |
+| Incumbent | 可用性判断、取最小值、旧值快照与更新时序正确 |
+| Multi-start | 不同轨迹的动态状态与 AGDA 修正不错误共享 |
+| Forced actions | 手动指定 depot／首客户、padding 不被误当作普通随机动作 |
+| 缺失专家 batch | 正常回退，无 NaN，不静默改变整个算法 |
+| 保存与恢复 | 能恢复训练状态，不只加载 actor 权重 |
+
+Smoke 只检验实现，不要求一开始就有明显提升或 100% 完成率。
+
+## 7. Checkpoint 保存与恢复必须纳入本轮交付
+
+每个 run 使用独立目录，至少保存：
+
+**`best`、可续训的 `last`、完整 resolved config、代码版本、数据／专家 hash 和日志。**
+
+恢复状态应包括 actor、critic、optimizer、scheduler、使用中的 scaler、训练计数器、数据采样状态和 RNG。**SL-PPO 还要保存 cost-only incumbent cache 及其实例映射。**
+
+持久化成本缓存是为了正确续训，不是新增 self-replay。若恢复后清空了 incumbent，必须记录该变化，不能声称是无变化续训。
+
+Checkpoint 使用可靠写入，并备份到独立位置。备份是否成功需要真实检查，不能只打印一句 “saved”。
+
+## 8. 最终 test 的统一协议
+
+模型结构、训练配置及 checkpoint 选择规则确定后，再进行正式 test。
+
+**建议统一每实例 \(K=50\) 条候选尝试，选择经独立验证的最低成本可行解。** 这是本轮评价协议建议，需先检查七个方法的接入方式。
+
+原生 greedy/multistart/sampling 可以保留，但必须明确记录。尤其不能把 `50 starts × 8 augmentations` 报告成只有 50 条候选，也不能让某方法失败后继续额外采样却不计预算。
+
+逐实例至少保存：
+
+```text
+method, run_id, training_seed, inference_seed
+instance_id, territory_id, checkpoint_id
+requested_K, actual_K, decode_mode
+completed, feasible, truncated, failure_reason
+reported_cost, recomputed_cost_km
+num_routes, action_count
+runtime, timing_batch_size, timing_scope
+selected_route / trajectory
+```
+
+没有可行解时保留失败记录，成本留空；**不能写成 0、把惩罚值当作真实 km、用 Gurobi 解补位或删除实例。**
+
+Runtime 区分单实例 latency 与 batch 摊销时间，固定计时范围，不把某个方法必须执行的编码、SVD 或初始化工作单独移到计时之外。
+
+Gurobi 后续按 instance ID 合并。相对于两小时 incumbent 的差距，可以为负，不能称为“最优性 gap”。同时报告用于比较的实例数量和成功情况。
+
+**本轮只有一个 training seed，不输出伪造的 seed mean±std。**
+
+## 9. Code agent 需要交付什么？
+
+建议提供以下入口或复用现有等价功能：
+
+| 功能 | 交付要求 |
+|---|---|
+| `preflight` | 数据、专家、配置、方法差异审计 |
+| `smoke` | 按方法运行最小端到端检查 |
+| `launch` | 单方法／批量启动，支持 dry-run 和显式 execute |
+| `resume` | 恢复训练状态，检查配置与实例身份一致性 |
+| `evaluate` | 固定推理预算、独立校验、保存逐实例结果 |
+| `summarize` | 合并 learned/Gurobi 结果，生成 E1 汇总 |
+
+审计、配置生成和 smoke **不能隐式启动七个全量长训练任务**。长任务由显式启动操作触发，并根据 GPU、CPU、内存和磁盘余量分批安排，不影响正在运行的 Gurobi。
+
+最终向用户回报时，区分：
+
+**已实现、已通过 smoke、已启动、训练完成、test 完成。**
+
+不能把“脚本写好了”当成“实验跑完了”，也不能把提前中断的 run 标记成完整结果。
+
+---
+
+**本轮验收目标：七个 E1 配置定义清楚；具备有效资产的方法可以可靠地从头训练、保存恢复和统一评价；缺失资产或实现问题被明确标记，而不是通过关闭分支、替换数据或弱化 baseline 来凑齐表格。**
+
+原主文与 Appendix 附件目前已过期；若需要重新逐项核对原始公式和参数，请重新上传这两个 PDF。任务书已经把待核对项与本轮执行建议分开，不影响 code agent 先完成仓库审计、配置和测试入口。

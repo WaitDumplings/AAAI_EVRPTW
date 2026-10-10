@@ -147,6 +147,61 @@ class DriverQueryEncoder(nn.Module):
         return self.query_proj(torch.cat([graph_context, current_node, state_context], dim=-1))
 
 
+class E1BaseDistanceRow(nn.Module):
+    """E1 shared road row extracted from the original AGDA candidate pathway.
+
+    The original decoder had no independent road-row branch when AGDA was off.
+    This opt-in split keeps its distance slots (12:15), clamps, 30-slot LayerNorm,
+    candidate action-key MLP, scalar-bias MLP and learned tanh scales. The other
+    candidate slots are fixed zeros; no time, energy or Euclidean proxy enters.
+    Zero heads preserve the initial policy and learn the row during updates.
+    """
+    def __init__(self, embedding_dim):
+        super().__init__()
+        self.candidate_delta_base = nn.Sequential(
+            nn.LayerNorm(30), nn.Linear(30, embedding_dim), nn.SiLU())
+        self.candidate_action_key_delta_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.action_bias_proj = nn.Sequential(
+            nn.LayerNorm(30), nn.Linear(30, embedding_dim), nn.SiLU(), nn.Linear(embedding_dim, 1))
+        self.action_key_scale = nn.Parameter(torch.tensor(0.1))
+        self.action_bias_scale = nn.Parameter(torch.tensor(0.1))
+        for layer in (self.candidate_delta_base[1], self.action_bias_proj[1]):
+            nn.init.xavier_uniform_(layer.weight, gain=0.5)
+            nn.init.zeros_(layer.bias)
+        for layer in (self.candidate_action_key_delta_proj, self.action_bias_proj[3]):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    @staticmethod
+    def features(state, node_embeddings, steps):
+        # edge_distance is already physical road km / the frozen input unit.
+        # Never renormalize a row, symmetrize it, or replace it by coordinates.
+        edge = state.states['edge_distance'].to(node_embeddings)
+        if edge.dim() == 2:
+            edge = edge.unsqueeze(0)
+        batch, nodes = node_embeddings.shape[:2]
+        if edge.size(0) == 1 and batch != 1:
+            edge = edge.expand(batch, -1, -1)
+        if tuple(edge.shape) != (batch, nodes, nodes):
+            raise ValueError('E1 base distance row requires an aligned directed road matrix')
+        current = DriverQueryEncoder._as_step_index(state.get_current_node(), steps, node_embeddings)
+        batch_idx = torch.arange(batch, device=edge.device)[:, None]
+        travel = edge[batch_idx, current, :]
+        back = edge[:, None, :, 0].expand(-1, steps, -1)
+        detour = travel + back - edge[batch_idx, current, 0].unsqueeze(-1)
+        # Masked/unreachable edges must not poison a shared projection with NaN.
+        clean = lambda x: torch.nan_to_num(x, nan=0., posinf=2., neginf=-1.)
+        row = torch.stack((clean(travel).clamp(0., 2.), clean(back).clamp(0., 2.),
+                           clean(detour).clamp(-1., 2.)), dim=-1)
+        return torch.nn.functional.pad(row, (12, 15))
+
+    def forward(self, state, node_embeddings, steps):
+        features = self.features(state, node_embeddings, steps)
+        action_key = self.candidate_action_key_delta_proj(self.candidate_delta_base(features))
+        bias = self.action_bias_proj(features).squeeze(-1)
+        return torch.tanh(self.action_key_scale) * action_key, torch.tanh(self.action_bias_scale) * bias
+
+
 class DynamicGraphKVEncoder(AdaptiveGraphAttention):
     """
     Candidate-side dynamic graph encoder for the decoder.
@@ -772,6 +827,7 @@ class Decoder(nn.Module):
         decoder_observation_mode="feasible",
         edge_relation_dim=16,
         use_edge_relation_encoder=False,
+        e1_base_distance_row=False,
     ):
         super().__init__()
 
@@ -840,6 +896,10 @@ class Decoder(nn.Module):
                     use_edge_relations=use_edge_relation_encoder,
                     edge_relation_dim=edge_relation_dim,
                 )
+        self.e1_distance_row = None
+        if e1_base_distance_row:
+            with torch.random.fork_rng(devices=[]):
+                self.e1_distance_row = E1BaseDistanceRow(embedding_dim)
         self.decode_type = None
 
     # ------------------------------------------------------------------
@@ -938,6 +998,13 @@ class Decoder(nn.Module):
                 action_key_delta = action_key_delta.unsqueeze(1)
             action_key_delta = action_key_delta + physical_key_delta
             action_bias = action_bias + physical_bias_delta
+
+        if self.e1_distance_row is not None:
+            row_key, row_bias = self.e1_distance_row(state, node_embeddings, query.size(1))
+            if torch.is_tensor(action_key_delta) and action_key_delta.dim() == 3:
+                action_key_delta = action_key_delta.unsqueeze(1)
+            action_key_delta = action_key_delta + row_key
+            action_bias = action_bias + row_bias
 
         tensor_deltas = [
             delta

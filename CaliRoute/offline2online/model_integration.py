@@ -16,6 +16,7 @@ FLAGS = ('use_typed_static_fusion', 'use_edge_relation_encoder',
          'use_edge_value_messages', 'use_edge_state_updates', 'use_resource_decoder')
 FEATURE_FLAGS = ('agda_physical_candidate_features', 'agda_smooth_distance_features')
 JOINT_GRAPH_FLAG = 'use_joint_graph_encoder'
+E1_ROW_FLAG = 'e1_base_distance_row'
 
 
 def _canonical_model(model):
@@ -25,6 +26,11 @@ def _canonical_model(model):
         if not isinstance(value, bool):
             raise ValueError(f'{name} must be a boolean')
         result[name] = value
+    e1_row = model.get(E1_ROW_FLAG, False)
+    if not isinstance(e1_row, bool):
+        raise ValueError('e1_base_distance_row must be a boolean')
+    if e1_row:
+        result[E1_ROW_FLAG] = True  # optional: preserve all historical disabled signatures
     joint_graph = model.get(JOINT_GRAPH_FLAG, False)
     if not isinstance(joint_graph, bool):
         raise ValueError('use_joint_graph_encoder must be a boolean')
@@ -59,7 +65,7 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG))
+    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, E1_ROW_FLAG))
 
 
 def signature(cfg):
@@ -117,6 +123,8 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
     if source != target and (source.get(JOINT_GRAPH_FLAG, False) or target.get(JOINT_GRAPH_FLAG, False)):
         raise ValueError('Joint graph architecture changed; graph checkpoints require an identical '
                          'model integration profile. Start the new architecture from scratch.')
+    if source != target and (source.get(E1_ROW_FLAG, False) or target.get(E1_ROW_FLAG, False)):
+        raise ValueError('E1 shared distance-row profile changed; use an identical profile or start from scratch')
     if resume and source != target:
         raise ValueError('Model integration changed on resume; use weights-only initialization')
     if resume:

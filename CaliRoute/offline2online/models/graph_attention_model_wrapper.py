@@ -222,6 +222,7 @@ class Backbone(nn.Module):
         joint_graph_edge_dim: int = 32,
         joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
+        e1_base_distance_row: bool = False,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
@@ -253,6 +254,8 @@ class Backbone(nn.Module):
         if use_joint_graph_encoder:
             self.model_integration_settings.update(use_joint_graph_encoder=True,
                 joint_graph_edge_dim=joint_graph_edge_dim, joint_graph_dropout=joint_graph_dropout)
+        if e1_base_distance_row:
+            self.model_integration_settings['e1_base_distance_row'] = True
         self.use_joint_graph_encoder = bool(use_joint_graph_encoder)
         effective_edge_dim = joint_graph_edge_dim if use_joint_graph_encoder else edge_relation_dim
         self.use_encoder_distance_bias = bool(use_encoder_distance_bias)
@@ -297,6 +300,7 @@ class Backbone(nn.Module):
             agda_smooth_distance_features=agda_smooth_distance_features,
             use_resource_decoder=use_resource_decoder,
             decoder_observation_mode=decoder_observation_mode,
+            e1_base_distance_row=e1_base_distance_row,
             use_edge_relation_encoder=use_edge_relation_encoder or use_joint_graph_encoder,
             edge_relation_dim=effective_edge_dim,
         )
@@ -602,6 +606,7 @@ class Agent(nn.Module):
         joint_graph_edge_dim: int = 32,
         joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
+        e1_base_distance_row: bool = False,
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -645,6 +650,7 @@ class Agent(nn.Module):
             joint_graph_edge_dim=joint_graph_edge_dim,
             joint_graph_dropout=joint_graph_dropout,
             decoder_observation_mode=decoder_observation_mode,
+            e1_base_distance_row=e1_base_distance_row,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)
