@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Prepare a versioned AAAI candidate run; start GPUs only with --launch.
 
-The recipe owns research parameters. The hardware profile owns memory chunks
+The default core recipe selects a smaller architecture; reference preserves the
+recorded full Graph/explore bundle. The hardware profile owns memory chunks
 and rank allocation. Existing historical launchers and running snapshots remain
 independent. E1 is not defined or started by this entry point.
 """
@@ -46,6 +47,8 @@ def make_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--problem', choices=('vrptw', 'evrptw'), required=True)
     parser.add_argument('--customers', type=int, default=100)
+    parser.add_argument('--preset', choices=('core', 'reference'), default='core',
+        help='core: selected, untrained simplification; reference: recorded full Graph/explore recipe')
     parser.add_argument('--encoder', choices=('graph', 'current'), default='graph')
     parser.add_argument('--hardware', choices=('rtx48_single', '2080ti_dual'), required=True)
     parser.add_argument('--gpus', help='Physical indices; defaults to 0 or 0,1 according to hardware profile')
@@ -65,7 +68,7 @@ def make_parser():
 
 
 def recipe_config(args, output, run_name, world_size):
-    return build_recipe_config(problem=args.problem, customers=args.customers,
+    return build_recipe_config(preset=args.preset, problem=args.problem, customers=args.customers,
         encoder=args.encoder, seed=args.seed, epochs=args.epochs,
         data_root=args.data_root.resolve(), output_dir=output, run_name=run_name,
         world_size=world_size, global_batch=args.global_batch,
@@ -77,7 +80,7 @@ def prepare(args):
     gpus = runtime.shared.parse_gpus(args.gpus or ('0' if args.hardware == 'rtx48_single' else '0,1'))
     world_size = len(gpus)
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
-    run_id = args.run_id or f'AAAI_CANDIDATE_V1_{args.problem.upper()}{args.customers}_{args.encoder.upper()}_{args.hardware.upper()}_S{args.seed}_E{args.epochs}_{stamp}'
+    run_id = args.run_id or f'AAAI_{args.preset.upper()}_V1_{args.problem.upper()}{args.customers}_{args.encoder.upper()}_{args.hardware.upper()}_S{args.seed}_E{args.epochs}_{stamp}'
     if Path(run_id).name != run_id or run_id in ('.', '..'):
         raise ValueError('run-id must be a fresh directory name')
     output = CODE_ROOT / 'results/optimization' / run_id / 'optimized'
@@ -99,7 +102,7 @@ def prepare(args):
         '--learning-rate', str(cfg['training']['learning_rate']),
         '--eval-interval', str(cfg['evaluation']['eval_interval']),
         '--data-root', str(args.data_root.resolve()), '--run-id', run_id,
-        '--base-config', str(CODE_ROOT / 'configs/recipes/aaai_graph_v1.yaml'),
+        '--base-config', str(CODE_ROOT / 'configs/recipes' / ('aaai_graph_core_v1.yaml' if args.preset == 'core' else 'aaai_graph_v1.yaml')),
         '--launch' if args.launch else '--prepare-only',
     ])
     return runtime.prepare(legacy_args, config_builder=lambda base, **kwargs: cfg, arm_label=args.encoder)

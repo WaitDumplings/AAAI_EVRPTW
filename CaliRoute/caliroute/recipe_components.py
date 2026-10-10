@@ -215,7 +215,9 @@ def describe_components(cfg):
             },
         },
         "evidence": {
-            "controlled_recipe_comparisons": ["graph_vs_current_encoder_bundle"],
+            "controlled_recipe_comparisons": [] if protocol.get("preset") == "core" else ["graph_vs_current_encoder_bundle"],
+            "parent_reference_comparisons": ["graph_vs_current_encoder_bundle"] if protocol.get("preset") == "core" else [],
+            "configured_recipe_quality_evidence": protocol.get("configured_recipe_quality_evidence", "consult_run_provenance"),
             "controlled_comparison_scope": "encoder_and_matching_latent_edge_decoder_interface_under_matched_training_protocol",
             "not_independently_established": ["each_joint_graph_gate_value_update", "rdi_residual", "agda_gate", "P0_P1_added_to_joint_graph"],
             "correctness_and_efficiency_evidence_is_not_quality_ablation": True,

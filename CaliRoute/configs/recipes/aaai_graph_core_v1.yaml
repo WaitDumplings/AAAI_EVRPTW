@@ -1,0 +1,22 @@
+# New untrained candidate. Reference results are evidence for the parent recipe,
+# not measured results for this reduced configuration.
+schema_version: 1
+name: aaai_graph_core_v1
+extends: aaai_graph_v1
+status: untrained_candidate
+rationale:
+  - Keep the joint node/edge graph encoder, physical units, DDE, structural route archive and expert supervision.
+  - Remove overlapping static/residual/resource branches; retain the learned-edge decoder interface.
+  - Disable independent branch search; ordinary stochastic policy sampling remains active.
+  - Preserve every numeric optimizer, reward, normalization, replay and evaluation setting from the recorded reference.
+  - Historical group/reference advantage options remain present; resolved_components identifies fields bypassed by physical_shared_popart.
+overrides:
+  model:
+    use_rdi_v2: false
+    use_typed_static_fusion: false
+    use_agda_v2: false
+    use_resource_decoder: false
+    decoder_observation_mode: feasible
+  offline:
+    branch_exploration_enabled: false
+    exploration_enabled: false

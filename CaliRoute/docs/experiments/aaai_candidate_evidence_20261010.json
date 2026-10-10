@@ -286,5 +286,8 @@
       "branch exploration"
     ],
     "interpretation": "The seed3010 result supports the earlier full optimization bundle; the local paired Graph/CURRENT run supports a later encoder-block change. These are two distinct comparisons, not three replications of one architecture."
-  }
+  },
+  "record_scope": "Evidence for the full aaai_graph_v1 reference recipe and historical runs. These scores and original retention notes do not validate the later reduced core.",
+  "selected_core_record": "docs/experiments/aaai_core_selection_20261010.json",
+  "selected_core_quality_status": "Pending paired task-scale core/reference validation; see separate selection record"
 }

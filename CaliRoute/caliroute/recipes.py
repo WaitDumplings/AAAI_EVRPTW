@@ -1,7 +1,8 @@
 """Portable, versioned candidates without changing the existing training engine.
 
-``aaai_graph_v1`` reproduces the recorded Graph/explore training configuration
-for VRPTW100 and EVRPTW100. It is a candidate, not a definition of experiment E1.
+The default ``core`` is an untrained, reduced candidate. Explicit ``reference``
+reproduces the recorded Graph/explore configuration for VRPTW100 and EVRPTW100.
+Neither preset defines experiment E1.
 The CURRENT encoder is the matching modern control, not historical original.
 This module only resolves configuration; it does not open datasets, write files,
 load learned state, select GPUs, or start training.
@@ -21,6 +22,9 @@ from caliroute.recipe_components import describe_components
 CODE_ROOT = Path(__file__).resolve().parents[1]
 RECIPE_NAME = "aaai_graph_v1"
 RECIPE_PATH = CODE_ROOT / "configs" / "recipes" / f"{RECIPE_NAME}.yaml"
+CORE_RECIPE_NAME = "aaai_graph_core_v1"
+CORE_RECIPE_PATH = CODE_ROOT / "configs" / "recipes" / f"{CORE_RECIPE_NAME}.yaml"
+PRESET_PATHS = {"core": CORE_RECIPE_PATH, "reference": RECIPE_PATH}
 HARDWARE_PATHS = {
     name: CODE_ROOT / "configs" / "hardware" / f"aaai_{name}.yaml"
     for name in ("rtx48_single", "2080ti_dual")
@@ -45,11 +49,32 @@ def _source_record(path):
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
+def _apply_overlay(config, overrides, prefix=""):
+    """Apply explicit existing fields and record every effective difference."""
+    changes = []
+    for key, value in overrides.items():
+        name = f"{prefix}.{key}" if prefix else key
+        if key not in config:
+            raise ValueError(f"Core overlay cannot introduce an unknown configuration field: {name}")
+        previous = config[key]
+        if isinstance(value, dict):
+            if not isinstance(previous, dict):
+                raise ValueError(f"Overlay mapping does not match reference field: {name}")
+            changes.extend(_apply_overlay(previous, value, name))
+        else:
+            if isinstance(previous, dict):
+                raise ValueError(f"Overlay value cannot replace a configuration section: {name}")
+            if previous != value:
+                changes.append(dict(parameter=name, reference=copy.deepcopy(previous), used=copy.deepcopy(value)))
+            config[key] = copy.deepcopy(value)
+    return changes
+
+
 def build_recipe_config(*, problem, customers=100, encoder="graph", seed=3011,
                         epochs=1500, data_root, output_dir, run_name,
                         world_size=1, global_batch=None, ppo_chunk_size=None,
                         expert_chunk_size=None, eval_batch_size=None,
-                        hardware="rtx48_single"):
+                        hardware="rtx48_single", preset="core"):
     """Resolve a complete trainer config while keeping research budgets explicit.
 
     ``data_root`` is the AAAI_Dataset directory containing ``dataset/``.
@@ -59,7 +84,24 @@ def build_recipe_config(*, problem, customers=100, encoder="graph", seed=3011,
     64 need a separately specified replay budget and are deliberately rejected.
     Every launch still needs a full-allocation preflight on its actual hardware.
     """
+    if preset not in PRESET_PATHS:
+        raise ValueError("preset must be core or reference")
     recipe = _mapping(RECIPE_PATH)
+    recipe_name = RECIPE_NAME
+    recipe_status = "recorded_reference_configuration"
+    recipe_paths = [RECIPE_PATH]
+    config_changes = []
+    if preset == "core":
+        overlay = _mapping(CORE_RECIPE_PATH)
+        if overlay.get("extends") != RECIPE_NAME or overlay.get("name") != CORE_RECIPE_NAME:
+            raise ValueError("The core recipe must explicitly extend aaai_graph_v1")
+        overrides = overlay.get("overrides")
+        if not isinstance(overrides, dict):
+            raise ValueError("The core recipe must declare an overrides mapping")
+        config_changes = _apply_overlay(recipe["config"], overrides)
+        recipe_name = overlay["name"]
+        recipe_status = overlay["status"]
+        recipe_paths.append(CORE_RECIPE_PATH)
     if problem not in recipe["tasks"]:
         raise ValueError("aaai_graph_v1 supports only vrptw and evrptw; CVRP needs separate validation")
     if isinstance(customers, bool) or not isinstance(customers, int) or customers != 100:
@@ -151,14 +193,20 @@ def build_recipe_config(*, problem, customers=100, encoder="graph", seed=3011,
             overrides.append({"parameter": parameter, "reference": reference, "used": used})
     hardware_overrides = [dict(parameter=key, profile=execution[key], used=values[key])
         for key in execution if execution[key] != values[key]]
+    search_enabled = bool(offline.get("branch_exploration_enabled", offline.get("exploration_enabled", False)))
+    if search_enabled and not offline.get("policy_replay_enabled", False):
+        raise ValueError("Branch exploration requires policy_replay_enabled=True")
     protocol = dict(
-        recipe=RECIPE_NAME, recipe_status=recipe["status"], schema="aaai_recipe_protocol_v1",
-        recipe_sources=[_source_record(RECIPE_PATH), _source_record(HARDWARE_PATHS[hardware])],
+        recipe=recipe_name, preset=preset, recipe_status=recipe_status, schema="aaai_recipe_protocol_v1",
+        recipe_sources=[_source_record(path) for path in [*recipe_paths, HARDWARE_PATHS[hardware]]],
+        config_changes_from_reference=config_changes,
+        configured_recipe_quality_evidence="none/untrained" if preset == "core" else "recorded_reference_runs",
+        reference_comparison_evidence_scope="Recorded reference configuration only; it does not establish the quality of a changed core recipe or new run.",
         reference_training_commit=recipe["reference_training_commit"],
         reference_provenance=recipe["reference_provenance"],
-        reference_run=task[f"reference_{encoder}_run"],
-        phase=f"{problem}{customers}_{RECIPE_NAME}", task=f"{problem}{customers}",
-        arm=encoder, encoder_variant=encoder, implementation="explore", seed=seed, epochs=epochs,
+        phase=f"{problem}{customers}_{recipe_name}", task=f"{problem}{customers}",
+        arm=encoder, encoder_variant=encoder,
+        implementation="slppo_core" if preset == "core" else "explore", seed=seed, epochs=epochs,
         initialization_mode="scratch", ppo_warmup_epochs=0, source_init_checkpoint=None,
         source_init_epoch=None, source_initialization_experiment=None,
         initialization="Random model initialization, empty optimizer/archive/statistics; SL-PPO starts at epoch 1. No learned checkpoint or PPO/BC warmup.",
@@ -186,12 +234,16 @@ def build_recipe_config(*, problem, customers=100, encoder="graph", seed=3011,
         input_normalization_signature=normalization, model_integration=integration,
         architecture=dict(use_joint_graph_encoder=model["use_joint_graph_encoder"],
             joint_graph_edge_dim=model.get("joint_graph_edge_dim"),
-            joint_graph_dropout=model.get("joint_graph_dropout"), training_bundle="explore"),
-        extra_search_enabled=offline["branch_exploration_enabled"] or offline["exploration_enabled"],
-        search_budget=dict(interval=offline["exploration_interval"],
-            max_instances_per_rank=offline["exploration_instances"],
+            joint_graph_dropout=model.get("joint_graph_dropout"),
+            training_bundle="core" if preset == "core" else "explore"),
+        extra_search_enabled=search_enabled,
+        global_exploration_instances=research["global_exploration_instances"] if search_enabled else 0,
+        search_budget=dict(enabled=search_enabled, interval=offline["exploration_interval"],
+            max_instances_per_rank=offline["exploration_instances"] if search_enabled else 0,
+            configured_instances_per_rank=offline["exploration_instances"],
+            configured_global_instances=research["global_exploration_instances"],
             trajectories_per_instance=offline["exploration_trajectories"],
-            max_global_trajectories=research["global_exploration_instances"] * offline["exploration_trajectories"]),
+            max_global_trajectories=research["global_exploration_instances"] * offline["exploration_trajectories"] if search_enabled else 0),
         global_policy_replay_max_new_routes=research["global_policy_replay_max_new_routes"],
         global_policy_replay_candidate_budget=min(offline["policy_replay_max_candidates"],
             int((batch // world_size) * offline["policy_replay_fraction"])) * world_size,
@@ -199,13 +251,22 @@ def build_recipe_config(*, problem, customers=100, encoder="graph", seed=3011,
         distributed_execution=("single-process objective; one sampler and policy archive" if world_size == 1 else
             "mean of rank-local masked objectives; scaled gradient averaging at optimizer boundaries; rank-local samplers and policy archives"),
         distributed_caveat="Equal global budgets do not make independent rank samplers, archives and rank-local loss reductions bitwise equivalent to a single GPU.",
-        comparison_scope="Graph versus CURRENT changes the static graph encoder and its edge interface; both use the same modern explore training algorithm. CURRENT is not historical original.",
-        compute_caveat="Both encoders retain extra exploration rollouts; nominal PPO epochs are not a complete compute budget.",
+        comparison_scope=("Untrained reduced candidate derived from the recorded reference; reference performance does not establish this preset's quality. Graph versus CURRENT changes the static graph encoder and its edge interface within the same core recipe."
+            if preset == "core" else "Graph versus CURRENT changes the static graph encoder and its edge interface; both use the same recorded explore training algorithm. CURRENT is not historical original."),
+        compute_caveat=("Independent branch-search rollouts are disabled; expert and structural archive supervision still add work beyond the on-policy PPO batch. Ordinary policy sampling remains stochastic."
+            if not search_enabled else "Both encoders retain extra exploration rollouts; nominal PPO epochs are not a complete compute budget."),
         initial_evaluation_equivalence_group=None,
         input_units="Fixed distance unit 43.638668060302734 km; explicit road distance/time/energy matrices remain authoritative.",
         reward_failure_guard="The inherited 1000 km failed-termination penalty is an explicit guard, not a universal feasibility bound.",
         kl_caveat="Recorded replay-action KL is an estimator, not a hard post-update bound; target_kl is disabled.",
     )
+    if preset == "core":
+        protocol["derived_from_reference_run"] = task[f"reference_{encoder}_run"]
+        protocol["core_validation_status"] = "No task-scale training or quality validation; CPU smoke checks do not establish performance."
+        protocol["hardware_validation_scope"] = "Reference profile measurements only; the reduced core requires its own full-shape GPU preflight."
+        protocol["pending_validation"].append("Core/reference paired task-scale quality and wall-time comparison before final paper selection.")
+    else:
+        protocol["reference_run"] = task[f"reference_{encoder}_run"]
     cfg["experiment_protocol"] = protocol
     protocol["resolved_components"] = describe_components(cfg)
     return cfg

@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "status": "selected_core_requires_quality_validation",
+  "captured_at_utc": "2026-10-10T21:05:49.585991+00:00",
+  "original_code_commit": "f388343dbb1d54bbd3f76dd29ca95208070d31a8",
+  "reference_training_commit": "d4364926999d8b55be6ec3aa374c6cb6fc238cea",
+  "default_preset": "core",
+  "reference_preset": "reference",
+  "core_recipe": "configs/recipes/aaai_graph_core_v1.yaml",
+  "actual_config_changes_from_reference": [
+    {
+      "parameter": "model.use_rdi_v2",
+      "reference": true,
+      "used": false
+    },
+    {
+      "parameter": "model.use_typed_static_fusion",
+      "reference": true,
+      "used": false
+    },
+    {
+      "parameter": "model.use_agda_v2",
+      "reference": true,
+      "used": false
+    },
+    {
+      "parameter": "model.use_resource_decoder",
+      "reference": true,
+      "used": false
+    },
+    {
+      "parameter": "model.decoder_observation_mode",
+      "reference": "dual",
+      "used": "feasible"
+    },
+    {
+      "parameter": "offline.branch_exploration_enabled",
+      "reference": true,
+      "used": false
+    }
+  ],
+  "changes_scope": "Only module selection and independent branch search. Existing model/environment/trainer source bytes remain unchanged; inactive modules are not instantiated.",
+  "parameter_counts": {
+    "reference": {
+      "backbone_parameters": 4965121,
+      "all_agent_parameters": 5329155,
+      "edge_resource_adapter_parameters": 59846
+    },
+    "core": {
+      "backbone_parameters": 4842299,
+      "all_agent_parameters": 5206333,
+      "edge_resource_adapter_parameters": 8224
+    }
+  },
+  "parameter_reduction_scope": "CPU construction at production embedding256/layers2/edge32; parameter count only, not timing/memory/quality measurement",
+  "historical_control": {
+    "run_name": "SCRATCH_ORIGINAL_VRPTW100_S3010_E300_R1_20261008",
+    "task": "vrptw100",
+    "seed": 3010,
+    "source_commit": "f41295172770c922ef6084dd2d55e6c67ca9585d",
+    "scope": "Old non-Graph code, prior to later AGDA and SL numerical repairs. Same initialization for physics/archive/explore; legacy architecture differs.",
+    "common_validation": [
+      {
+        "epoch": 50,
+        "legacy": {
+          "distance_km": 285.09170240379314,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 266.39821160161307,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 263.6972680913061,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 261.2305391752943,
+          "feasible_rate": 1.0
+        }
+      },
+      {
+        "epoch": 100,
+        "legacy": {
+          "distance_km": 256.20271231455354,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 251.2727556660939,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 253.0338054587934,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 258.771782663187,
+          "feasible_rate": 1.0
+        }
+      },
+      {
+        "epoch": 150,
+        "legacy": {
+          "distance_km": 233.7999562789034,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 242.04869778283685,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 241.72530544709414,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 235.87798671918176,
+          "feasible_rate": 1.0
+        }
+      },
+      {
+        "epoch": 200,
+        "legacy": {
+          "distance_km": 236.03165286374093,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 232.7007215713393,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 235.92984230324626,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 234.1965818135906,
+          "feasible_rate": 1.0
+        }
+      },
+      {
+        "epoch": 250,
+        "legacy": {
+          "distance_km": 229.36777954498305,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 230.07345079008118,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 232.80541794961317,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 229.9310655147899,
+          "feasible_rate": 1.0
+        }
+      },
+      {
+        "epoch": 300,
+        "legacy": {
+          "distance_km": 229.33174578674883,
+          "feasible_rate": 1.0
+        },
+        "physics": {
+          "distance_km": 229.85743115274423,
+          "feasible_rate": 1.0
+        },
+        "archive": {
+          "distance_km": 227.72987851656788,
+          "feasible_rate": 1.0
+        },
+        "explore": {
+          "distance_km": 228.93195802197232,
+          "feasible_rate": 1.0
+        }
+      }
+    ],
+    "archive_better_checkpoints": 2,
+    "explore_better_checkpoints": 4,
+    "timings": {
+      "legacy": {
+        "window": "epochs101-300_excluding_eval_epochs",
+        "count": 196,
+        "mean_epoch_wall_s": 174.5377948747577,
+        "median_epoch_wall_s": 175.82012475188822
+      },
+      "physics": {
+        "window": "epochs101-300_excluding_eval_epochs",
+        "count": 196,
+        "mean_epoch_wall_s": 158.14276404439815,
+        "median_epoch_wall_s": 155.11770144104958
+      },
+      "archive": {
+        "window": "epochs101-300_excluding_eval_epochs",
+        "count": 196,
+        "mean_epoch_wall_s": 169.923150294553,
+        "median_epoch_wall_s": 166.31115658627823
+      },
+      "explore": {
+        "window": "epochs101-300_excluding_eval_epochs",
+        "count": 196,
+        "mean_epoch_wall_s": 181.69318392805098,
+        "median_epoch_wall_s": 176.63732962240465
+      }
+    },
+    "explore_mean_epoch_time_increase_pct": 6.926680451189382,
+    "logs": {
+      "legacy": {
+        "eval_csv_sha256": "175c900618bbb696b77ab6469e3075597c82897ea88986e5be3b806be618056d",
+        "path_relative_to_CaliRoute": "results/logs/Cus_100_CS_0/SCRATCH_ORIGINAL_VRPTW100_S3010_E300_R1_20261008_LEGACY/seed_3010/eval_log.csv"
+      },
+      "physics": {
+        "eval_csv_sha256": "4781e938b6757d49eeaa17cf58d8cae0fe8a64c794c539048a3633c37283ddc8",
+        "path_relative_to_CaliRoute": "results/logs/Cus_100_CS_0/SCRATCH_ORIGINAL_VRPTW100_S3010_E300_R1_20261008_PHYSICS/seed_3010/eval_log.csv"
+      },
+      "archive": {
+        "eval_csv_sha256": "e813c6271abc793f85b6312a23731498d07c4819b77704eb7036dd050bac3661",
+        "path_relative_to_CaliRoute": "results/logs/Cus_100_CS_0/SCRATCH_ORIGINAL_VRPTW100_S3010_E300_R1_20261008_ARCHIVE/seed_3010/eval_log.csv"
+      },
+      "explore": {
+        "eval_csv_sha256": "9841e55c80ec007e2f4eb2d99aac01f05d133bc23e2e84379e65369edae88b1a",
+        "path_relative_to_CaliRoute": "results/logs/Cus_100_CS_0/SCRATCH_ORIGINAL_VRPTW100_S3010_E300_R1_20261008_EXPLORE/seed_3010/eval_log.csv"
+      }
+    },
+    "confounds": [
+      "physics already enables legacy policy replay; no no-replay arm",
+      "physics to archive changes both structural selection and exploration archive capacity",
+      "archive to explore adds independent branch search",
+      "single seed, earlier runtime, different architecture from current Graph"
+    ]
+  },
+  "component_decisions": [
+    {
+      "component": "joint_node_edge_encoder_and_edge_action_readout",
+      "decision": "retain",
+      "original": "Node attention with provided-road distance/type bias; no evolving pair states",
+      "evidence": "One paired Graph/CURRENT reference seed, full block including edge width; 20/20 nonzero checkpoints through epoch1000",
+      "scope": "The reduced core is new and does not inherit the reference quality result"
+    },
+    {
+      "component": "physical_context_normalization_and_resource_flags",
+      "decision": "retain",
+      "original": "Original accepts road matrices but supports geometric fallback and legacy scales",
+      "evidence": "Dimensional consistency and explicit input contract; full-bundle results",
+      "scope": "Not an independently established quality contribution; inactive-resource isolation remains limited to validated paths"
+    },
+    {
+      "component": "DDE_AGDA_main_path_and_physical_candidate_features",
+      "decision": "retain",
+      "original": "Already contains 9-token DDE, candidate/system features and dynamic residuals",
+      "evidence": "Preserves original adaptive decisions while using authoritative physical transitions; correctness tests",
+      "scope": "Does not claim the entire DDE was introduced by this revision"
+    },
+    {
+      "component": "PPO_SL_expert_RMS_PopArt_gamma1_strict_distance",
+      "decision": "retain",
+      "original": "Legacy reward, centered/scaled PPO advantage, group/reference SL, native critic, default gamma0.99",
+      "evidence": "Explicit minimum-distance finite-episode target, common physical signal scale, numerical fixes and successful bundle",
+      "scope": "Numeric protocol frozen relative to reference; no individual accuracy claim"
+    },
+    {
+      "component": "structural_policy_archive",
+      "decision": "retain",
+      "original": "No policy route archive; expert/current/history scalar reference machinery differs",
+      "evidence": "Historical archive/physics endpoints favor archive but checkpoints mixed; no no-replay control",
+      "scope": "Part of SL-PPO learning, not inference-time search; expert/replay still add compute"
+    },
+    {
+      "component": "rdi_v2_residual_bias",
+      "decision": "remove_from_core",
+      "original": "Absent; original simple distance prior retained",
+      "evidence": "Additional learned physical bias overlaps graph edge channels; no isolated quality proof",
+      "scope": "Design simplification needing validation, not proof of harm"
+    },
+    {
+      "component": "typed_static_residual_fusion",
+      "decision": "remove_from_core",
+      "original": "Absent; base AutoEmbedding/type embedding retained",
+      "evidence": "Base embedding plus physical context plus Graph road-to-node fusion still cover node/road input",
+      "scope": "Physical context kept because current architecture contract requires it; no independent performance conclusion"
+    },
+    {
+      "component": "agda_v2_extra_gate",
+      "decision": "remove_from_core",
+      "original": "Absent; AGDA/DDE main path predates it",
+      "evidence": "Extra multiplicative gate has no isolated quality evidence",
+      "scope": "Does not remove or ablate full AGDA"
+    },
+    {
+      "component": "second_resource_fusion_and_dual_readout",
+      "decision": "remove_from_core",
+      "original": "Absent; original DDE already models candidate resources",
+      "evidence": "Keep DDE physical candidate features and learned edge action-key/bias; remove overlapping resource branch",
+      "scope": "Edge-only ResourceDecisionAdapter still instantiated; not total decoder removal"
+    },
+    {
+      "component": "independent_branch_search",
+      "decision": "reference_only",
+      "original": "Absent",
+      "evidence": "Historical epoch300 archive better, search mean training slower around7%; explore nevertheless wins4/6 checkpoints",
+      "scope": "Compute/complexity selection; cannot claim search ineffective across training or current Graph"
+    },
+    {
+      "component": "AMP_finite_masks_FP32_accumulation_cache_shared_computation",
+      "decision": "retain",
+      "original": "Earlier precision/padding paths differ",
+      "evidence": "Correctness/gradient equivalence checks",
+      "scope": "Engineering repairs, not separately proven novel optimization ideas"
+    },
+    {
+      "component": "P1_postcharge_PBRS_priority_decomposed_critic",
+      "decision": "remain_disabled",
+      "original": "Some original protocol defaults differ, detailed in baseline overrides",
+      "evidence": "Outside selected core and no independently established need here",
+      "scope": "Preserve historical scripts for reproduction; not removed from repository"
+    }
+  ],
+  "release_gate": "New core/reference paired from-scratch quality and wall-time validation required before calling the reduced core the final paper model; restore components one at a time if evidence warrants it.",
+  "source_of_reference_quality_evidence": "docs/experiments/aaai_candidate_evidence_20261010.json"
+}

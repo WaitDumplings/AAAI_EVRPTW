@@ -30,7 +30,7 @@ def _build(tmp_path, *, problem="vrptw", encoder="graph", **overrides):
     args = dict(
         problem=problem, customers=100, encoder=encoder, seed=3011, epochs=1500,
         data_root=tmp_path / "dataset_storage", output_dir=tmp_path / "outputs",
-        run_name="RECIPE_CONFIG_TEST", world_size=1, hardware="rtx48_single",
+        run_name="RECIPE_CONFIG_TEST", world_size=1, hardware="rtx48_single", preset="reference",
     )
     args.update(overrides)
     return build_recipe_config(**args)

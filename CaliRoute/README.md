@@ -12,28 +12,88 @@ methods that share the same backbone and environment interface.
 
 ## Consolidated AAAI candidate (2026-10-10)
 
-Use `scripts/run_aaai_candidate.sh` for the versioned **aaai_graph_v1** candidate.
-It resolves the recorded successful Graph training implementation at `d436492`;
-model, environment and trainer code retain those exact bytes. Research settings
-live in [the recipe](configs/recipes/aaai_graph_v1.yaml), while memory chunks and
-rank allocation live in [hardware profiles](configs/hardware). The older `train.py`
-method presets and historical experiment scripts retain their original defaults.
+Use `scripts/run_aaai_candidate.sh` for the selected **aaai_graph_core_v1**
+candidate (`--preset core`, the default). It instantiates a smaller subset of the
+existing modules, using the unchanged model/trainer implementation at `d436492`.
+Its [configuration overlay](configs/recipes/aaai_graph_core_v1.yaml) records every
+selection relative to the complete successful bundle. **The selected combination
+has no long-training result yet; the full-bundle scores below do not belong to it.**
+
+`--preset reference` explicitly reproduces the complete recorded **aaai_graph_v1**
+recipe, including auxiliary adapters and independent branch search. Keep this
+reference for measuring any quality loss from simplification. Research settings
+live in [the reference recipe](configs/recipes/aaai_graph_v1.yaml) plus the selected
+overlay; memory chunks and rank allocation live in [hardware profiles](configs/hardware).
+Historical experiment scripts retain their original defaults.
+
+### Selection against the original code
+
+The baseline for this audit is `f388343`, including its original road-distance
+attention bias, dynamic decision encoder and SL-PPO. Original already accepted
+road matrices; the new contract removes the missing-matrix geometric fallback
+and makes distance/time/energy units explicit. Original experiment results must
+retain their recorded execution adapters and protocol overrides.
+
+The selected architecture follows one information path:
+
+```text
+physical D/T/E + node context -> directed node/edge RDI encoder
+                            -> AGDA dynamic state/candidate features + learned-edge action readout
+                            -> policy trained by PPO + solution-level loss
+```
+
+| Selection | Relative to original / full optimized code | Rationale and evidence |
+| --- | --- | --- |
+| Keep joint node/edge encoder and edge action readout | Extends original node attention and distance prior | Full reference Graph/CURRENT paired control supports this block; individual graph mechanisms remain bundled |
+| Keep physical context, resource flags, gamma=1, RMS/PopArt and strict-distance contract | Makes units, target and training scale explicit | Physical/numerical correctness and successful-bundle evidence; not separate accuracy claims |
+| Keep AGDA/DDE with physical candidate features | Original dynamic decision path uses authoritative one-action resource features | Maintains dynamic decision capacity and Graph-to-action information flow |
+| Keep online SL, expert supervision and structural archive | Retains solution-level learning and historical candidates | Earlier archive/physics comparisons are mixed; there is no no-replay control justifying removal of all memory |
+| Remove learned RDI residual bias from core | Graph edges already encode directed D/T/E | No isolated benefit for a second learned distance-injection adapter; original simple distance prior remains |
+| Remove typed static residual fusion from core | Retain base node embedding, physical context and Graph road-to-node fusion | Reduces overlapping embedding branches; this removal still requires a quality comparison |
+| Remove AGDA v2 multiplicative gate from core | Keep the entire AGDA/DDE main path | Removes an extra modulation network whose separate value is unestablished |
+| Remove second resource fusion and dual readout from core | Keep AGDA physical features and edge-only action readout | Removes a duplicate candidate/resource path; Graph edge_action_key/edge_action_bias remain active |
+| Remove independent branch search from core | Both search switches explicitly false | Less compute and a simpler training method; earlier results do not show consistent search superiority |
+| Keep AMP/masking repairs, caches and shared computations | Numerical correctness and implementation efficiency | Separate engineering fixes from algorithmic contributions |
+
+The core retains structural archive collection/replay of **ordinary training
+rollouts**. It generates no additional branch-search trajectories. Replay and
+expert losses still add compute beyond PPO; absence of search does not imply an
+identical compute budget to a PPO-only baseline. P1 score mixers, post-charge
+adapters, decomposed critic, PBRS and priority sampling stay disabled.
+
+Removing these modules is a design selection, not evidence that they are harmful.
+For example, the historical same-seed VRPTW100 archive/explore control at epoch
+300 reports 227.73/228.93 km, with 100% feasibility; explore took about 7% more mean
+training time over epochs 101–300. But explore won four of six common checkpoints,
+so its removal is a complexity/compute choice, not proof of overall inferiority.
+That older control used neither Graph nor the later AGDA/SL fixes. Its physics arm
+already had legacy replay, so it cannot establish whether replay itself helps.
+Detailed selections and comparison boundaries are in
+[the core audit](docs/experiments/aaai_core_selection_20261010.json).
+
+Before a paper freeze, run core and reference from scratch under matched task,
+seed, batch, PPO passes and evaluation protocol. Compare feasible distance and
+wall time; reintroduce removed components individually only if results warrant it.
+The launcher prepares only unless `--launch` is explicit.
 
 The candidate currently supports **VRPTW100 and EVRPTW100**, with one 48GB GPU or
 one pair of 2080 Ti GPUs per model. CVRP and Cus15/Cus50 need separate validation
 before being added to this recipe. This entry point does not define E1.
 
 ```bash
-# Inspect the complete configuration without creating a run or starting GPUs.
+# Inspect the selected core; no run or GPU process is created.
 bash scripts/run_aaai_candidate.sh --problem vrptw --hardware 2080ti_dual --print-config
+# Inspect the unchanged full reference under the same hardware settings.
+bash scripts/run_aaai_candidate.sh --preset reference --problem vrptw --hardware 2080ti_dual --print-config
 
 # Freeze code, data hashes and configs; prepare-only is also the default.
 bash scripts/run_aaai_candidate.sh --problem vrptw --hardware 2080ti_dual --gpus 0,1 --prepare-only
 bash scripts/run_aaai_candidate.sh --problem evrptw --hardware rtx48_single --gpus 0 --prepare-only
 ```
 
-Use `--encoder current` for the matching modern encoder control. Both arms keep
-the same AGDA, reward, normalization, SL-PPO, archive and search settings. The
+Use `--encoder current` for the matching modern encoder control within either
+preset. Both encoders keep that preset's AGDA, reward, normalization, SL-PPO,
+archive and search settings. The
 encoder comparison changes the joint node/edge encoder and its decoder edge
 interface, including the effective edge width (32 versus 16). CURRENT is distinct
 from the historical original implementation.
@@ -45,7 +105,8 @@ run then starts from scratch, discarding preflight state. Each preflight require
 checksums. This does not certify every later replay allocation: archive weight
 starts after 25 epochs, so memory headroom and long-run monitoring remain relevant.
 No running experiment is stopped by this launcher. EVRPTW's 2080 Ti memory profile
-still requires its own real GPU preflight; VRPTW's profile has passed one.
+still requires its own real GPU preflight. The VRPTW reference profile has passed
+one; core must pass its own preflight on the actual hardware before long training.
 
 | Research setting | VRPTW100 | EVRPTW100 |
 | --- | ---: | ---: |
@@ -57,17 +118,19 @@ still requires its own real GPU preflight; VRPTW's profile has passed one.
 | Default training | 1500 epochs, SL-PPO from epoch 1 | Same |
 | Validation | All 1000 instances, best-of-50, epoch 0 and every 50 | Same |
 
-Hardware profiles preserve these global budgets. Two ranks split the 8 exploration
-instances and the 32-route archive intake limit. Per-instance archive capacity
+Hardware profiles preserve these global budgets. Two ranks split the 32-route
+archive intake limit. The reference also splits 8 search instances; core allocates
+zero search instances. Per-instance archive capacity
 is unchanged. Rank-local samplers, histories and masked-loss means make dual-GPU
 execution numerically different from a single-GPU run even at the same global
 batch. Explicit batch overrides are recorded research variants; evaluation batch
 changes can also alter sampled trajectories. Every run records resolved settings,
-component branches, hashes and observed optimizer/AMP counters.
+component branches, hashes and observed optimizer/AMP counters. Core manifests
+mark quality evidence as pending and list exact configuration changes from reference.
 
 ### What the evidence supports
 
-The local seed 3011, batch 40, PPO 5 controlled comparison at epoch 1000 gives
+The full-reference seed 3011, batch 40, PPO 5 controlled comparison at epoch 1000 gives
 **215.9273 km for Graph versus 219.1131 km for CURRENT** (1.4539% lower); both have
 100% independent-route-validation feasibility on 1000 instances. Graph is better
 at all 20 common validation checkpoints from epoch 50 to 1000. It wins 757/1000 paired
@@ -125,7 +188,8 @@ before forming a comparable results table.
 | Joint directed node/edge encoder and decoder edge readout | Keep | Controlled whole-block comparison; internal mechanisms and edge width not separately isolated |
 | Physical D/T/E context and AGDA candidate transitions | Keep reference implementation | Successful bundle plus physical-feature and gradient tests |
 | Strict-distance reward, fixed physical units, gamma 1, actor RMS and PopArt | Keep reference configuration | Unit/reward invariants and bundle results; separate quality ablations pending |
-| Online SL, expert candidates, structural archive and branch search | Keep | Successful bundle; individual contributions need matched-budget ablations |
+| Online SL, expert candidates and structural archive | Keep | Successful bundle; individual contributions need matched-budget ablations |
+| Independent branch search and auxiliary residual/fusion networks | Reference only | Removed from selected core; retention must earn its complexity in a matched comparison |
 | Finite masks, SL weight/gradient AMP consistency, shared/cached computations | Keep verified repairs | Correctness and equivalence tests; no full-chain AMP-equivalence claim |
 | Original-P1 adapters, 100-epoch PPO warmup, PPO 3 | Exclude from this candidate | They change the successful recipe and have no established independent benefit here |
 
@@ -137,7 +201,7 @@ separately. A local `use_rdi_v2=False` or `use_agda_v2=False` switch removes a
 residual adapter, not all RDI or AGDA information. Do not label these switches
 as complete module ablations.
 
-The release candidate preserves remaining numerical semantics, including mixed
+Both presets preserve the existing numerical implementation, including mixed
 FP32/AMP paths and rank-local loss reduction. More complete resource isolation,
 full-chain precision changes and globally weighted masked losses belong to new
 controlled versions. Current integration does not silently apply those changes.
