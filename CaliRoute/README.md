@@ -78,10 +78,47 @@ mechanism or a cross-seed significance result. Actual successful updates through
 1000 are 19995/19997 (5/3 AMP skips), despite the common nominal 20 attempts per epoch.
 
 The [evidence record](docs/experiments/aaai_candidate_evidence_20261010.json) separates
-these local checks from user-reported remote scores. RTX VRPTW 214.7, EVRPTW 215.4,
-and the other server's 223.6/216.6 need their latest epochs, configs and code lineage
-before forming one consolidated results table. The third server's reported
-seed 2010 versus 3010 is awaiting confirmation.
+local checks from remote reports. The third server's seed is now confirmed by the
+user as **3010**, on four 2080 Ti GPUs, with two GPUs per arm. Its optimized
+training implementation is reported to match `a66faf4`, plus uncommitted launcher
+and statistics changes. The original model comes from `f388343` with an external
+distributed/evaluation adapter and explicit protocol overrides; it is not the old
+commit's untouched default experiment.
+
+Local Git inspection confirms that `a66faf4` predates the joint node/edge encoder
+and is an ancestor of `d436492`. The later branch adds JointGraph, AGDA resource
+input/efficiency changes and SL-PPO numerical consistency repairs. Seed 3010's
+reported 223.6/216.6 km therefore supports the earlier **physics/archive/explore
+bundle**, while the local Graph/CURRENT comparison supports a subsequent encoder
+change. These are distinct comparisons, not three replications of one architecture.
+Individual reward, normalization, archive and search contributions remain unisolated.
+
+| Reported protocol | Seed 3010 server, each arm | RTX Graph EVRPTW reference |
+| --- | ---: | ---: |
+| Ranks / batch per rank / global batch | 2 / 32 / 64 | 1 / 32 / 32 |
+| Trajectories per instance / per rollout | 50 / 3200 | 50 / 1600 |
+| PPO passes / minibatches / accumulation | 5 / 4 / 1 | 5 / 4 / 1 |
+| Nominal optimizer attempts per epoch | 20 | 20 |
+| Global instances per optimizer step | 16 | 8 |
+| PPO chunk / expert chunk | Original 32/64, optimized 26/64 | 120/128 |
+| Learning rate / AMP | 1e-4 / enabled | 1e-4 / enabled |
+
+These cross-server differences prevent attributing score differences to hardware,
+PPO passes, batch size or a single component. Chunk sizes affect execution memory
+and arithmetic order, not the declared sampling or optimizer-step budget.
+
+The seed 3010 user audit also reports a six-epoch preflight preserving the formal
+five-epoch search interval, standalone acceptance and throughput statistics.
+Post-launch shell/LR-check edits are reported absent from the frozen run. These
+are execution and monitoring changes, separately tracked from algorithm evidence;
+their patches have not been read or merged here. The candidate still uses its
+recorded two-epoch preflight with search every preflight epoch, then discards state.
+
+Remote manifest/config/audit/patch paths are recorded, but those files are not
+available on this host. Their bytes/hashes and the latest RTX revision still need
+independent verification. RTX VRPTW 214.7, EVRPTW 215.4 and seed 3010's 223.6/216.6
+also need matched epochs, feasibility coverage and checkpoint-selection details
+before forming a comparable results table.
 
 | Component | Candidate decision | Evidence boundary |
 | --- | --- | --- |
@@ -105,17 +142,23 @@ FP32/AMP paths and rank-local loss reduction. More complete resource isolation,
 full-chain precision changes and globally weighted masked losses belong to new
 controlled versions. Current integration does not silently apply those changes.
 
-Before freezing a final paper release, reconcile the third server's source/config
-bundle, confirm the RTX revision and define E1's tasks, scales, methods, seeds,
-training budgets and evaluation protocol. Useful attribution checks are additional
+Before freezing a final paper release, verify the third server's frozen source/config
+bundle and reported launcher patches, confirm the RTX revision and define E1's
+tasks, scales, methods, seeds, training budgets and evaluation protocol. Useful attribution checks are additional
 paired seeds, matched edge width, and separate expert/archive/search ablations.
-To reconcile another server, export its actual run directories after pulling this
-branch (run this command from `CaliRoute/`):
+To reconcile another server while preserving its uncommitted workspace, fetch the
+standalone exporter and run it against the actual run directories:
 
 ```bash
-python scripts/export_run_evidence.py /path/to/original_run /path/to/optimized_run \
+git fetch origin integration/aaai-candidate-20261010
+git show FETCH_HEAD:CaliRoute/scripts/export_run_evidence.py > /tmp/export_aaai_run_evidence.py
+python /tmp/export_aaai_run_evidence.py /path/to/original_run /path/to/optimized_run \
   --output /path/to/new_evidence_bundle --include-source
 ```
+
+The standalone exporter uses only the Python standard library. Keep the separate
+`version_audit/provenance.json` and the frozen/workspace patch files alongside the
+handoff; they are not part of the run export's automatic inventory.
 
 The exporter verifies recorded source, configuration and input hashes, and copies
 configs, captured status/comparison and rank-zero training/validation CSVs.

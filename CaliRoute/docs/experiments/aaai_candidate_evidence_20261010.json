@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "candidate_pending_third_server_provenance_and_e1_definition",
+  "status": "candidate_pending_remote_artifacts_rtx_revision_and_e1_definition",
   "captured_at_utc": "2026-10-10T20:26:35.690256+00:00",
   "controlled_local_evidence": {
     "task": "vrptw100",
@@ -81,13 +81,100 @@
       "source": "user_report_2026-10-10",
       "server": "third_server",
       "task": "evrptw100",
-      "reported_seed": 2010,
-      "seed_confirmation": "pending; possible 3010",
+      "reported_seed": 3010,
+      "seed_confirmation": "User confirmed launch commands, formal configs and manifests agree; previously reported 2010 was incorrect",
       "original_validation_km": 223.6,
       "optimized_validation_km": 216.6,
       "epoch": null,
-      "source_commit": null,
-      "independently_recomputed": false
+      "independently_recomputed": false,
+      "seed": 3010,
+      "reported_branch": "opt/physics-exploration-20261008",
+      "source_base_commit": "a66faf431c6658f4b9ab6e35a1d7b22dbbd08df3",
+      "source_state": "base_commit_plus_uncommitted_launch_and_statistics_patch",
+      "formal_training_code_matches_base": "User reports per-file verification for model, trainer, environment and loss; remote frozen files not independently read here",
+      "original_model_commit": "f388343dbb1d54bbd3f76dd29ca95208070d31a8",
+      "original_protocol": "Archived original model/environment/loss plus external dual-rank execution/evaluation adapter; PPO 4->5, priority sampling disabled and evaluation protocol overridden",
+      "source_branch_is_graph_rdi": false,
+      "joint_graph_encoder_present_at_base": false,
+      "hardware": {
+        "reported_gpu_model": "RTX 2080 Ti",
+        "server_gpu_count": 4,
+        "gpus_per_arm": 2
+      },
+      "reported_common_training": {
+        "seed": 3010,
+        "epochs": 1500,
+        "initialization": "scratch",
+        "batch_per_rank": 32,
+        "world_size": 2,
+        "global_batch": 64,
+        "n_traj": 50,
+        "global_trajectories_per_rollout": 3200,
+        "ppo_passes": 5,
+        "num_minibatches": 4,
+        "gradient_accumulation_steps": 1,
+        "nominal_optimizer_attempts_per_epoch": 20,
+        "global_instances_per_optimizer_step": 16,
+        "learning_rate": 0.0001,
+        "mixed_precision": true
+      },
+      "reported_chunk_tuning": {
+        "original": {
+          "ppo_chunk_before": 8,
+          "ppo_chunk_after": 32,
+          "expert_chunk": 64
+        },
+        "optimized": {
+          "ppo_chunk_before": 8,
+          "ppo_chunk_after": 26,
+          "expert_chunk": 64
+        },
+        "other_formal_config_differences": "Only run names and output paths according to user audit, relative to the earlier two runs"
+      },
+      "reported_preflight_patch": {
+        "epochs_before": 2,
+        "epochs_after": 6,
+        "preserve_formal_exploration_interval_epochs": 5,
+        "other_changes": [
+          "standalone preflight mode",
+          "memory and training protocol acceptance",
+          "timing and throughput statistics"
+        ],
+        "formal_run_state_reuse": "Original launcher discards preflight state; exact remote patch still required to independently confirm"
+      },
+      "reported_post_launch_worktree_changes": [
+        "shell default chunk overrides",
+        "validate LR against manifest"
+      ],
+      "post_launch_changes_in_frozen_run": false,
+      "reported_remote_artifacts": {
+        "runs": {
+          "original": {
+            "directory": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_ORIGINAL_B32_C32_X64_S3010_E1500_20261008T112546Z",
+            "manifest": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_ORIGINAL_B32_C32_X64_S3010_E1500_20261008T112546Z/manifest.json",
+            "formal_config": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_ORIGINAL_B32_C32_X64_S3010_E1500_20261008T112546Z/original/config.yaml"
+          },
+          "optimized": {
+            "directory": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_OPTIMIZED_B32_C26_X64_S3010_E1500_20261008T114554Z",
+            "manifest": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_OPTIMIZED_B32_C26_X64_S3010_E1500_20261008T114554Z/manifest.json",
+            "formal_config": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_DUAL_TUNED_SCRATCH_OPTIMIZED_B32_C26_X64_S3010_E1500_20261008T114554Z/optimized/config.yaml"
+          }
+        },
+        "version_audit": {
+          "provenance.json": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_MEMORY_TUNING_20261008/version_audit/provenance.json",
+          "optimized_frozen_vs_a66faf4.patch": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_MEMORY_TUNING_20261008/version_audit/optimized_frozen_vs_a66faf4.patch",
+          "current_worktree_vs_a66faf4.patch": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/optimization/EVRPTW100_MEMORY_TUNING_20261008/version_audit/current_worktree_vs_a66faf4.patch"
+        }
+      },
+      "remote_artifact_status": "Paths supplied by user; unavailable on this host; patch/config/source bytes and hashes not independently verified",
+      "score_comparison_scope": "Reported validation scores; epochs, feasibility coverage and identical selection rule still need raw logs; not a matched-epoch contrast",
+      "evidence_for": "Earlier physics/archive/explore bundle over adapted historical original under the reported paired protocol",
+      "not_evidence_for": [
+        "JointGraph cross-seed replication",
+        "individual reward/normalization/AGDA/RDI/expert/archive/search quality effects",
+        "later AGDA or SL-PPO numerical fixes",
+        "hardware causality"
+      ]
     }
   ],
   "selection": [
@@ -136,7 +223,68 @@
     "Additional paired seeds with the same Graph/CURRENT protocol",
     "Matched edge width and individual graph mechanism ablations before claiming each mechanism",
     "Separate expert, archive and branch-search ablations with actual rollout/optimizer/wall-clock budgets",
-    "Confirm third-server exact code/config/source and latest RTX revisions",
+    "Obtain seed3010 frozen manifests/configs/patches and logs to independently verify the now-reported provenance; confirm latest RTX revision",
     "Receive E1 definition; validate each new task/scale before adding it to this recipe"
-  ]
+  ],
+  "provenance_updated_at_utc": "2026-10-10T20:42:51.716999+00:00",
+  "locally_verified_commit_lineage": {
+    "method": "Local Git object and ancestry/diff inspection; not an inspection of remote running snapshots",
+    "earlier_explore_commit": "a66faf431c6658f4b9ab6e35a1d7b22dbbd08df3",
+    "graph_training_commit": "d4364926999d8b55be6ec3aa374c6cb6fc238cea",
+    "earlier_explore_is_ancestor_of_graph_training": true,
+    "joint_graph_first_commit": "0b57a7fabaf98a3b7975cba1d29d087c1f2a79b4",
+    "runtime_file_changes": [
+      {
+        "status": "M",
+        "path": "CaliRoute/caliroute/plugins/agda.py"
+      },
+      {
+        "status": "A",
+        "path": "CaliRoute/caliroute/plugins/joint_graph.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/caliroute/plugins/physical_decision.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/distributed.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/model_integration.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/models/graph_attention_model_wrapper.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/models/nets/graph_model/decoder.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/trainer.py"
+      },
+      {
+        "status": "M",
+        "path": "CaliRoute/offline2online/training_monitor.py"
+      }
+    ],
+    "additional_changes": [
+      "Joint node/edge encoder and corresponding model/decoder integration",
+      "AGDA inactive-resource input handling and computation reuse",
+      "SL weight/gradient AMP alignment, finite masks and FP32 accumulation; policy-only reduction alignment",
+      "Single-process CUDA device index handling"
+    ],
+    "unchanged_source_scope": [
+      "environment implementations",
+      "physical normalization",
+      "RDI plugin",
+      "SL surrogate plugin",
+      "structural archive",
+      "branch exploration"
+    ],
+    "interpretation": "The seed3010 result supports the earlier full optimization bundle; the local paired Graph/CURRENT run supports a later encoder-block change. These are two distinct comparisons, not three replications of one architecture."
+  }
 }
