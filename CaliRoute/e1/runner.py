@@ -447,13 +447,26 @@ def parser():
     return parser
 
 
+def _absolute_forwarded_paths(args, argv):
+    """Resolve user-relative paths before re-executing inside frozen source."""
+    forwarded=list(argv)
+    for key in ('campaign','checkpoint','scheduler'):
+        value=getattr(args,key,None)
+        if value is None:continue
+        flag='--'+key.replace('_','-');absolute=str(Path(value).expanduser().resolve())
+        for index,token in enumerate(forwarded):
+            if token==flag:forwarded[index+1]=absolute
+            elif token.startswith(flag+'='):forwarded[index]=flag+'='+absolute
+    return forwarded
+
+
 def main():
     args=parser().parse_args()
     if getattr(args,'campaign',None) and args.command not in ('prepare','summarize'):
         source=Path(_read(Path(args.campaign)/'manifest.json')['code_root']).resolve()
         if source!=ROOT.resolve():
             env=dict(os.environ,PYTHONPATH=str(source))
-            subprocess.run([sys.executable,'-m','e1.runner',*sys.argv[1:]],cwd=source,env=env,check=True)
+            subprocess.run([sys.executable,'-m','e1.runner',*_absolute_forwarded_paths(args,sys.argv[1:])],cwd=source,env=env,check=True)
             return
     if args.command=='native-status':
         from e1.native import native_status
