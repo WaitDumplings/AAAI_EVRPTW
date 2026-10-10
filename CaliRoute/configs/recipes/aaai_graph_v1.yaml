@@ -1,0 +1,233 @@
+# Versioned algorithm candidate, extracted from recorded effective configs.
+# Hardware chunking lives under configs/hardware; no datasets/checkpoints are bundled.
+schema_version: 1
+name: aaai_graph_v1
+status: candidate_not_e1_definition
+reference_training_commit: d4364926999d8b55be6ec3aa374c6cb6fc238cea
+reference_provenance: docs/experiments/graph_rdi100_20261008_provenance.json
+supported_encoders:
+- graph
+- current
+research_defaults:
+  seed: 3011
+  epochs: 1500
+  initialization: scratch
+  ppo_warmup_epochs: 0
+  global_exploration_instances: 8
+  global_policy_replay_max_new_routes: 32
+  maximum_global_batch_without_replay_cap_change: 64
+tasks:
+  vrptw:
+    customers: 100
+    dataset_name: Geo-VRPTW-v1
+    physical_charging_stations: 0
+    global_batch: 40
+    rollout_steps: 201
+    require_complete_feasible_rollouts: true
+    train_instances: 5000
+    validation_instances: 1000
+    reference_graph_run: GRAPH_VRPTW100_S3011_B40_E1500_20261008_r2
+    reference_current_run: CURRENT_VRPTW100_S3011_B40_E1500_20261008_r2
+  evrptw:
+    customers: 100
+    dataset_name: Geo-EVRPTW-v1
+    physical_charging_stations: 20
+    global_batch: 32
+    rollout_steps: 512
+    require_complete_feasible_rollouts: false
+    train_instances: 5000
+    validation_instances: 1000
+    reference_graph_run: GRAPH_EVRPTW100_S3011_B32_E1500_20261008_r2
+    reference_current_run: CURRENT_EVRPTW100_S3011_B32_E1500_20261008_r2
+pending_validation:
+- 'CVRP: task-specific algorithm and complete-route horizon are not established by
+  this recipe.'
+- 'Cus15 and Cus50: dataset shapes, physical station counts and horizons need separate
+  validation.'
+- E1 experiment groups, seeds and evaluation protocol await the experiment definition.
+config:
+  advantage:
+    group_adv_clip: 3.0
+    group_adv_coef: 1.0
+    group_adv_std_floor: 5.0
+    group_infeasible_penalty: 10.0
+    reference_adv_clip: 3.0
+    reference_adv_coef: 0.5
+    reference_adv_rho: 1.0
+    reference_advantage_mode: absolute
+    reference_success_only: true
+    sl_advantage_scale_mode: relative
+    sl_candidate_clip: 2.0
+    sl_candidate_gap_baseline: mean
+    sl_candidate_gap_floor_ratio: 0.01
+    sl_candidate_gap_scale_coef: 1.0
+    sl_candidate_gate_eta: 0.05
+    sl_candidate_margin: 0.005
+    sl_candidate_quality_gate_eta: 0.05
+    sl_candidate_std_floor: 5.0
+    sl_candidate_use_current_incumbent_gate: true
+    sl_candidate_use_memory_incumbent_gate: true
+    sl_expert_candidate_weight: 0.6
+    sl_include_reference_in_group_stats: true
+    sl_relative_std_floor: 0.01
+    sl_use_expert_candidate: true
+    sl_use_memory_incumbent: true
+    use_expert_solution_level: true
+    use_group_advantage: true
+    use_reference_advantage: true
+    use_reference_memory_gate: false
+    use_reference_soft_gate: false
+  critic:
+    advantage_mode: total
+    use_decomposed_critic: false
+  data:
+    async_instance_prefetch: false
+    strict_road_metric: true
+    train_sample_mode: shuffle_cycle
+  env:
+    charging_mode: fixed_full
+    failure_penalty_km: 1000.0
+    info_level: light
+    max_steps_factor: 4
+    normalize_reward: true
+    observation_coordinate_mode: depot_fixed
+    observation_distance_scale_km: 43.638668060302734
+    observation_input_context: true
+    prefer_explicit_edge_matrices: true
+    reward_contract: strict_distance
+    reward_distance_scale_km: 43.638668060302734
+    reward_distance_scale_mode: single_customer_repair_median
+    reward_mode: distance
+    use_fast_env: true
+    use_jit_mask: true
+  evaluation:
+    eval_before_training: true
+    eval_decode_mode: sample
+    eval_info_level: light
+    eval_interval: 50
+    eval_n_traj: 50
+    eval_save_routes: true
+  model:
+    agda_hidden_dim: 32
+    agda_physical_candidate_features: true
+    agda_smooth_distance_features: true
+    cache_static_observations: true
+    decoder_observation_mode: dual
+    distance_injection: encoder
+    dynamic_decision_action_bias: true
+    dynamic_decision_delta_action_key: true
+    dynamic_decision_delta_k: false
+    dynamic_decision_delta_v: false
+    dynamic_decision_heads: 4
+    edge_relation_dim: 16
+    embedding_dim: 256
+    joint_graph_dropout: 0.0
+    joint_graph_edge_dim: 32
+    n_encode_layers: 2
+    optimize_dynamic_projections: true
+    physical_input_context_hidden_dim: 32
+    post_charge_adapter_hidden_dim: 32
+    rdi_hidden_dim: 32
+    residual_edge_hidden_dim: 32
+    tanh_clipping: 15.0
+    use_agda_v2: true
+    use_dynamic_decision_encoder: true
+    use_edge_relation_encoder: false
+    use_edge_state_updates: false
+    use_edge_value_messages: false
+    use_encoder_distance_bias: true
+    use_encoder_sdpa: true
+    use_graph_token: true
+    use_joint_graph_encoder: true
+    use_physical_input_context: true
+    use_post_charge_adapter: false
+    use_rdi_v2: true
+    use_residual_edge_bias: false
+    use_resource_decoder: true
+    use_static_rollout_cache: true
+    use_typed_static_fusion: true
+  offline:
+    branch_exploration_enabled: true
+    exploration_enabled: false
+    exploration_exclude_anchor_action: true
+    exploration_interval: 5
+    exploration_max_prefix_steps: 32
+    exploration_prefer_stagnant_archive: true
+    exploration_prefix_fractions:
+    - 0.0
+    - 0.1
+    - 0.25
+    - 0.5
+    exploration_temperature: 1.2
+    exploration_trajectories: 8
+    method: sl_ppo
+    only_success_route_loss: true
+    policy_replay_capacity: 3
+    policy_replay_enabled: true
+    policy_replay_exploration_capacity: 4
+    policy_replay_exploration_max_relative_gap: 0.25
+    policy_replay_exploration_stagnation_epochs: 10
+    policy_replay_fraction: 0.25
+    policy_replay_max_candidates: 16
+    policy_replay_max_relative_gap: 0.05
+    policy_replay_min_current_improvement: 0.002
+    policy_replay_min_edge_distance: 0.1
+    policy_replay_min_structure_distance: 0.1
+    policy_replay_partition_weight: 0.5
+    policy_replay_ramp_epochs: 75
+    policy_replay_require_current_improvement: true
+    policy_replay_selection: structural
+    policy_replay_warmup_epochs: 25
+    policy_replay_weight: 0.1
+    priority_alpha: 0.7
+    priority_mix_rho: 0.5
+    priority_selection_mode: weighted
+    share_expert_static_observations: true
+    sl_clip_coef: 0.2
+    sl_coef: 0.5
+    sl_expert_candidate_weight: 0.6
+    strict_replay: false
+    use_priority_sampler: false
+  optimization_profile: optimized_v2
+  pbrs:
+    use_customer_pbrs: false
+    use_feasible_ratio_pbrs: false
+    use_repair_distance_pbrs: false
+    use_terminal_heuristic: false
+  training:
+    amp_init_scale: 1024.0
+    bootstrap_truncation: true
+    cache_expert_route_encoding: true
+    checkpoint_interval: 50
+    clip_coef: 0.2
+    debug: true
+    debug_log_every: 1
+    distributed_timeout_minutes: 120
+    ent_coef: 0.01
+    entropy_final_coef: 0.01
+    entropy_initial_coef: 0.01
+    gae_lambda: 0.95
+    gamma: 1.0
+    gradient_accumulation_steps: 1
+    latest_checkpoint_interval: 5
+    learning_rate: 0.0001
+    lr_min: 0.0001
+    lr_schedule: constant
+    lr_warmup_epochs: 0
+    max_grad_norm: 1.0
+    mixed_precision: true
+    monitor_gradient_components: true
+    monitor_interval: 10
+    monitor_target_kl: 0.02
+    n_traj: 50
+    num_minibatches: 4
+    online_training: false
+    post_update_kl_interval: 10
+    ppo_loss_reduction: valid_actions
+    ppo_update_epochs: 5
+    profile_timing: true
+    reward_norm_mode: physical_shared_popart
+    share_ppo_sl_forward: true
+    target_kl: null
+    vf_coef: 0.5
+    weight_decay: 0.0

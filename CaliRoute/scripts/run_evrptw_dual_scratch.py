@@ -174,6 +174,14 @@ def preflight_config(cfg, output):
         result['offline']['exploration_interval']=1
     result['experiment_protocol'].update(phase=cfg['experiment_protocol']['task']+('_dual' if cfg['experiment_protocol']['world_size'] == 2 else '_single')+'_scratch_preflight',epochs=2,
         validation_instances=validation_instances,comparison_scope='full training and evaluation allocations; one validation batch; discard all resulting state')
+    if 'resolved_components' in result['experiment_protocol']:
+        # Candidate metadata must describe the preflight overrides, not the
+        # formal run's search/evaluation schedule copied above.
+        from caliroute.recipe_components import describe_components
+        result['experiment_protocol']['eval_interval'] = result['evaluation']['eval_interval']
+        if result['experiment_protocol'].get('search_budget'):
+            result['experiment_protocol']['search_budget']['interval'] = result['offline']['exploration_interval']
+        result['experiment_protocol']['resolved_components'] = describe_components(result)
     return result
 
 
@@ -252,7 +260,8 @@ def prepare(args, *, config_builder=None, arm_label=None):
         else:spec.update(value)
     protocol=dict(cfg['experiment_protocol']);protocol.update(global_batch=args.batch_per_gpu*world_size,n_traj=50,
         num_minibatches=4,ppo_update_epochs=5,learning_rate=args.learning_rate,lr_schedule='constant',
-        eval_interval=args.eval_interval,eval_n_traj=50,eval_batch_size=16,validation_instances=1000,
+        eval_interval=args.eval_interval,eval_n_traj=cfg['evaluation']['eval_n_traj'],
+        eval_batch_size=cfg['evaluation']['eval_batch_size'],validation_instances=1000,
         epochs=args.epochs,expert_rows_at_prepare=expert_count,world_size_per_arm=world_size,original_commit=scratch.ORIGINAL_COMMIT,
         initial_evaluation_pairs=[],initial_evaluation_consistency_scope='different architectures need not have identical epoch-zero policy',
         best_checkpoint_caveat='Native original best uses distance among feasible cases; modern best prioritizes feasibility. Compare common epochs or choose periodic checkpoints by the same feasibility-first rule.',

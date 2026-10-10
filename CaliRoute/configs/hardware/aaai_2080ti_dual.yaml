@@ -1,0 +1,16 @@
+# Execution memory profile only; global batch and optimizer geometry stay in the recipe.
+schema_version: 1
+name: 2080ti_dual
+world_size: 2
+execution:
+  ppo_chunk_size: 48
+  expert_chunk_size: 64
+  eval_batch_size: 16
+validation:
+  status: requires_full_allocation_preflight
+  require_preflight: true
+  notes: 11GB cards; always preflight the complete training and evaluation allocation.
+  task_notes:
+    vrptw: C48 passed the complete VRPTW100 two-rank preflight and is used by the ongoing paired reproduction. Validate each new allocation.
+    evrptw: EVRPTW100 C48 has no local memory-profile validation; a successful full-allocation
+      preflight is required.

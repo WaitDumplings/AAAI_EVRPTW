@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "status": "candidate_pending_third_server_provenance_and_e1_definition",
+  "captured_at_utc": "2026-10-10T20:26:35.690256+00:00",
+  "controlled_local_evidence": {
+    "task": "vrptw100",
+    "seed": 3011,
+    "stage": "single_seed_controlled_architecture_comparison",
+    "matched_epoch": 1000,
+    "paired_instances": 1000,
+    "graph_mean_km": 215.92734435012937,
+    "current_mean_km": 219.11310633892938,
+    "graph_minus_current_mean_km": -3.185761988800019,
+    "graph_wins": 757,
+    "current_wins": 243,
+    "ties": 0,
+    "paired_instance_bootstrap_mean_difference_95pct_km": [
+      -3.61962764952383,
+      -2.7642605995426424
+    ],
+    "bootstrap_scope": "Within the same 1000 validation instances at one paired training seed; not a cross-training-seed confidence interval",
+    "both_independently_feasible": true,
+    "distance_and_explicit_time_validation_passed": true,
+    "graph_better_common_nonzero_evaluations": 20,
+    "common_nonzero_evaluations": 20,
+    "performance": {
+      "graph": {
+        "median_non_eval_epoch_seconds": 84.10241179168224,
+        "median_ppo_seconds": 78.12935014767572,
+        "successful_optimizer_steps_through_1000": 19995,
+        "amp_skips_through_1000": 5,
+        "median_global_kl": 0.012797053631372061
+      },
+      "current": {
+        "median_non_eval_epoch_seconds": 82.29838423407637,
+        "median_ppo_seconds": 76.47070766007528,
+        "successful_optimizer_steps_through_1000": 19997,
+        "amp_skips_through_1000": 3,
+        "median_global_kl": 0.01964665133041308
+      }
+    },
+    "input_hashes": {
+      "vrptw/train/Cus100/instances.pkl": "bc09aa2112a3827f98cb1ee564135b054ff3d2a14f8ff6e89d6e30fe0e2fc81f",
+      "vrptw/train/Cus100/metadata.json": "dc4201794012e7d087e790048117bc56c579ec1be11a94a44f92aacb36b03568",
+      "vrptw/train/Cus100/expert_solutions.csv": "c87e32e45dbe1639ffc75cde39b01df4879ce6822861698face19d006171e583",
+      "vrptw/val/Cus100/instances.pkl": "41abd42dbf67877061bd4886c080536832edcbc2debdd0bf55735d6256837193",
+      "vrptw/val/Cus100/metadata.json": "6c94e776021eac357d43e6b8b0d626d8e9489444be30b2fb93f819a84d5eae6d",
+      "vrptw/val/Cus100/gurobi_summary.csv": "fef38a1a1340e44c39e9098e847bd1ad066e78a8ede557709ed3a66bb485bfca"
+    },
+    "source_commit": "bcbca514e4db4269af6642d5325f45182548e420",
+    "training_commit": "d4364926999d8b55be6ec3aa374c6cb6fc238cea",
+    "relative_distance_improvement_pct": 1.453934929785623,
+    "median_training_slowdown_pct": 2.192057079121734
+  },
+  "local_run_names": {
+    "graph": "VRPTW100_REMOTE_GRAPH_2080TI_DUAL_B40_C48_U5_S3011_E1500_20261009T180428Z",
+    "current": "VRPTW100_REMOTE_CURRENT_2080TI_DUAL_B40_C48_U5_S3011_E1500_20261009T180431Z"
+  },
+  "reported_remote_results": [
+    {
+      "source": "user_report_2026-10-10",
+      "server": "RTX_server",
+      "known_branch": "experiment/graph-rdi-slppo-20261009",
+      "latest_code_revision_confirmation": "pending",
+      "task": "vrptw100",
+      "optimized_validation_km": 214.7,
+      "epoch": null,
+      "seed": null,
+      "independently_recomputed": false
+    },
+    {
+      "source": "user_report_2026-10-10",
+      "server": "RTX_server",
+      "task": "evrptw100",
+      "optimized_validation_km": 215.4,
+      "epoch": null,
+      "seed": null,
+      "independently_recomputed": false
+    },
+    {
+      "source": "user_report_2026-10-10",
+      "server": "third_server",
+      "task": "evrptw100",
+      "reported_seed": 2010,
+      "seed_confirmation": "pending; possible 3010",
+      "original_validation_km": 223.6,
+      "optimized_validation_km": 216.6,
+      "epoch": null,
+      "source_commit": null,
+      "independently_recomputed": false
+    }
+  ],
+  "selection": [
+    {
+      "component": "joint_node_edge_encoder_and_matching_decoder_edge_interface",
+      "decision": "retain",
+      "evidence": "One paired seed; 20/20 common nonzero checkpoints improved; includes the 16-to-32 edge width change"
+    },
+    {
+      "component": "AGDA_physical_features_and_resource_flags",
+      "decision": "retain_reference_implementation",
+      "evidence": "Successful bundle and feature/gradient correctness tests; independent quality contribution not isolated"
+    },
+    {
+      "component": "SL_mask_and_weight_gradient_AMP_repairs",
+      "decision": "retain",
+      "evidence": "Correctness tests and successful bundle; no full-chain precision equivalence claim"
+    },
+    {
+      "component": "fixed_physical_units_strict_distance_gamma1_actor_RMS_PopArt",
+      "decision": "retain_reference_configuration",
+      "evidence": "Successful bundle and dimensional/reward invariants; individual quality effects need ablations"
+    },
+    {
+      "component": "SL_online_LOO_expert_structural_archive_branch_search",
+      "decision": "retain_with_explicit_component_description",
+      "evidence": "Successful bundle; expert/archive/search contributions need controlled ablations"
+    },
+    {
+      "component": "caches_shared_forward_single_query_implementation",
+      "decision": "retain",
+      "evidence": "Existing output/gradient equivalence tests; overall speed remains architecture dependent"
+    },
+    {
+      "component": "P1_profiles_score_mixer_PPO100_warmup_PPO3",
+      "decision": "exclude_from_default_candidate",
+      "evidence": "No stable independent benefit in the historical bundle; would change the successful recipe"
+    },
+    {
+      "component": "complete_resource_isolation_full_chain_AMP_global_masked_loss_reduction",
+      "decision": "defer_to_versioned_experiment",
+      "evidence": "Potential correctness/design improvements that change validated numerical semantics"
+    }
+  ],
+  "next_controlled_checks": [
+    "Additional paired seeds with the same Graph/CURRENT protocol",
+    "Matched edge width and individual graph mechanism ablations before claiming each mechanism",
+    "Separate expert, archive and branch-search ablations with actual rollout/optimizer/wall-clock budgets",
+    "Confirm third-server exact code/config/source and latest RTX revisions",
+    "Receive E1 definition; validate each new task/scale before adding it to this recipe"
+  ]
+}

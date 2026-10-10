@@ -1,0 +1,16 @@
+# Execution memory profile only; global batch and optimizer geometry stay in the recipe.
+schema_version: 1
+name: rtx48_single
+world_size: 1
+execution:
+  ppo_chunk_size: 120
+  expert_chunk_size: 128
+  eval_batch_size: 16
+validation:
+  status: recorded_remote_full_training_configuration
+  require_preflight: true
+  notes: Recorded hardware was RTX 6000 Ada 48GB; this is not a guarantee for RTX
+    A6000.
+  task_notes:
+    vrptw: Recorded remote configuration.
+    evrptw: Recorded remote configuration.

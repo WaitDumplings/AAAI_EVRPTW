@@ -10,6 +10,122 @@ PPO backbone -> SL-PPO
 `SL-PPO` is the proposed method. `PPO`, `DAPG`, and `AWBC` are comparison
 methods that share the same backbone and environment interface.
 
+## Consolidated AAAI candidate (2026-10-10)
+
+Use `scripts/run_aaai_candidate.sh` for the versioned **aaai_graph_v1** candidate.
+It resolves the recorded successful Graph training implementation at `d436492`;
+model, environment and trainer code retain those exact bytes. Research settings
+live in [the recipe](configs/recipes/aaai_graph_v1.yaml), while memory chunks and
+rank allocation live in [hardware profiles](configs/hardware). The older `train.py`
+method presets and historical experiment scripts retain their original defaults.
+
+The candidate currently supports **VRPTW100 and EVRPTW100**, with one 48GB GPU or
+one pair of 2080 Ti GPUs per model. CVRP and Cus15/Cus50 need separate validation
+before being added to this recipe. This entry point does not define E1.
+
+```bash
+# Inspect the complete configuration without creating a run or starting GPUs.
+bash scripts/run_aaai_candidate.sh --problem vrptw --hardware 2080ti_dual --print-config
+
+# Freeze code, data hashes and configs; prepare-only is also the default.
+bash scripts/run_aaai_candidate.sh --problem vrptw --hardware 2080ti_dual --gpus 0,1 --prepare-only
+bash scripts/run_aaai_candidate.sh --problem evrptw --hardware rtx48_single --gpus 0 --prepare-only
+```
+
+Use `--encoder current` for the matching modern encoder control. Both arms keep
+the same AGDA, reward, normalization, SL-PPO, archive and search settings. The
+encoder comparison changes the joint node/edge encoder and its decoder edge
+interface, including the effective edge width (32 versus 16). CURRENT is distinct
+from the historical original implementation.
+
+A later explicit `--launch` creates a fresh background run, waits for the chosen
+GPUs and performs an independent full-allocation two-epoch preflight. The formal
+run then starts from scratch, discarding preflight state. Each preflight requires
+40 successful optimizer updates per rank, finite gradients and matching rank
+checksums. This does not certify every later replay allocation: archive weight
+starts after 25 epochs, so memory headroom and long-run monitoring remain relevant.
+No running experiment is stopped by this launcher. EVRPTW's 2080 Ti memory profile
+still requires its own real GPU preflight; VRPTW's profile has passed one.
+
+| Research setting | VRPTW100 | EVRPTW100 |
+| --- | ---: | ---: |
+| Global instances per rollout | 40 | 32 |
+| Trajectories per instance | 50 | 50 |
+| PPO passes / minibatches | 5 / 4 | 5 / 4 |
+| Learning rate / gamma | 1e-4 / 1 | 1e-4 / 1 |
+| Rollout and evaluation horizon | 201 | 512 |
+| Default training | 1500 epochs, SL-PPO from epoch 1 | Same |
+| Validation | All 1000 instances, best-of-50, epoch 0 and every 50 | Same |
+
+Hardware profiles preserve these global budgets. Two ranks split the 8 exploration
+instances and the 32-route archive intake limit. Per-instance archive capacity
+is unchanged. Rank-local samplers, histories and masked-loss means make dual-GPU
+execution numerically different from a single-GPU run even at the same global
+batch. Explicit batch overrides are recorded research variants; evaluation batch
+changes can also alter sampled trajectories. Every run records resolved settings,
+component branches, hashes and observed optimizer/AMP counters.
+
+### What the evidence supports
+
+The local seed 3011, batch 40, PPO 5 controlled comparison at epoch 1000 gives
+**215.9273 km for Graph versus 219.1131 km for CURRENT** (1.4539% lower); both have
+100% independent-route-validation feasibility on 1000 instances. Graph is better
+at all 20 common validation checkpoints from epoch 50 to 1000. It wins 757/1000 paired
+instances at epoch 1000. Median non-evaluation epoch time over epochs 101–1000 is
+84.10 s versus 82.30 s, about 2.19% slower. This is evidence for the complete encoder
+and matching edge interface at one paired training seed, not proof of each graph
+mechanism or a cross-seed significance result. Actual successful updates through
+1000 are 19995/19997 (5/3 AMP skips), despite the common nominal 20 attempts per epoch.
+
+The [evidence record](docs/experiments/aaai_candidate_evidence_20261010.json) separates
+these local checks from user-reported remote scores. RTX VRPTW 214.7, EVRPTW 215.4,
+and the other server's 223.6/216.6 need their latest epochs, configs and code lineage
+before forming one consolidated results table. The third server's reported
+seed 2010 versus 3010 is awaiting confirmation.
+
+| Component | Candidate decision | Evidence boundary |
+| --- | --- | --- |
+| Joint directed node/edge encoder and decoder edge readout | Keep | Controlled whole-block comparison; internal mechanisms and edge width not separately isolated |
+| Physical D/T/E context and AGDA candidate transitions | Keep reference implementation | Successful bundle plus physical-feature and gradient tests |
+| Strict-distance reward, fixed physical units, gamma 1, actor RMS and PopArt | Keep reference configuration | Unit/reward invariants and bundle results; separate quality ablations pending |
+| Online SL, expert candidates, structural archive and branch search | Keep | Successful bundle; individual contributions need matched-budget ablations |
+| Finite masks, SL weight/gradient AMP consistency, shared/cached computations | Keep verified repairs | Correctness and equivalence tests; no full-chain AMP-equivalence claim |
+| Original-P1 adapters, 100-epoch PPO warmup, PPO 3 | Exclude from this candidate | They change the successful recipe and have no established independent benefit here |
+
+`experiment_protocol.resolved_components` describes the effective code path.
+Under `physical_shared_popart`, online SL uses a leave-one-out physical-cost
+advantage with the same actor RMS snapshot as PPO. Legacy online group/reference
+settings in the source config are bypassed; expert and replay gates still operate
+separately. A local `use_rdi_v2=False` or `use_agda_v2=False` switch removes a
+residual adapter, not all RDI or AGDA information. Do not label these switches
+as complete module ablations.
+
+The release candidate preserves remaining numerical semantics, including mixed
+FP32/AMP paths and rank-local loss reduction. More complete resource isolation,
+full-chain precision changes and globally weighted masked losses belong to new
+controlled versions. Current integration does not silently apply those changes.
+
+Before freezing a final paper release, reconcile the third server's source/config
+bundle, confirm the RTX revision and define E1's tasks, scales, methods, seeds,
+training budgets and evaluation protocol. Useful attribution checks are additional
+paired seeds, matched edge width, and separate expert/archive/search ablations.
+To reconcile another server, export its actual run directories after pulling this
+branch (run this command from `CaliRoute/`):
+
+```bash
+python scripts/export_run_evidence.py /path/to/original_run /path/to/optimized_run \
+  --output /path/to/new_evidence_bundle --include-source
+```
+
+The exporter verifies recorded source, configuration and input hashes, and copies
+configs, captured status/comparison and rank-zero training/validation CSVs.
+`--include-source` also copies the verified source subset. Dataset contents and
+checkpoints are excluded. The destination must be new; active logs are snapshots,
+not a cross-file atomic record. The bundle can be reviewed with the exact source
+branch/commit to resolve differences before the final paper release.
+
+The historical sections below document how earlier experiments were launched.
+
 ## Joint node-edge graph encoder experiment (VRPTW100 / EVRPTW100)
 
 `--encoder-variant graph` adds a new graph encoder to the existing **explore**
