@@ -1,0 +1,62 @@
+E1 deployment update, 2026-10-11
+================================
+Move the pending SL-PPO experiment from the third four-card RTX 2080 Ti host to
+the three-card RTX 2080 Ti host. Use GPUs 0,1 and leave GPU 2 unassigned. The old
+four-card host is now reserved. Other assignments are unchanged:
+
+Physical host       Task profile    Methods and local GPUs
+4x2080Ti A          2080ti_a        PPO base 0,1; PPO RDI+AGDA 2,3
+4x2080Ti B          2080ti_b        AWBC 0,1; DAPG 2,3
+4x2080Ti C          none            reserved
+3x2080Ti            2080ti_c        SL-PPO 0,1; GPU 2 reserved
+2xRTX A6000         a6000           RRNCO 0; RADAR 1
+
+Run from the REPOSITORY ROOT on the three-card host:
+  bash scripts/run_e1_3x2080ti.sh
+The command above prints a dry run. Explicitly start audit, smoke and queue:
+  bash scripts/run_e1_3x2080ti.sh --execute
+From CaliRoute instead, the path is ../scripts/run_e1_3x2080ti.sh.
+
+The wrapper chooses a new local campaign directory named
+E1_CVRP100_S3009_V1_2080TI_3. E1_CAMPAIGN can override it. The unchanged internal
+profile and scheduler directory are still named 2080ti_c. Do not use the old
+CaliRoute/scripts/run_e1_server.sh 2080ti_3 entry: that internal role is reserved.
+No remote job is started by committing this deployment update.
+
+This wrapper lives outside CaliRoute because the experiment snapshots every
+tracked/nonignored file under CaliRoute, including launch scripts and docs.
+Changing that tree for a hardware reassignment would change the comparison
+source hash for newly prepared experiments. CaliRoute remains byte-identical to
+3e7357d; the existing strict source/data/budget comparison is preserved. The Git
+commit of a new deployment may differ while its recorded source content hash
+still matches earlier runs. Frozen existing manifests/configs are never edited.
+
+Research protocol is unchanged: two ranks, global batch 64 (32/rank), 50
+trajectories, 4 PPO passes, seed 3009, 1500 online update loops, scratch init.
+Audit assets and prepare the campaign locally; copied audits can retain another
+machine's absolute paths. Install the same dependencies as in
+CaliRoute/docs/e1/RUNBOOK.txt. If SL-PPO was already queued on the old host, stop
+or cancel that specific old job before launching its replacement; do not launch
+duplicate runs and select one using its test score.
+
+Scope of the currently supplied E1 specification
+-----------------------------------------------
+CaliRoute/docs/e1/user_specification.txt explicitly scopes this implementation
+to CVRP-Cus100, one training seed, seven methods. Finishing the two local PPO runs
+does not finish that experiment. Remaining completion steps are:
+1. Finish all seven method budgets: PPO base, PPO RDI+AGDA, AWBC, DAPG, SL-PPO,
+   native RRNCO and native RADAR. Preserve best/last checkpoints and metadata.
+2. Select each checkpoint only using the fixed validation rule. Evaluate on the
+   same independent 1000 test IDs with K=50 attempts, retaining failed instances
+   and independently validating all routes and directed road costs.
+3. Join the test Gurobi incumbents by instance ID; report coverage, feasibility,
+   mean km, incumbent gaps and properly labeled inference runtime. Gurobi remains
+   a reference, not another learned method. Do not restart its existing jobs.
+4. Collect all seven campaigns and accepted test files, verify their source,
+   data, expert pool and budget contracts, and produce the final JSON/CSV table.
+   Preserve the single-seed limitation and do not report multi-seed mean +/- SD.
+
+Whether the full paper E1 also requires CVRP/VRPTW/EVRPTW at Cus15/50/100 is a
+separate scope decision. This deployment change neither defines nor launches
+those additional experiments. Current E1 adapters/configs are CVRP100-specific;
+especially the native baselines need task-support checks before expanding.
