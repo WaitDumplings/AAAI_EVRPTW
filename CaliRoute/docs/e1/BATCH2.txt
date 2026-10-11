@@ -1,0 +1,83 @@
+E1 batch two: CVRP Cus50 and Cus15
+================================
+Branch: experiment/e1-cvrp15-50-20261011.
+Batch one remains on experiment/e1-cvrp100-20261010. Do not prepare new batch-one
+campaigns from this branch: all peers of a comparison must share frozen source.
+Existing processes use their own frozen source and are unaffected by git switch.
+Use a clean clone/worktree if another task needs to prepare batch one concurrently.
+
+Run from CaliRoute after checking out this branch:
+  bash scripts/run_e1_batch2.sh 2080ti_a
+This prints the plan only. Add --execute to audit, prepare, smoke and queue:
+  bash scripts/run_e1_batch2.sh 2080ti_a --execute
+Use 2080ti_b / 2080ti_3 / a6000 on the corresponding machines. The 4-card host C
+is reserved. It is intentionally not the 3-card host's batch-two profile.
+
+All learned runs initialize independently from scratch, seed 3009. Per scale:
+seven methods, 1500 online loops, 96,000 instance exposures, n_traj=50 and K=50.
+Each controlled run uses ONE GPU with batch 64, four PPO passes, four minibatches,
+LR 1e-4, gamma .99 and FP32. The global instance/trajectory batch matches batch one;
+there is no LR rescaling. DAPG retains 3 additional BC-only warmup loops.
+Distance units are fitted independently using only that scale's training split.
+Decode caps are 101 for Cus50 and 31 for Cus15 (2*N+1), including depot returns.
+Validation is every 50 online loops, all 1000 validation instances, best-of-50;
+checkpoint selection, independent validation and test isolation follow RUNBOOK.
+Models, expert objectives and native optimizer recipes are unchanged.
+
+Physical assignment (all are single-GPU runs)
+---------------------------------------------
+2080ti_a: GPU0 Cus50 PPO base; GPU1 Cus50 PPO RDI+AGDA;
+          GPU2 Cus15 PPO base; GPU3 Cus15 PPO RDI+AGDA.
+2080ti_b: GPU0 Cus50 AWBC; GPU1 Cus50 DAPG;
+          GPU2 Cus15 AWBC; GPU3 Cus15 DAPG.
+2080ti_3: GPU0 Cus50 SL-PPO; GPU1 Cus15 SL-PPO; GPU2 reserved.
+a6000:    GPU0 Cus50 RRNCO; GPU1 Cus50 RADAR;
+          after BOTH finish successfully, GPU0 Cus15 RRNCO; GPU1 Cus15 RADAR.
+2080ti_c: reserved.
+This is 14 total runs, at most 12 concurrent GPU jobs. Preparation/small CPU smoke
+runs are foreground; the GPU queues and formal training are detached/background.
+No existing training/Gurobi process is stopped. Occupied GPUs cause waiting.
+A6000 dependencies prevent Cus15 from overtaking its Cus50 predecessor; failures
+block the dependent queue. Inspect/fix/resume a failed predecessor before retrying
+its dependent launch. Do not repeatedly launch a live or already-trained campaign.
+
+Cus15 native starts and candidate accounting
+-------------------------------------------
+There are only 15 possible first customers. RRNCO already selects starts modulo
+customer count. The RADAR harness makes the same explicit forced-action boundary
+adaptation when K>N: starts 1..15 repeat cyclically to fill 50 slots. The model,
+REINFORCE/POMO loss and native forward after the forced start remain unchanged;
+forced starts retain probability one and contribute no stochastic-action loss.
+All 50 trajectories are actually executed. Training samples after the forced
+start independently. Native evaluation retains greedy multistart and can return
+duplicate routes; 50 attempts does NOT imply 50 distinct solutions. Each native
+instance row records start_policy, unique_first_customers and
+candidate_unique_completed_routes. No copied route is used to inflate actual_K,
+no hidden augmentation is added and no extra retry is allowed. Controlled models
+retain their existing sampling evaluation. Compare within a scale under this
+explicit candidate-attempt budget, not under an unclaimed unique-solution budget.
+
+Files and lifecycle
+-------------------
+Each physical server prepares BOTH scales locally under:
+  results/e1/E1_BATCH2_CVRP50_S3009_SERVER/
+  results/e1/E1_BATCH2_CVRP15_S3009_SERVER/
+E1_BATCH2_ROOT changes the campaign parent; E1_BATCH2_ASSETS_ROOT changes the asset
+audit parent; E1_DATA_ROOT chooses AAAI_Dataset. E1_PYTHON and native interpreters
+follow RUNBOOK. Do not reuse audits with another host's absolute data paths.
+Audit directories are separated by Cus50/Cus15. Requested scale and frozen schema
+must agree. Each queue checks source/config/input hashes and full GPU preflight
+before launching the formal run with fresh parameters. Full-batch memory/throughput
+are hardware dependent; no measured VRAM percentage is promised by these defaults.
+
+Progress: scheduler_SERVER/status.json, runs/METHOD/train.log (controlled),
+runs/METHOD/native_train.jsonl (native), and runs/METHOD/validation/ for
+controlled independent evaluation; native validation is native_validation.jsonl.
+Checkpoint restore uses the frozen campaign and original single-rank geometry:
+  bash scripts/run_e1.sh resume --campaign CAMPAIGN --method slppo --checkpoint LAST --execute
+Final test is explicit after training, using validation-selected best:
+  bash scripts/run_e1.sh evaluate --campaign CAMPAIGN --method slppo --checkpoint BEST --device cuda:0 --batch-size 1
+Gather same-scale campaigns and run summarize with --additional-campaign for each
+server and the matching scale's Gurobi CSV. A Cus15 campaign cannot be merged into
+Cus50/Cus100 as one comparison; scale-specific schema/data hashes enforce this.
+Do not mix branch/source versions within the same seven-method comparison.

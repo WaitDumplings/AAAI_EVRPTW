@@ -13,6 +13,14 @@ METHODS = ('ppo_base', 'ppo_rdi_agda', 'awbc', 'dapg', 'slppo', 'rrnco', 'radar'
 CONTROLLED = METHODS[:5]
 EXPERT_METHODS = ('awbc', 'dapg', 'slppo')
 SCHEMA = 'aaai_e1_cvrp100_v1'
+SUPPORTED_CUSTOMERS = (15, 50, 100)
+SUPPORTED_SCHEMAS = {f'aaai_e1_cvrp{n}_v1' for n in SUPPORTED_CUSTOMERS}
+
+def schema_for_customers(customers):
+    if isinstance(customers, bool) or customers not in SUPPORTED_CUSTOMERS:
+        raise ValueError('E1 supports CVRP Cus15, Cus50 and Cus100')
+    return f'aaai_e1_cvrp{customers}_v1'
+
 # Five controlled experiments use ten 2080 Ti cards; no hardware timing comparison
 # is inferred between the native A6000 runs and controlled 2080 Ti runs.
 SERVER_PLANS = {
@@ -22,6 +30,20 @@ SERVER_PLANS = {
     'a6000': [('rrnco', [0]), ('radar', [1])],
     '2080ti_3': [],
 }
+
+def server_plans(customers):
+    schema_for_customers(customers)
+    if customers == 100:
+        return copy.deepcopy(SERVER_PLANS)
+    offset = 0 if customers == 50 else 2
+    return {
+        '2080ti_a': [('ppo_base', [offset]), ('ppo_rdi_agda', [offset + 1])],
+        '2080ti_b': [('awbc', [offset]), ('dapg', [offset + 1])],
+        '2080ti_c': [],
+        '2080ti_3': [('slppo', [0 if customers == 50 else 1])],
+        'a6000': [('rrnco', [0]), ('radar', [1])],
+    }
+
 
 def digest(path):
     h = hashlib.sha256()
@@ -41,8 +63,8 @@ def fit_train_distance_unit(train_path):
     """
     from offline2online.instance_adapter import iter_adapted_instances
     train_path = Path(train_path).resolve()
-    if train_path.parts[-3:] != ('cvrp', 'train', 'Cus100'):
-        raise ValueError('E1 units may be fitted only on the declared CVRP100 train split')
+    if train_path.parts[-3:-1] != ('cvrp', 'train') or train_path.name not in {f'Cus{n}' for n in SUPPORTED_CUSTOMERS}:
+        raise ValueError('E1 units may be fitted only on the declared CVRP train split')
     repairs = []
     for instance in iter_adapted_instances(train_path, problem_type='cvrp', strict_road_metric=True):
         d = np.asarray(instance.distance_matrix_km, dtype=np.float64)
@@ -74,7 +96,9 @@ def _model(base=False):
 
 def build_config(method, *, data_root, output_dir, expert_pool=None, distance_unit_km,
                  seed=3009, world_size=2, global_batch=64, epochs=1500,
-                 ppo_chunk=8, expert_chunk=32, eval_batch=8, backup_root=None):
+                 ppo_chunk=8, expert_chunk=32, eval_batch=8, backup_root=None, customers=100):
+    schema = schema_for_customers(customers)
+    decode_cap = 2 * customers + 1
     if method not in METHODS:
         raise ValueError(f'Unknown E1 method: {method}')
     for name, value in dict(world_size=world_size, global_batch=global_batch, epochs=epochs,
@@ -88,22 +112,24 @@ def build_config(method, *, data_root, output_dir, expert_pool=None, distance_un
     if not np.isfinite(distance_unit_km) or distance_unit_km <= 0:
         raise ValueError('distance_unit_km must be fitted/frozen on train and positive')
     data = Path(data_root).resolve(); output = Path(output_dir).resolve()
-    train = data / 'dataset/cvrp/train/Cus100'; val = data / 'dataset/cvrp/val/Cus100'
-    protocol = dict(schema=SCHEMA, method=method, task='cvrp100', training_seed=int(seed),
-        initialization='scratch', customer_count=100, requested_K=50, inference_seed=17000000 + int(seed),
+    train = data / f'dataset/cvrp/train/Cus{customers}'; val = data / f'dataset/cvrp/val/Cus{customers}'
+    protocol = dict(schema=schema, method=method, task=f'cvrp{customers}', training_seed=int(seed),
+        initialization='scratch', customer_count=customers, requested_K=50, inference_seed=17000000 + int(seed),
         total_instance_exposures=epochs * global_batch, global_batch=global_batch, world_size=world_size,
         evaluation_interval_exposures=50 * global_batch, validation_instances=1000,
         selection_rule='highest validation feasibility; then lowest mean feasible independently validated km',
         controlled_epoch_meaning='one sampled global instance batch followed by PPO/loss updates, NOT a dataset pass',
         directed_road_metric=True, include_depot_returns=True, fixed_vehicle_cost=0,
-        decode_cap=201, test_used_for_training_or_selection=False, training_seed_count=1,
+        decode_cap=decode_cap, test_used_for_training_or_selection=False, training_seed_count=1,
         hardware_timing_comparable_only_on_same_hardware=True,
         checkpoint_backup_required=True, self_trajectory_replay=False, independent_search=False)
     if method not in CONTROLLED:
-        return dict(schema=SCHEMA, method=method, training_seed=seed, run_id=output.name,
+        protocol['native_start_policy'] = 'cyclic_customers_when_K_exceeds_N' if customers < 50 else 'native_distinct_customers'
+        return dict(schema=schema, method=method, training_seed=seed, run_id=output.name,
+            num_customers=customers, allow_repeated_starts=customers < 50,
             train_path=str(train), val_path=str(val), instance_exposures=epochs*global_batch,
             batch_size=global_batch, n_traj=50, eval_k=50, eval_interval_exposures=50*global_batch,
-            eval_batch_size=eval_batch, eval_seed=17000000+seed, max_steps=201,
+            eval_batch_size=eval_batch, eval_seed=17000000+seed, max_steps=decode_cap,
             checkpoint_backup_dir=str(Path(backup_root).resolve() / output.name) if backup_root else None,
             experiment_protocol=protocol)
     preset = method_preset('ppo' if method.startswith('ppo_') else method)
@@ -129,7 +155,7 @@ def build_config(method, *, data_root, output_dir, expert_pool=None, distance_un
     advantage = preset.advantage_config()
     if method == 'slppo': advantage['sl_expert_logprob_chunk_size'] = expert_chunk
     training = dict(online_training=False, epochs=epochs+warmup, num_envs_per_gpu=global_batch//world_size,
-        n_traj=50, rollout_steps=201, require_complete_feasible_rollouts=True,
+        n_traj=50, rollout_steps=decode_cap, require_complete_feasible_rollouts=True,
         ppo_step_chunk_size=ppo_chunk, ppo_update_epochs=4, num_minibatches=4,
         gradient_accumulation_steps=1, gamma=.99, gae_lambda=.95, clip_coef=.2, vf_coef=.5,
         ent_coef=.01, learning_rate=1e-4, weight_decay=0., max_grad_norm=1., target_kl=None,
@@ -143,7 +169,7 @@ def build_config(method, *, data_root, output_dir, expert_pool=None, distance_un
     if backup_root:
         training['checkpoint_backup_dir'] = str(Path(backup_root).resolve())
     return dict(run_name=output.name, dataset_name='Geo-CVRP-v1',
-        data=dict(problem_type='cvrp', num_customers=100, num_charging_stations=0,
+        data=dict(problem_type='cvrp', num_customers=customers, num_charging_stations=0,
             train_dataset_path=str(train), train_sample_mode='shuffle_cycle',
             async_instance_prefetch=False, strict_road_metric=True),
         env=dict(use_fast_env=True, use_jit_mask=True, normalize_reward=True, reward_contract='legacy',
@@ -156,7 +182,7 @@ def build_config(method, *, data_root, output_dir, expert_pool=None, distance_un
         pbrs=dict(use_customer_pbrs=False, use_repair_distance_pbrs=False,
                   use_feasible_ratio_pbrs=False, use_terminal_heuristic=False),
         evaluation=dict(eval_before_training=False, eval_interval=50, eval_epoch_offset=warmup, eval_path=str(val),
-            eval_n_traj=50, eval_decode_mode='sample', eval_max_steps=201, eval_limit=None,
+            eval_n_traj=50, eval_decode_mode='sample', eval_max_steps=decode_cap, eval_limit=None,
             eval_batch_size=eval_batch, eval_info_level='light', eval_save_routes=True,
             eval_seed=17000000+seed, eval_output_dir=str(output/'validation'), gurobi_summary_path=None),
         experiment_protocol=protocol)

@@ -20,7 +20,7 @@ import sys
 import time
 
 import yaml
-from e1.configs import ROOT, METHODS, CONTROLLED, EXPERT_METHODS, SERVER_PLANS, SCHEMA, build_config, digest, fit_train_distance_unit, content_hash
+from e1.configs import ROOT, METHODS, CONTROLLED, EXPERT_METHODS, SERVER_PLANS, SCHEMA, SUPPORTED_SCHEMAS, schema_for_customers, server_plans, build_config, digest, fit_train_distance_unit, content_hash
 from e1.evaluation import atomic_json
 
 
@@ -39,7 +39,7 @@ def _runtime():
 
 def verify_campaign(path, *, data=True):
     path=Path(path).resolve();manifest=_read(path/'manifest.json')
-    if manifest['schema']!=SCHEMA:raise ValueError('Unexpected E1 campaign schema')
+    if manifest['schema'] not in SUPPORTED_SCHEMAS:raise ValueError('Unexpected E1 campaign schema')
     for name,expected in manifest['source']['files'].items():
         if digest(Path(manifest['code_root'])/name)!=expected:raise ValueError(f'Frozen source changed: {name}')
     for method,spec in manifest['methods'].items():
@@ -53,11 +53,14 @@ def verify_campaign(path, *, data=True):
 def prepare(args):
     report=_read(args.audit)
     if not report.get('training_data_ready'):raise ValueError('Train/validation data audit has not passed')
-    if report['customers']!=100 or report['problem']!='cvrp':raise ValueError('This E1 definition is CVRP100 only')
+    customers=report['customers'];schema=schema_for_customers(customers)
+    if report['problem']!='cvrp':raise ValueError('This E1 definition supports CVRP only')
+    plans=server_plans(customers)
+    if getattr(args,'customers',None) not in (None,customers):raise ValueError('Requested scale differs from asset audit')
     output=Path(args.campaign).resolve()
     if output.exists():raise FileExistsError('Use a new campaign directory; frozen configs are never overwritten')
     data=Path(report['data_root']).resolve()
-    unit=fit_train_distance_unit(data/'dataset/cvrp/train/Cus100')
+    unit=fit_train_distance_unit(data/f'dataset/cvrp/train/Cus{customers}')
     inputs=[]
     # Test payload hashes record split identity only. No test reference/route file
     # enters this manifest or is opened by training.
@@ -91,11 +94,11 @@ def prepare(args):
     backup=Path(args.backup_root).resolve() if args.backup_root else output.parent/'checkpoint_backups'/output.name
     if backup==output or output in backup.parents:raise ValueError('Checkpoint backup directory must be independent of the campaign tree')
     methods={}
-    placement={method:(server,gpus) for server,items in SERVER_PLANS.items() for method,gpus in items}
+    placement={method:(server,gpus) for server,items in plans.items() for method,gpus in items}
     for method in METHODS:
         server,gpus=placement[method];run=output/'runs'/method;run.mkdir(parents=True)
         cfg=build_config(method,data_root=data,output_dir=run,expert_pool=expert,
-            distance_unit_km=unit['km'],seed=args.seed,world_size=len(gpus),epochs=args.epochs,
+            distance_unit_km=unit['km'],seed=args.seed,world_size=len(gpus),epochs=args.epochs,customers=customers,
             backup_root=backup,ppo_chunk=args.ppo_chunk,expert_chunk=args.expert_chunk,eval_batch=args.eval_batch)
         # Trainer names must remain unique across campaigns and remote results copies.
         unique=f'{output.name}_{method}'
@@ -108,18 +111,18 @@ def prepare(args):
         methods[method]=dict(config=str(path),config_sha256=digest(path),run_dir=str(run),
             server=server,gpus=gpus,requires_expert=method in EXPERT_METHODS,
             ready=method not in EXPERT_METHODS or report['expert_methods_ready'])
-    manifest=dict(schema=SCHEMA,created_at=_utc(),campaign=str(output),code_root=str(code),artifacts_root=str(output/'artifacts'),source=source,
+    manifest=dict(schema=schema,created_at=_utc(),campaign=str(output),code_root=str(code),artifacts_root=str(output/'artifacts'),source=source,
         initialization='scratch',training_seed=args.seed,inputs=inputs,methods=methods,
         audit_path=str(assets/'assets_audit.json'),distance_unit=unit,backup_root=str(backup),
-        server_plan=SERVER_PLANS,stage='prepared',description='No training launched; each method needs smoke and full hardware preflight')
+        server_plan=plans,stage='prepared',description='No training launched; each method needs smoke and full hardware preflight')
     with expert.open() as handle:
         expert_semantics=sorted((r['instance_id'],float(r['objective_distance_km']),json.loads(r['routes_json'])) for r in csv.DictReader(handle))
-    manifest['comparison_contract']=dict(schema=SCHEMA,training_seed=args.seed,online_loops=args.epochs,global_batch=64,
+    manifest['comparison_contract']=dict(schema=schema,training_seed=args.seed,online_loops=args.epochs,global_batch=64,
         total_instance_exposures=args.epochs*64,n_traj=50,controlled_ppo_passes=4,gamma=.99,eval_K=50,
         source_content_sha256=source['content_sha256'],expert_pool_semantic_sha256=content_hash(expert_semantics),
         dataset_sha256={split:report['splits'][split]['files']['instances.pkl']['sha256'] for split in ('train','val','test')})
     atomic_json(output/'manifest.json',manifest)
-    print(json.dumps(dict(campaign=str(output),stage='prepared',methods=list(methods),server_plan=SERVER_PLANS),indent=2))
+    print(json.dumps(dict(campaign=str(output),stage='prepared',methods=list(methods),server_plan=plans),indent=2))
     return manifest
 
 
@@ -221,7 +224,7 @@ def smoke(args):
                 checkpoint=torch.load(last,map_location='cpu',weights_only=False)
                 result=dict(state='passed',commands=commands,last_checkpoint=str(last),last_sha256=digest(last),
                     epoch=checkpoint['epoch'],config_sha256=digest(run/'config.yaml'),
-                    evidence='Real CVRP100 subset, real optimizer/expert path, validation, save, new process full resume')
+                    evidence=f'Real CVRP{cfg["data"]["num_customers"]} subset, real optimizer/expert path, validation, save, new process full resume')
             atomic_json(run/'smoke_result.json',result);results[method]=result
         except Exception as error:
             result=dict(state='failed',reason=f'{type(error).__name__}: {error}',logs=str(run))
@@ -238,7 +241,8 @@ def _smoke_passed(spec):
 
 def launch(args):
     manifest=verify_campaign(args.campaign)
-    methods=[m for m,_ in SERVER_PLANS[args.server]] if args.method=='all' else [args.method]
+    if getattr(args,'customers',None) is not None and manifest['schema']!=schema_for_customers(args.customers):raise ValueError('Requested scale differs from frozen campaign')
+    methods=[m for m,_ in manifest['server_plan'][args.server]] if args.method=='all' else [args.method]
     if not methods:print('This server is reserved; no E1 jobs assigned.');return
     plan=[]
     for method in methods:
@@ -257,10 +261,23 @@ def launch(args):
     if len(gpu_list)!=len(set(gpu_list)):raise ValueError('Concurrent methods may not share assigned GPUs')
     scheduler=Path(args.campaign)/('scheduler_'+args.server)
     scheduler.mkdir(exist_ok=True)
-    plan_path=scheduler/'plan.json'
     if (scheduler/'pid.json').exists():
         old=_read(scheduler/'pid.json');proc=Path('/proc')/str(old.get('pid',0))/'cmdline'
         if proc.exists() and str(scheduler).encode() in proc.read_bytes():raise ValueError('This scheduler is already live')
+    dependency=getattr(args,'after_campaign',None)
+    dependency_file=scheduler/'dependency.json'
+    if dependency:
+        dependency=Path(dependency).resolve()
+        if dependency==Path(args.campaign).resolve():raise ValueError('A campaign cannot depend on itself')
+        previous=verify_campaign(dependency)
+        if previous['source']['content_sha256']!=manifest['source']['content_sha256']:
+            raise ValueError('Queued scales must use the same frozen source')
+        previous_scheduler=dependency/('scheduler_'+args.server)
+        if not (previous_scheduler/'plan.json').is_file():raise ValueError('Launch the predecessor server queue first')
+        atomic_json(dependency_file,dict(campaign=str(dependency),scheduler=str(previous_scheduler),
+            methods=[row['method'] for row in _read(previous_scheduler/'plan.json')]))
+    elif dependency_file.exists():raise ValueError('Existing queue has a dependency; pass --after-campaign explicitly')
+    plan_path=scheduler/'plan.json'
     atomic_json(plan_path,plan)
     command=[sys.executable,'-m','e1.runner','_supervise','--campaign',str(Path(args.campaign).resolve()),'--scheduler',str(scheduler.resolve())]
     with (scheduler/'supervisor.log').open('a') as log:
@@ -287,6 +304,17 @@ def _hardware_preflight(manifest,method):
     return run/'config.yaml'
 
 
+def dependency_state(folder):
+    path=Path(folder)/'dependency.json'
+    if not path.exists():return 'ready'
+    dependency=_read(path);status_path=Path(dependency['scheduler'])/'status.json'
+    if not status_path.exists():return 'waiting'
+    states=_read(status_path).get('methods',{})
+    if any(states.get(m,{}).get('state') in ('failed','blocked','interrupted') for m in dependency['methods']):return 'failed'
+    if all(states.get(m,{}).get('state')=='completed' for m in dependency['methods']):return 'ready'
+    return 'waiting'
+
+
 def supervise(args):
     manifest=verify_campaign(args.campaign);folder=Path(args.scheduler)
     lock=(folder/'supervisor.lock').open('a+');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -294,6 +322,13 @@ def supervise(args):
     status=dict(created_at=_utc(),pid=os.getpid(),state='waiting_for_idle_gpus',methods={})
     try:
         while pending or active:
+            dependency=dependency_state(folder)
+            if dependency!='ready' and not active:
+                state='blocked_by_predecessor' if dependency=='failed' else 'waiting_for_predecessor'
+                status.update(state=state,updated_at=_utc(),methods={row['method']:dict(state=state,gpus=row['gpus']) for row in pending})
+                atomic_json(folder/'status.json',status)
+                if dependency=='failed':break
+                time.sleep(30);continue
             for method,item in list(active.items()):
                 rc=item['process'].poll()
                 if rc is None:continue
@@ -434,12 +469,12 @@ def summarize(args):
 def parser():
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
     p=sub.add_parser('native-status');p.add_argument('--method',choices=('rrnco','radar','all'),default='all')
-    p=sub.add_parser('preflight');p.add_argument('--data-root',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
+    p=sub.add_parser('preflight');p.add_argument('--data-root',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--customers',type=int,choices=(15,50,100),default=100)
     p=sub.add_parser('prepare');p.add_argument('--audit',type=Path,required=True);p.add_argument('--campaign',type=Path,required=True)
-    p.add_argument('--seed',type=int,default=3009);p.add_argument('--epochs',type=int,default=1500)
+    p.add_argument('--customers',type=int,choices=(15,50,100));p.add_argument('--seed',type=int,default=3009);p.add_argument('--epochs',type=int,default=1500)
     p.add_argument('--backup-root',type=Path);p.add_argument('--ppo-chunk',type=int,default=8);p.add_argument('--expert-chunk',type=int,default=32);p.add_argument('--eval-batch',type=int,default=8)
     p=sub.add_parser('smoke');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--method',choices=(*METHODS,'all'),default='all');p.add_argument('--retry',action='store_true')
-    p=sub.add_parser('launch');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--server',choices=SERVER_PLANS,required=True);p.add_argument('--method',choices=(*METHODS,'all'),default='all');p.add_argument('--gpus');p.add_argument('--execute',action='store_true')
+    p=sub.add_parser('launch');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--server',choices=SERVER_PLANS,required=True);p.add_argument('--method',choices=(*METHODS,'all'),default='all');p.add_argument('--gpus');p.add_argument('--execute',action='store_true');p.add_argument('--after-campaign',type=Path);p.add_argument('--customers',type=int,choices=(15,50,100))
     p=sub.add_parser('_supervise');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--scheduler',type=Path,required=True)
     p=sub.add_parser('resume');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--method',choices=METHODS,required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--gpus');p.add_argument('--execute',action='store_true')
     p=sub.add_parser('evaluate');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--method',choices=METHODS,required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--device',default='cpu');p.add_argument('--batch-size',type=int,default=1)
@@ -450,7 +485,7 @@ def parser():
 def _absolute_forwarded_paths(args, argv):
     """Resolve user-relative paths before re-executing inside frozen source."""
     forwarded=list(argv)
-    for key in ('campaign','checkpoint','scheduler'):
+    for key in ('campaign','checkpoint','scheduler','after_campaign'):
         value=getattr(args,key,None)
         if value is None:continue
         flag='--'+key.replace('_','-');absolute=str(Path(value).expanduser().resolve())
@@ -475,7 +510,7 @@ def main():
         if any(not s['source_available'] or not s['dependencies_available'] for s in statuses): raise SystemExit(1)
     elif args.command=='preflight':
         from e1.assets import audit_assets
-        result=audit_assets(args.data_root,args.output,teacher_force=True,
+        result=audit_assets(args.data_root,args.output,teacher_force=True,expected_customers=args.customers,
             env_config=dict(normalize_reward=True,reward_contract='legacy',reward_mode='distance',max_steps_factor=4),progress=lambda r:print(json.dumps(r),flush=True))
         print(json.dumps(result,indent=2))
     else:

@@ -226,7 +226,7 @@ def _config(config):
     for key in ("instance_exposures", "batch_size", "n_traj", "eval_k", "eval_interval_exposures", "eval_batch_size", "checkpoint_interval_updates", "num_customers", "cpu_threads"):
         if isinstance(cfg[key], bool) or not isinstance(cfg[key], int) or cfg[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
-    if cfg["n_traj"] < 2 or cfg["n_traj"] > cfg["num_customers"] or cfg["eval_k"] > cfg["num_customers"]:
+    if cfg["n_traj"] < 2 or (max(cfg["n_traj"], cfg["eval_k"]) > cfg["num_customers"] and not cfg.get("allow_repeated_starts", False)):
         raise ValueError("Native multistart counts must fit customer count; training needs at least two starts")
     for key in ("train_path", "val_path"):
         cfg[key] = str(Path(cfg[key]).resolve())

@@ -15,7 +15,7 @@ import socket
 
 import yaml
 
-from e1.configs import CONTROLLED, EXPERT_METHODS, SCHEMA, content_hash, digest
+from e1.configs import CONTROLLED, EXPERT_METHODS, SCHEMA, SUPPORTED_SCHEMAS, content_hash, digest
 
 
 def _read(path):
@@ -23,7 +23,7 @@ def _read(path):
 
 
 def _config(manifest, method):
-    if manifest.get('schema') != SCHEMA or method not in manifest['methods']:
+    if manifest.get('schema') not in SUPPORTED_SCHEMAS or method not in manifest['methods']:
         raise ValueError('Unknown E1 campaign/method')
     spec = manifest['methods'][method]
     if digest(spec['config']) != spec['config_sha256']:
@@ -84,7 +84,7 @@ def acquire_run_lock(run_dir):
 
 
 def _check_protocol(saved, expected, manifest, method):
-    identity = dict(schema=SCHEMA, method=method, training_seed=manifest['training_seed'],
+    identity = dict(schema=manifest['schema'], method=method, training_seed=manifest['training_seed'],
         data_audit_sha256=expected.get('data_audit_sha256'),
         expert_pool_sha256=expected.get('expert_pool_sha256'),
         source_content_sha256=manifest['source']['content_sha256'])

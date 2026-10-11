@@ -100,7 +100,7 @@ def audit_assets(data_root,output_dir,*,teacher_force=True,expected_customers=10
 
     The output directory must be new. ``teacher_force=False`` is an incomplete
     inspection and never produces a training-ready expert pool. This function
-    works on tiny fixture scales for tests; the E1 runner selects Cus100 only.
+    works on tiny fixture scales for tests; the E1 runner selects Cus15, Cus50 or Cus100.
     """
     root=Path(data_root).expanduser().resolve();out=Path(output_dir).expanduser().resolve()
     if root.name=='dataset': raise ValueError('data_root must contain dataset/ and test_release/')

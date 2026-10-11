@@ -30,15 +30,15 @@ def payload(identity="train", scale=1., customers=100):
 def bundle(path, instances):
     path.mkdir(parents=True)
     with (path / "instances.pkl").open("wb") as stream:
-        pickle.dump(dict(format="classical_vrp_instance_bundle_v1", num_instances=len(instances), num_customers=100), stream)
+        pickle.dump(dict(format="classical_vrp_instance_bundle_v1", num_instances=len(instances), num_customers=len(instances[0]["customers"])), stream)
         for instance in instances: pickle.dump(instance, stream)
     return path
 
 
-def config(tmp_path, method, *, val_count=1):
-    train = bundle(tmp_path / "train", [payload("train0"), payload("train1", 1.2)])
-    val = bundle(tmp_path / "val", [payload(f"val{i}", 1.4+0.2*i) for i in range(val_count)])
-    return dict(method=method, training_seed=3009, train_path=str(train), val_path=str(val),
+def config(tmp_path, method, *, val_count=1, customers=100):
+    train = bundle(tmp_path / "train", [payload("train0", customers=customers), payload("train1", 1.2, customers=customers)])
+    val = bundle(tmp_path / "val", [payload(f"val{i}", 1.4+0.2*i, customers=customers) for i in range(val_count)])
+    return dict(method=method, training_seed=3009, num_customers=customers, allow_repeated_starts=customers<50, train_path=str(train), val_path=str(val),
                 instance_exposures=2, batch_size=1, n_traj=50, eval_k=50,
                 eval_interval_exposures=1, eval_batch_size=1, checkpoint_interval_updates=1,
                 experiment_protocol={"smoke_only": True})
@@ -109,11 +109,12 @@ def _assert_equal(left, right):
 
 
 @pytest.mark.parametrize("method", ["radar", "rrnco"])
-def test_native_cpu_update_validation_fresh_process_resume_matches_continuation(tmp_path, method):
+@pytest.mark.parametrize("customers", [15, 100])
+def test_native_cpu_update_validation_fresh_process_resume_matches_continuation(tmp_path, method, customers):
     available = native.native_status(method)
     if not available["source_available"] or not available["dependencies_available"]:
         pytest.skip(f"Native source/environment unavailable: {available}")
-    cfg = config(tmp_path, method)
+    cfg = config(tmp_path, method, customers=customers)
     interrupted, uninterrupted = tmp_path / "resumed", tmp_path / "straight"
     first = native.train(cfg, interrupted, max_updates=1)
     assert first["state"] == "paused" and first["counters"]["optimizer_updates"] == 1

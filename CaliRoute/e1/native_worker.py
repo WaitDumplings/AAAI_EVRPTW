@@ -96,6 +96,26 @@ def _guard_step(optimizer, args, kwargs):
         raise FloatingPointError("Native optimizer has missing or nonfinite gradients; update refused")
 
 
+def install_radar_cyclic_starts(model, customers):
+    """Adapt only forced start IDs when K>N; retain native objective/decoding.
+
+    Fifty actual trajectories are decoded. Greedy repeats may yield duplicate
+    solutions; these are counted as attempts, never advertised as unique routes.
+    RRNCO already cycles starts modulo generator.num_loc in its native selector.
+    """
+    original = model.forward
+    def forward(state):
+        batch, starts = state.BATCH_IDX.shape
+        if state.selected_count != 1 or starts <= customers:
+            return original(state)
+        encoded = model.encoded_node
+        selected = (torch.arange(starts, device=encoded.device) % customers + 1)[None].expand(batch, -1)
+        first = encoded.gather(1, selected[..., None].expand(-1, -1, encoded.shape[-1]))
+        model.decoder.set_q1(first)
+        return selected, torch.ones((batch, starts), device=encoded.device, dtype=encoded.dtype)
+    model.forward = forward
+
+
 class RadarRunner:
     def __init__(self, cfg, run, device):
         source = run / "native_source"
@@ -119,6 +139,8 @@ class RadarRunner:
                        epochs=1, train_episodes=1, train_batch_size=cfg["batch_size"], model_load=dict(enable=False))
         self.trainer = ACVRPTrainer(env, model, optimizer, trainer)
         self.model, self.optimizer, self.scheduler = self.trainer.model, self.trainer.optimizer, self.trainer.scheduler
+        if cfg.get("allow_repeated_starts", False):
+            install_radar_cyclic_starts(self.model, n)
         self.optimizer.register_step_pre_hook(_guard_step)
         self.dataset_size = self.trainer.env.fixed_dataset_size
         self.data_pass = 1
@@ -309,7 +331,10 @@ def evaluate_runner(runner, cfg, run, *, split, checkpoint_id, output, inference
                     checkpoint_id=checkpoint_id, requested_k=cfg["eval_k"],
                     decode_mode="native_greedy_multistart", timing_batch_size=stop-start)
                 row.update(split=split, num_augment=1, implicit_final_return=cfg["method"] == "rrnco",
-                           offline_dataset_conversion_excluded_from_timing=True)
+                           offline_dataset_conversion_excluded_from_timing=True,
+                           start_policy="cyclic_customers" if cfg.get("allow_repeated_starts", False) else "native_distinct_customers",
+                           unique_first_customers=min(cfg["eval_k"], cfg["num_customers"]),
+                           candidate_unique_completed_routes=len({tuple(tuple(r) for r in c["routes"]) for c in candidates if c["completed"]}))
                 batch_rows.append(row)
             if runner.device.type == "cuda": torch.cuda.synchronize(runner.device)
             batch_time = time.perf_counter() - begin

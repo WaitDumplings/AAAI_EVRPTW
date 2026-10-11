@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-from e1.configs import METHODS, SCHEMA, content_hash
+from e1.configs import METHODS, SCHEMA, SUPPORTED_SCHEMAS, content_hash
 from e1.evaluation import atomic_json, summarize_rows
 from e1.lifecycle import assert_accepted_test_result
 
@@ -68,7 +68,7 @@ def _different_fields(left, right, prefix=''):
 
 def _load_campaign(path):
     manifest = json.loads((path / 'manifest.json').read_text())
-    if manifest.get('schema') != SCHEMA:
+    if manifest.get('schema') not in SUPPORTED_SCHEMAS:
         raise ValueError(f'Unknown E1 campaign schema: {path}')
     unknown = set(manifest['methods']) - set(METHODS)
     if unknown:
@@ -76,7 +76,7 @@ def _load_campaign(path):
     contract = manifest.get('comparison_contract')
     if not isinstance(contract, dict) or _CONTRACT_FIELDS - set(contract):
         raise ValueError(f'Missing complete comparison_contract in {path}; regenerate the campaign manifest')
-    if contract['schema'] != SCHEMA or contract['training_seed'] != manifest['training_seed']:
+    if contract['schema'] != manifest['schema'] or contract['training_seed'] != manifest['training_seed']:
         raise ValueError(f'Campaign seed/schema disagrees with comparison_contract: {path}')
     if contract['source_content_sha256'] != manifest['source']['content_sha256']:
         raise ValueError(f'Campaign source disagrees with comparison_contract: {path}')
