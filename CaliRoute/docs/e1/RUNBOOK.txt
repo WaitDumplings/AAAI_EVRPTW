@@ -1,3 +1,9 @@
+Correction 2026-10-12: the user supersedes the historical shared distance-row
+base definition. NEW ppo_base configs have e1_base_distance_row=False and
+e1_no_road_input=True. See NO_ROAD_BASE.txt. The historical description below
+applies only to frozen campaigns created before this correction. Enhanced
+methods and their frozen runs retain their existing road inputs.
+
 E1 / CVRP-Cus100 / seed 3009
 ===========================
 Scope: seven scratch-trained methods, train/validation model selection, independent

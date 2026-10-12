@@ -1,0 +1,34 @@
+E1 PPO base correction (2026-10-12)
+==================================
+The user's latest instruction supersedes user_specification.txt's historical
+shared-road-row baseline. Only newly prepared PPO base runs change:
+- e1_base_distance_row=False; RDI, AGDA and all road/resource plugins disabled.
+- e1_no_road_input=True is an explicit actor AND critic input contract.
+- Coordinate/demand/capacity/visited history and the CVRP feasibility mask remain.
+- Road/time/energy matrices are replaced at the model boundary with constant zero
+  placeholders. Time windows, service time and time/battery state are constants.
+  Unknown feature fields (including graph/node physical context) are dropped.
+- Real environment matrices, physical reward, capacity constraints and independent
+  route evaluation are unchanged. Units and depot-centered coordinates retain the
+  fixed training-set scale; no instance-specific road summary is an input.
+- Checkpoint profile prevents silent resume from any previous base.
+
+All enhanced method configs keep their current actor; frozen campaigns and old
+results are never edited. Previous ppo_base is a distance-row ablation, not the
+requested baseline. Tests check exact actor/critic and cached-output invariance
+under altered/poisoned road resources, no distance gradient, and changed physical
+road costs affecting rewards but not policy inputs/outputs for the same history.
+
+Run from CaliRoute:
+  bash scripts/run_e1_base_no_road.sh 100 --execute
+Omit --execute to preview. Scale 100 uses GPUs 0,1, global batch64 (32/rank).
+Scales15/50 use GPU0 and batch64. n_traj50, PPO passes4, LR1e-4, FP32,
+1500 online loops, seed3009, validation1000/K50 every50 loops, scratch.
+Actual full-batch GPU preflight and fresh-process smoke/resume precede training.
+E1_BASE_CAMPAIGN / E1_BASE_AUDIT / E1_DATA_ROOT override local paths.
+
+This is an explicit protocol correction, not an exact source-hash match with
+previous enhanced campaigns. Preserve both manifests/configs. The strict final
+aggregator must receive an audited compatibility amendment before cross-source
+merging; do not falsify hashes or silently weaken that check. Current partial CSV
+can record verified per-method metrics while seven-method common fields stay TBD.

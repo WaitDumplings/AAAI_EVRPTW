@@ -4785,6 +4785,7 @@ def train_from_config(
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
             e1_base_distance_row=bool(model_cfg.get("e1_base_distance_row", False)),
+            e1_no_road_input=bool(model_cfg.get("e1_no_road_input", False)),
             use_residual_edge_bias=bool(model_cfg.get("use_residual_edge_bias", False)),
             use_rdi_v2=bool(model_cfg.get("use_rdi_v2", False)),
             rdi_hidden_dim=int(model_cfg.get("rdi_hidden_dim", 32)),

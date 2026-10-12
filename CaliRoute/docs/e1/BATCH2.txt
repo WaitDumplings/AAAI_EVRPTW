@@ -1,3 +1,7 @@
+Correction 2026-10-12: new ppo_base configurations on fix/e1-no-road-base-20261012
+exclude road/resource inputs. Historical branch/configurations below describe
+the original distance-row baseline, now superseded. See NO_ROAD_BASE.txt.
+
 E1 batch two: CVRP Cus50 and Cus15
 ================================
 Branch: experiment/e1-cvrp15-50-20261011.

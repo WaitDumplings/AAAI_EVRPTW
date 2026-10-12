@@ -17,6 +17,7 @@ FLAGS = ('use_typed_static_fusion', 'use_edge_relation_encoder',
 FEATURE_FLAGS = ('agda_physical_candidate_features', 'agda_smooth_distance_features')
 JOINT_GRAPH_FLAG = 'use_joint_graph_encoder'
 E1_ROW_FLAG = 'e1_base_distance_row'
+E1_NO_ROAD_FLAG = 'e1_no_road_input'
 
 
 def _canonical_model(model):
@@ -26,6 +27,11 @@ def _canonical_model(model):
         if not isinstance(value, bool):
             raise ValueError(f'{name} must be a boolean')
         result[name] = value
+    no_road = model.get(E1_NO_ROAD_FLAG, False)
+    if not isinstance(no_road, bool):
+        raise ValueError('e1_no_road_input must be a boolean')
+    if no_road:
+        result[E1_NO_ROAD_FLAG] = True
     e1_row = model.get(E1_ROW_FLAG, False)
     if not isinstance(e1_row, bool):
         raise ValueError('e1_base_distance_row must be a boolean')
@@ -65,12 +71,14 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, E1_ROW_FLAG))
+    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, E1_ROW_FLAG, E1_NO_ROAD_FLAG))
 
 
 def signature(cfg):
     model = cfg.get('model', {}) or {}
     result = {'schema': SCHEMA, **_canonical_model(model)}
+    if result.get(E1_NO_ROAD_FLAG) and cfg.get('data', {}).get('problem_type') != 'cvrp':
+        raise ValueError('E1 no-road base is restricted to CVRP')
     if any(result[name] for name in FLAGS) or result.get(JOINT_GRAPH_FLAG, False):
         from .input_normalization import signature as input_signature
         inputs = input_signature(cfg)
@@ -123,6 +131,8 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
     if source != target and (source.get(JOINT_GRAPH_FLAG, False) or target.get(JOINT_GRAPH_FLAG, False)):
         raise ValueError('Joint graph architecture changed; graph checkpoints require an identical '
                          'model integration profile. Start the new architecture from scratch.')
+    if source.get(E1_NO_ROAD_FLAG, False) != target.get(E1_NO_ROAD_FLAG, False):
+        raise ValueError('E1 no-road input contract changed; start from scratch')
     if source != target and (source.get(E1_ROW_FLAG, False) or target.get(E1_ROW_FLAG, False)):
         raise ValueError('E1 shared distance-row profile changed; use an identical profile or start from scratch')
     if resume and source != target:

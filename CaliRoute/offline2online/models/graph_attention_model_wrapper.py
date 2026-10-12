@@ -223,6 +223,7 @@ class Backbone(nn.Module):
         joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
         e1_base_distance_row: bool = False,
+        e1_no_road_input: bool = False,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
@@ -254,6 +255,14 @@ class Backbone(nn.Module):
         if use_joint_graph_encoder:
             self.model_integration_settings.update(use_joint_graph_encoder=True,
                 joint_graph_edge_dim=joint_graph_edge_dim, joint_graph_dropout=joint_graph_dropout)
+        self.e1_no_road_input = bool(e1_no_road_input)
+        if self.e1_no_road_input:
+            if any((e1_base_distance_row, use_encoder_distance_bias, use_residual_edge_bias,
+                    use_rdi_v2, use_dynamic_decision_encoder, use_agda_v2, use_physical_input_context,
+                    use_typed_static_fusion, use_edge_relation_encoder, use_joint_graph_encoder,
+                    use_resource_decoder, use_post_charge_adapter)):
+                raise ValueError('E1 no-road base cannot enable road/resource plugins')
+            self.model_integration_settings['e1_no_road_input'] = True
         if e1_base_distance_row:
             self.model_integration_settings['e1_base_distance_row'] = True
         self.use_joint_graph_encoder = bool(use_joint_graph_encoder)
@@ -449,6 +458,9 @@ class Backbone(nn.Module):
         return bias
 
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
+        if self.e1_no_road_input:
+            from .no_road_observation import cvrp_no_road_observation
+            obs = cvrp_no_road_observation(obs)
         return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
 
     def _encode_from_state(self, state: StateWrapper, use_mask: bool = False):
@@ -607,6 +619,7 @@ class Agent(nn.Module):
         joint_graph_dropout: float = 0.,
         decoder_observation_mode: str = "feasible",
         e1_base_distance_row: bool = False,
+        e1_no_road_input: bool = False,
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -651,6 +664,7 @@ class Agent(nn.Module):
             joint_graph_dropout=joint_graph_dropout,
             decoder_observation_mode=decoder_observation_mode,
             e1_base_distance_row=e1_base_distance_row,
+            e1_no_road_input=e1_no_road_input,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

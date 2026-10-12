@@ -83,6 +83,8 @@ def _model(base=False):
     model.update(core)
     model['e1_base_distance_row'] = True
     if base:
+        model['e1_base_distance_row'] = False
+        model['e1_no_road_input'] = True
         for flag in ('use_joint_graph_encoder', 'use_edge_relation_encoder', 'use_edge_state_updates',
                      'use_edge_value_messages', 'use_encoder_distance_bias', 'use_rdi_v2',
                      'use_residual_edge_bias', 'use_physical_input_context', 'use_typed_static_fusion',
@@ -148,7 +150,8 @@ def build_config(method, *, data_root, output_dir, expert_pool=None, distance_un
                     total_online_trajectory_attempts=epochs*global_batch*50,
                     actor_sha256=content_hash(model), method_preset_sha256=content_hash(dict(
                         offline=preset.offline_config(), advantage=preset.advantage_config())),
-                    base_preserves=['query', 'vehicle_state', 'node_attributes', 'mask', 'decoder_distance_row'],
+                    base_preserves=['query', 'capacity_state', 'coordinates', 'demand', 'visited_state', 'capacity_mask'] if method == 'ppo_base' else ['query', 'vehicle_state', 'node_attributes', 'mask', 'decoder_distance_row'],
+                    model_road_input='excluded' if method == 'ppo_base' else 'enabled',
                     method_specific_expert_work='Additional work; explicitly counted, not claimed equal compute')
     warmup = int(offline.get('bc_warmup_epochs', 0))
     protocol.update(total_online_loops=epochs, total_outer_loops=epochs+warmup, bc_only_warmup_loops=warmup)

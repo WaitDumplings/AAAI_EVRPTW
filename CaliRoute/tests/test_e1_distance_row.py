@@ -18,7 +18,7 @@ from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.env_factory import make_terr
 
 def configuration(tmp_path):
     cfg=build_config('ppo_base',data_root=tmp_path/'data',output_dir=tmp_path/'out',distance_unit_km=10.)
-    cfg['model'].update(e1_base_distance_row=True,embedding_dim=32,n_encode_layers=1)
+    cfg['model'].update(e1_base_distance_row=True,e1_no_road_input=False,embedding_dim=32,n_encode_layers=1)
     return cfg
 
 
@@ -133,4 +133,5 @@ def test_all_controlled_methods_share_base_distance_path(tmp_path):
     for method in ('ppo_base','ppo_rdi_agda','awbc','dapg','slppo'):
         cfg=build_config(method,data_root=tmp_path/'data',output_dir=tmp_path/method,
                          expert_pool=tmp_path/'pool.csv',distance_unit_km=10.)
-        assert cfg['model']['e1_base_distance_row'] is True
+        assert cfg['model']['e1_base_distance_row'] is (method != 'ppo_base')
+        assert cfg['model'].get('e1_no_road_input', False) is (method == 'ppo_base')

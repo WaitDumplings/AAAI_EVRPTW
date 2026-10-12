@@ -23,7 +23,8 @@ def test_controlled_models_and_budgets_match(tmp_path):
         assert t['mixed_precision'] is False and t['reward_norm_mode']=='legacy'
         assert e['eval_interval']==50 and e['eval_n_traj']==50 and e['eval_limit'] is None
         assert p['total_instance_exposures']==96000 and p['total_online_trajectory_attempts']==4800000
-        assert c['model']['e1_base_distance_row'] and c['model']['use_graph_token']
+        assert c['model']['e1_base_distance_row'] is (method != 'ppo_base')
+        assert c['model']['use_graph_token']
         assert not c['offline']['policy_replay_enabled'] and not c['offline']['use_priority_sampler']
         assert not any('init_checkpoint'==k for k in c['offline'])
         assert 'test' not in Path(c['data']['train_dataset_path']).parts and 'val' in Path(e['eval_path']).parts
@@ -37,9 +38,9 @@ def test_controlled_models_and_budgets_match(tmp_path):
         assert 'expert_solution_path' not in configs[m]['offline']
 
 
-def test_base_removes_plugins_but_shared_row_preserved(tmp_path):
+def test_base_removes_plugins_and_distance_row(tmp_path):
     m=config('ppo_base',tmp_path)['model']
-    assert m['e1_base_distance_row'] and m['embedding_dim']==256 and m['n_encode_layers']==2
+    assert not m['e1_base_distance_row'] and m['e1_no_road_input'] and m['embedding_dim']==256 and m['n_encode_layers']==2
     for flag in ('use_encoder_distance_bias','use_joint_graph_encoder','use_rdi_v2',
                  'use_physical_input_context','use_dynamic_decision_encoder','use_agda_v2','use_resource_decoder'):
         assert not m[flag]
