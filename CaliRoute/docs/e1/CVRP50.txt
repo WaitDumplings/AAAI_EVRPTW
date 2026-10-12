@@ -1,0 +1,61 @@
+E1 CVRP Cus50 deployment (2026-10-12)
+====================================
+Branch: fix/e1-no-road-base-20261012. Pull this branch on each selected host.
+Run from CaliRoute. This shell ONLY queues Cus50, unlike run_e1_batch2.sh.
+
+  bash scripts/run_e1_cvrp50.sh 2080ti_b --execute
+    GPU0 AWBC; GPU1 DAPG; GPU2/3 unused by this plan.
+  bash scripts/run_e1_cvrp50.sh 2080ti_3 --execute
+    GPU2 SL-PPO; GPU0/1 can continue an existing dual-GPU Cus100 run.
+    E1_CVRP50_SLPPO_GPU overrides this single GPU index.
+  bash scripts/run_e1_cvrp50.sh a6000 --execute
+    GPU0 RRNCO; GPU1 RADAR. No automatic Cus15 successor is added.
+
+Local 2080ti_a already has corrected Cus50 PPO base on GPU2. Its Cus50 RDI+AGDA
+training and independent test are complete. The a profile only displays paths;
+it intentionally never starts a duplicate. GPU0/1 continue corrected Cus100 base.
+Four-card 2080ti_c remains reserved. No old job is stopped or moved. The launcher
+waits for idle assigned GPUs, even if the prior Cus100 jobs are still running.
+Drop --execute to preview without creating files or starting training.
+
+Controls: seed3009; scratch; batch64; n_traj50; 1500 ONLINE loops (not full data
+passes); DAPG additionally has 3 BC-only warmup loops. Controlled PPO passes4,
+minibatches4, LR1e-4, gamma.99, FP32. Native methods keep their native optimizers.
+Validation1000, K50, interval50 loops; checkpoint chosen by validation only.
+CPU training/save/resume smoke and full-sized GPU preflight precede fresh formal
+training. A new machine still needs its dependencies/data/expert pool installed.
+Native Python environments: E1_RRNCO_PYTHON / E1_RADAR_PYTHON, see RUNBOOK.txt.
+
+Preparation runs in the foreground; training supervisors detach. Campaign paths
+reuse batch two to detect rather than overwrite previously started experiments:
+  results/e1/E1_BATCH2_CVRP50_S3009_SERVER/
+Progress: scheduler_SERVER/status.json and supervisor.log; runs/METHOD/train.log;
+native workers additionally write native_status.json/native_train.jsonl.
+If any assigned method has formal artifacts or a preflight, the shell reports
+existing runs and does not start another. A failed/interrupted run needs explicit
+resume with its frozen config/checkpoint; this wrapper is not an automatic resume
+or retry tool. Other not-yet-started methods in a partial campaign can be launched
+individually through run_e1.sh launch --method METHOD after their smoke check.
+Do not set E1_CVRP50_CAMPAIGN to hide an existing run accidentally.
+E1_BATCH2_ROOT, E1_BATCH2_ASSETS_ROOT, E1_DATA_ROOT and E1_PYTHON are portable overrides.
+
+Test after training on an idle GPU (one command per method; batch8):
+  bash scripts/run_e1.sh evaluate --campaign CAMPAIGN --method METHOD --checkpoint BEST --device cuda:0 --batch-size 8
+Controlled BEST is under CAMPAIGN/artifacts/checkpoints/Cus_50_CS_0/RUN_NAME/seed_3009/checkpoint_best.pt.
+Native BEST is CAMPAIGN/runs/METHOD/native_checkpoints/best.pt.
+Result/acceptance: CAMPAIGN/runs/METHOD/test/instances.jsonl and manifest.json.
+Record inference GPU, batch, other host workloads and native/controlled timing scope.
+
+Main table on coordinating host:
+  results/e1/reports/E1_CVRP50_partial_20261012/main_results_partial.csv
+Exactly seven learned methods plus Gurobi. No Cus100 numbers are copied into it.
+Only validation-selected independent test data populate test costs. All common
+subset columns stay TBD until Gurobi and all seven valid models have per-instance
+accepted results. Gap is the mean per-instance percent difference to the Gurobi
+2h incumbent, never a ratio of means or an optimality guarantee.
+
+Frozen campaigns can span the syntax-only fix and the explicit no-road base
+correction. Preserve actual source hashes. Strict cross-campaign aggregation
+needs an audited compatibility amendment; do not relabel versions or bypass hash
+checks. New enhanced actor configurations match their historical E1 recipes;
+only the baseline's model input definition is corrected (see NO_ROAD_BASE.txt).
