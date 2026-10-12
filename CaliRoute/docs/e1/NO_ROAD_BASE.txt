@@ -22,7 +22,7 @@ road costs affecting rewards but not policy inputs/outputs for the same history.
 Run from CaliRoute:
   bash scripts/run_e1_base_no_road.sh 100 --execute
 Omit --execute to preview. Scale 100 uses GPUs 0,1, global batch64 (32/rank).
-Scales15/50 use GPU0 and batch64. n_traj50, PPO passes4, LR1e-4, FP32,
+Scale15 uses GPU2; scale50 uses GPU0; both use batch64. n_traj50, PPO passes4, LR1e-4, FP32,
 1500 online loops, seed3009, validation1000/K50 every50 loops, scratch.
 Actual full-batch GPU preflight and fresh-process smoke/resume precede training.
 E1_BASE_CAMPAIGN / E1_BASE_AUDIT / E1_DATA_ROOT override local paths.
