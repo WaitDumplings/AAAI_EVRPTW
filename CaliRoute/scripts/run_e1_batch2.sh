@@ -19,24 +19,29 @@ E1_BATCH2_ROOT="${E1_BATCH2_ROOT:-$E1_ROOT/results/e1}"
 E1_BATCH2_ASSETS_ROOT="${E1_BATCH2_ASSETS_ROOT:-$E1_BATCH2_ROOT/batch2_assets}"
 E1_DATA_ROOT="${E1_DATA_ROOT:-$E1_ROOT/../AAAI_Dataset}"
 E1_CMD=(bash "$E1_ROOT/scripts/run_e1.sh")
+source "$E1_ROOT/scripts/e1_small_scale_hardware.sh"
+E1_SCALES="${E1_BATCH2_SCALES:-50 15}"
+case "$E1_SCALES" in '50 15'|50|15) ;; *) printf 'E1_BATCH2_SCALES must be 50, 15 or "50 15"\n' >&2; exit 2;; esac
 E1_PREVIOUS=""
-for E1_SCALE in 50 15; do
+for E1_SCALE in $E1_SCALES; do
+  e1_small_scale_hardware "$E1_SCALE"
   E1_CAMPAIGN="$E1_BATCH2_ROOT/E1_BATCH2_CVRP${E1_SCALE}_S3009_${E1_SERVER}"
   E1_AUDIT="$E1_BATCH2_ASSETS_ROOT/Cus${E1_SCALE}"
   if [[ "$E1_SERVER" == a6000 || "$E1_SCALE" == 50 ]]; then E1_OFFSET=0
   elif [[ "$E1_SERVER" == 2080ti_3 ]]; then E1_OFFSET=1
   else E1_OFFSET=2; fi
   printf 'CVRP%s: methods=%s; first GPU=%s; campaign=%s\n' "$E1_SCALE" "${E1_METHODS[*]}" "$E1_OFFSET" "$E1_CAMPAIGN"
-  if [[ "$E1_SERVER" == a6000 && "$E1_SCALE" == 15 ]]; then
+  if [[ "$E1_SERVER" == a6000 && "$E1_SCALE" == 15 && -n "$E1_PREVIOUS" ]]; then
     printf 'Wait for BOTH CVRP50 native methods to complete successfully before acquiring GPUs 0,1.\n'
   fi
-  if ! "$E1_EXECUTE"; then continue; fi
+  if ! "$E1_EXECUTE"; then E1_PREVIOUS="$E1_CAMPAIGN"; continue; fi
+  if e1_small_existing "$E1_CAMPAIGN" "${E1_METHODS[@]}"; then E1_PREVIOUS="$E1_CAMPAIGN"; continue; fi
   if [[ "$E1_SERVER" == a6000 && "$E1_SCALE" == 50 ]]; then "${E1_CMD[@]}" native-status; fi
   if [[ ! -f "$E1_AUDIT/assets_audit.json" ]]; then
     "${E1_CMD[@]}" preflight --customers "$E1_SCALE" --data-root "$E1_DATA_ROOT" --output "$E1_AUDIT"
   fi
   if [[ ! -f "$E1_CAMPAIGN/manifest.json" ]]; then
-    "${E1_CMD[@]}" prepare --customers "$E1_SCALE" --audit "$E1_AUDIT/assets_audit.json" --campaign "$E1_CAMPAIGN"
+    "${E1_CMD[@]}" prepare --customers "$E1_SCALE" --audit "$E1_AUDIT/assets_audit.json" --campaign "$E1_CAMPAIGN" "${E1_HARDWARE_ARGS[@]}"
   fi
   for E1_METHOD in "${E1_METHODS[@]}"; do
     E1_RETRY=()
@@ -44,7 +49,7 @@ for E1_SCALE in 50 15; do
     "${E1_CMD[@]}" smoke --campaign "$E1_CAMPAIGN" --method "$E1_METHOD" "${E1_RETRY[@]}"
   done
   E1_DEPENDENCY=()
-  if [[ "$E1_SERVER" == a6000 && "$E1_SCALE" == 15 ]]; then E1_DEPENDENCY=(--after-campaign "$E1_PREVIOUS"); fi
+  if [[ "$E1_SERVER" == a6000 && "$E1_SCALE" == 15 && -n "$E1_PREVIOUS" ]]; then E1_DEPENDENCY=(--after-campaign "$E1_PREVIOUS"); fi
   "${E1_CMD[@]}" launch --campaign "$E1_CAMPAIGN" --customers "$E1_SCALE" --server "$E1_SERVER" "${E1_DEPENDENCY[@]}" --execute
   E1_PREVIOUS="$E1_CAMPAIGN"
 done

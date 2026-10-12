@@ -61,6 +61,34 @@ def test_valid_action_loss_and_gradient_ignore_chunk_boundaries_and_padding():
 
 
 @pytest.mark.parametrize("width", [1, 3, 100])
+def test_e1_legacy_step_mean_loss_and_gradient_ignore_chunk_boundaries(width):
+    """Hardware chunk tuning must preserve the frozen E1 PPO objective."""
+    torch.manual_seed(3009)
+    agent = _agent()
+    batch = _run(agent)
+    returns, advantages = batch.rewards.cumsum(0), torch.randn_like(batch.rewards)
+    cfg = {'training': {'ppo_loss_reduction': 'legacy_step_mean', 'vf_coef': .5, 'ent_coef': .01}}
+    reference, candidate = copy.deepcopy(agent), copy.deepcopy(agent)
+    full = _evaluate_policy_loss_with_stats(reference, batch, returns, advantages, cfg)[0]
+    full.backward()
+    total = 0.
+    for start in range(0, len(batch.observations), width):
+        end = min(start + width, len(batch.observations))
+        loss = _evaluate_policy_loss_with_stats(candidate, batch, returns, advantages, cfg,
+                    step_start=start, step_end=end)[0]
+        weighted = loss * chunk_weight(batch.valid, start, end, 'legacy_step_mean')
+        total += float(weighted.detach())
+        weighted.backward()
+    assert total == pytest.approx(float(full.detach()), abs=1e-6)
+    expected = dict(reference.named_parameters())
+    for name, parameter in candidate.named_parameters():
+        if expected[name].grad is None:
+            assert parameter.grad is None
+        else:
+            torch.testing.assert_close(parameter.grad, expected[name].grad, rtol=1e-4, atol=3e-6)
+
+
+@pytest.mark.parametrize("width", [1, 3, 100])
 def test_policy_only_valid_action_reduction_matches_zero_value_coefficient(width):
     model = _agent()
     batch = _run(model)

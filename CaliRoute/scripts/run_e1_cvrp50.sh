@@ -7,9 +7,11 @@ shift
 E1_EXECUTE=false
 if [[ $# == 1 && "$1" == --execute ]]; then E1_EXECUTE=true
 elif [[ $# != 0 ]]; then printf 'Only --execute is accepted.\n' >&2; exit 2; fi
+source "$E1_ROOT/scripts/e1_small_scale_hardware.sh"
+e1_small_scale_hardware 50
 case "$E1_SERVER" in
   2080ti_a)
-    printf 'Local A: corrected Cus50 PPO base already scheduled on GPU2; RDI+AGDA training/test completed.\n'
+    printf 'Local A: corrected Cus50 PPO base run exists on GPU2 (may be stopped; inspect status); RDI+AGDA training/test completed.\n'
     printf 'Base: %s/results/e1/E1_CVRP50_BASE_NO_ROAD_S3009_E1500_20261012_R1/scheduler_2080ti_a/status.json\n' "$E1_ROOT"
     printf 'Enhanced: %s/results/e1/E1_BATCH2_CVRP50_S3009_2080ti_a/runs/ppo_rdi_agda/test/manifest.json\n' "$E1_ROOT"
     printf 'No duplicate jobs launched by this profile.\n'; exit 0;;
@@ -42,6 +44,7 @@ if ! "$E1_EXECUTE"; then printf 'Preview only. Add --execute to audit, smoke and
 # Verify existing frozen files and refuse duplicate/partial formal writes. A live
 # or finished run needs no relaunch. Failed runs require explicit frozen resume.
 if [[ -f "$E1_CAMPAIGN/manifest.json" ]]; then
+ printf 'Existing frozen configs retained; new chunk defaults do not rewrite them.\n'
  E1_DECISION=$(PYTHONPATH="$E1_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$E1_PYTHON" - "$E1_CAMPAIGN" "${E1_METHODS[@]}" <<'PY'
 import sys,json
 from pathlib import Path
@@ -70,7 +73,7 @@ if [[ ! -f "$E1_AUDIT/assets_audit.json" ]]; then
  "${E1_CMD[@]}" preflight --customers 50 --data-root "${E1_DATA_ROOT:-$E1_ROOT/../AAAI_Dataset}" --output "$E1_AUDIT"
 fi
 if [[ ! -f "$E1_CAMPAIGN/manifest.json" ]]; then
- "${E1_CMD[@]}" prepare --customers 50 --audit "$E1_AUDIT/assets_audit.json" --campaign "$E1_CAMPAIGN"
+ "${E1_CMD[@]}" prepare --customers 50 --audit "$E1_AUDIT/assets_audit.json" --campaign "$E1_CAMPAIGN" "${E1_HARDWARE_ARGS[@]}"
 fi
 for E1_METHOD in "${E1_METHODS[@]}"; do
  E1_RESULT="$E1_CAMPAIGN/runs/$E1_METHOD/smoke/smoke_result.json"

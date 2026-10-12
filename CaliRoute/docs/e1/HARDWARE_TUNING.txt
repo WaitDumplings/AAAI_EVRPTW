@@ -1,0 +1,135 @@
+E1 Cus50 hardware tuning and comparison policy (2026-10-12)
+==========================================================
+Cus100 retains its existing protocol and artifacts. Formal local jobs remain
+stopped pending a deliberate launch/resume. Hardware probes are separate runs.
+
+Quality comparison budget (controlled PPO family)
+------------------------------------------------
+Keep global instance batch64, trajectories50, online loops1500, PPO passes4,
+minibatches4, accumulation1, LR1e-4 and FP32. This is 96000 instance exposures,
+4800000 online trajectory attempts and 24000 configured PPO optimizer attempts.
+Actual counters must also be reported. Expert methods have additional work;
+DAPG BC warmup and other expert updates are not claimed to be equal compute.
+Use identical train/val/test splits, seed3009, K50 evaluation, evaluation every
+3200 online instance exposures, and validation-only checkpoint selection.
+Native RRNCO/RADAR retain native objectives and update rules; do not force PPO
+pass or chunk settings into them. Report their actual sample/update budgets.
+
+Tune execution, not training budget
+----------------------------------
+Try PPO time-step chunks8/16/32/64/full-route separately for each method and GPU.
+Retain minibatches and optimizer step boundaries. Larger chunks reduce repeated
+encoder computation/backward calls, but decode remains sequential and larger
+activation graphs may be slower. Fixed batch does not promise bitwise identical
+training after changing floating-point accumulation order.
+For expert methods, separately profile expert logprob chunks without changing
+expert sample counts, loss normalization, coefficients or update counts.
+Check loss and gradient equivalence for every affected loss path before adoption.
+The legacy_step_mean PPO chunk equivalence test is in test_ppo_protocol.py.
+
+Select by measured median training time/throughput, not occupancy alone. Aim for
+80%+ only when it improves throughput with headroom; reject OOM, nonfinite or
+incomplete trials. Keep at least ~10% device headroom and test validation and
+expert-update phases too. Reserved allocator bytes include cached memory;
+record peak allocated bytes and nvidia-smi process usage as distinct metrics.
+Do not allocate dummy memory or multiply batch/n_traj to hit a utilization target.
+A small baseline may correctly use much less than80% even at full-route chunks.
+
+Repeat short timings from a mature checkpoint before using scratch probe timings
+as a final choice. Use the same GPU, software, fixed rollout/checkpoint, and idle
+host conditions. Report median/p90, rollout/encoder/PPO/expert timing, actual
+optimizer steps and peak memory. Short-probe quality is not a model ranking.
+Checkpoint must be chosen without consulting test. Record any warmup exclusion.
+
+Portable short probe (does not modify or launch formal training)
+-------------------------------------------------------------
+Use the active environment's python and a prepared single-GPU frozen campaign:
+
+  python scripts/profile_e1_chunks.py --campaign CAMPAIGN --method ppo_base --gpu 2 --chunks 8 32 64 128 --epochs 6 --output results/e1/hardware_profiles/UNIQUE_NAME
+
+Methods supported: ppo_base, ppo_rdi_agda, awbc, dapg, slppo. For the latter four,
+start with8/16/32 to avoid wasting time on predictable OOM. Candidate runs are
+sequential on the requested idle GPU; each starts from the same scratch seed.
+Source/config hashes are verified and copied into the output; results are isolated.
+The first online loop is excluded from timing. Evaluation is disabled, so this
+is NOT a final full training/validation memory acceptance. Native baselines need
+native profiling on their own host; this tool intentionally rejects them.
+summary.json reports each candidate and the fastest eligible measured chunk.
+The torch reserved fraction is not the full nvidia-smi process fraction.
+
+Before new Cus50 preparation, measured chunk choices can be passed to prepare:
+  bash scripts/run_e1.sh prepare --customers 50 --audit AUDIT/assets_audit.json --campaign NEW_CAMPAIGN --ppo-chunk CHUNK --expert-chunk EXPERT_CHUNK
+
+--ppo-chunk is the fallback. Add repeated --method-ppo-chunk METHOD=N to give
+methods different execution chunks within one newly prepared campaign. Never edit frozen config
+or source hashes. Existing checkpoints/results stay valid historical records;
+an execution-adjusted continuation needs explicit provenance and accumulated
+training time. This profiler does not implement or start such a continuation.
+
+Timing comparisons
+------------------
+Existing completed quality results can be retained if the objective, data and
+training budgets match. Their historical training wall times remain actual,
+but old conservative chunk vs newly tuned chunk times cannot isolate model cost.
+For a speed claim, benchmark each method after hardware tuning on the same
+hardware and timing scope. Similarly measure all independent-test inference
+with a stated common batch/K/hardware, or explicitly label differing settings.
+
+Initial local Cus50 measurements (RTX2080Ti, isolated probe artifacts)
+-------------------------------------------------------------------
+PPO base, 6 scratch loops per candidate, median of loops2..6:
+ chunk8   8.082s train / 6.175s PPO / 404MiB peak torch reserved
+ chunk32  6.492s train / 4.588s PPO / 1140MiB peak torch reserved
+ chunk64  6.410s train / 4.508s PPO / 2112MiB peak torch reserved
+ chunk128 6.421s train / 4.524s PPO / 2768MiB peak torch reserved
+Chunk128 covers the full actual rollout (decode cap101). Chunk32 is within3%
+of the fastest candidate and reduces median training time by about20% vs8.
+This is a short-run timing candidate, not proof of long-run convergence or speed.
+
+RDI+AGDA: chunk8 passed, chunk32/64/128 OOM on this11GB device. Intermediate
+chunk14/16 results are under results/e1/hardware_profiles/. Chunk16 reserves
+95%+ of device RAM and is rejected for insufficient headroom even if it finishes.
+Use a separate expert-path preflight for AWBC/DAPG/SLPPO; do not assume the PPO
+RDI+AGDA limit is also their safe limit. A6000 native models need local profiling.
+Concurrent probes use separate GPUs and one CPU thread per process; shared host
+contention remains a timing limitation. No formal campaign was resumed or edited.
+
+RDI+AGDA chunk14: median32.555s/loop (loops2..4), peak torch reserved9472MiB
+(84.1%); observed nvidia-smi process9678MiB (~85.9%). Chunk8 median33.115s;
+the ~1.7% timing difference is too small for a robust speed claim from this probe.
+Provisional local choices: base32, RDI+AGDA14. Not applied to formal runs.
+Combined evidence: results/e1/hardware_profiles/CVRP50_hardware_policy_20261012.json
+
+Updated launchers
+-----------------
+  bash scripts/run_e1_cvrp50.sh SERVER [--execute]
+  bash scripts/run_e1_cvrp15.sh SERVER [--execute]
+  bash scripts/run_e1_batch2.sh SERVER [--execute]
+  bash scripts/run_e1_base_no_road.sh 50 [--execute]
+  bash scripts/run_e1_base_no_road.sh 15 [--execute]
+
+The last two prepare only a baseline job in a new campaign; existing output
+folders are refused, never overwritten. Cus100 defaults are unchanged.
+For both small scales default per-method chunks are base32, RDI+AGDA14,
+AWBC8, DAPG8, SL-PPO8; expert chunk32. Cus15 choices are candidates, not
+hardware-calibrated results. Native methods retain their original configs.
+The launch hardware preflight still runs before formal training.
+
+Override after measuring on the target server, for example:
+  E1_AWBC_PPO_CHUNK=12 E1_DAPG_PPO_CHUNK=12 bash scripts/run_e1_cvrp50.sh 2080ti_b --execute
+Names: E1_BASE_PPO_CHUNK, E1_RDI_AGDA_PPO_CHUNK, E1_AWBC_PPO_CHUNK,
+E1_DAPG_PPO_CHUNK, E1_SLPPO_PPO_CHUNK, E1_EXPERT_CHUNK.
+No variable here changes training batch, trajectories, LR or optimizer passes.
+
+Chunk settings apply ONLY when preparing a new campaign. Existing frozen
+campaigns retain their original settings; existing runs/preflights are skipped.
+Stopped jobs need explicit resume and are never resumed by these wrappers.
+Default Cus50 2080ti_a remains informational to avoid duplicate local jobs.
+Cus15-only placement follows batch two: A/B GPUs2,3; three-card SL-PPO GPU1;
+A6000 native methods GPUs0,1. Check dry-run placement before execution.
+For the two-scale A6000 queue, Cus15 still depends on both Cus50 methods.
+Cus15-only does not create that dependency; scheduler still waits for free GPUs.
+
+For terminal-independent preparation plus training:
+  nohup bash scripts/run_e1_cvrp15.sh 2080ti_b --execute > cvrp15_b_launch.log 2>&1 < /dev/null &
+Training supervisors detach as before; wrap with nohup to protect preparation too.

@@ -59,3 +59,8 @@ correction. Preserve actual source hashes. Strict cross-campaign aggregation
 needs an audited compatibility amendment; do not relabel versions or bypass hash
 checks. New enhanced actor configurations match their historical E1 recipes;
 only the baseline's model input definition is corrected (see NO_ROAD_BASE.txt).
+
+Hardware shell update: new campaigns now prepare method-specific PPO chunks:
+base32 / RDI+AGDA14 / AWBC8 / DAPG8 / SL-PPO8, expert chunk32. Existing frozen
+campaigns are not rewritten. See HARDWARE_TUNING.txt for measured scope and
+E1_*_PPO_CHUNK overrides. Cus15-only entry: scripts/run_e1_cvrp15.sh.

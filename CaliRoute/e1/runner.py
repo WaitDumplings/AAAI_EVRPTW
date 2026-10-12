@@ -50,7 +50,20 @@ def verify_campaign(path, *, data=True):
     return manifest
 
 
+def _method_chunk_overrides(values):
+    result = {}
+    for entry in values or []:
+        method, sep, raw = entry.partition('=')
+        if not sep or method not in CONTROLLED or not raw.isdigit() or int(raw) < 1:
+            raise ValueError('Expected --method-ppo-chunk CONTROLLED_METHOD=positive_integer')
+        if method in result:
+            raise ValueError(f'Duplicate PPO chunk override: {method}')
+        result[method] = int(raw)
+    return result
+
+
 def prepare(args):
+    method_chunks = _method_chunk_overrides(getattr(args, 'method_ppo_chunk', []))
     report=_read(args.audit)
     if not report.get('training_data_ready'):raise ValueError('Train/validation data audit has not passed')
     customers=report['customers'];schema=schema_for_customers(customers)
@@ -99,7 +112,7 @@ def prepare(args):
         server,gpus=placement[method];run=output/'runs'/method;run.mkdir(parents=True)
         cfg=build_config(method,data_root=data,output_dir=run,expert_pool=expert,
             distance_unit_km=unit['km'],seed=args.seed,world_size=len(gpus),epochs=args.epochs,customers=customers,
-            backup_root=backup,ppo_chunk=args.ppo_chunk,expert_chunk=args.expert_chunk,eval_batch=args.eval_batch)
+            backup_root=backup,ppo_chunk=method_chunks.get(method,args.ppo_chunk),expert_chunk=args.expert_chunk,eval_batch=args.eval_batch)
         # Trainer names must remain unique across campaigns and remote results copies.
         unique=f'{output.name}_{method}'
         if method in CONTROLLED:cfg['run_name']=unique
@@ -473,6 +486,7 @@ def parser():
     p=sub.add_parser('prepare');p.add_argument('--audit',type=Path,required=True);p.add_argument('--campaign',type=Path,required=True)
     p.add_argument('--customers',type=int,choices=(15,50,100));p.add_argument('--seed',type=int,default=3009);p.add_argument('--epochs',type=int,default=1500)
     p.add_argument('--backup-root',type=Path);p.add_argument('--ppo-chunk',type=int,default=8);p.add_argument('--expert-chunk',type=int,default=32);p.add_argument('--eval-batch',type=int,default=8)
+    p.add_argument('--method-ppo-chunk',action='append',default=[],metavar='METHOD=N',help='Per-method execution chunk; training budget unchanged')
     p=sub.add_parser('smoke');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--method',choices=(*METHODS,'all'),default='all');p.add_argument('--retry',action='store_true')
     p=sub.add_parser('launch');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--server',choices=SERVER_PLANS,required=True);p.add_argument('--method',choices=(*METHODS,'all'),default='all');p.add_argument('--gpus');p.add_argument('--execute',action='store_true');p.add_argument('--after-campaign',type=Path);p.add_argument('--customers',type=int,choices=(15,50,100))
     p=sub.add_parser('_supervise');p.add_argument('--campaign',type=Path,required=True);p.add_argument('--scheduler',type=Path,required=True)
