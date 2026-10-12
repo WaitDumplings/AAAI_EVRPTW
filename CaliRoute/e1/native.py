@@ -258,7 +258,7 @@ def prepare_native(config, run_dir):
     harness = run / "native_harness" / "e1"
     harness.mkdir(parents=True)
     records = []
-    for name in ("native.py", "native_worker.py", "validator.py", "evaluation.py", f"requirements-{cfg["method"]}.lock.txt"):
+    for name in ("native.py", "native_worker.py", "validator.py", "evaluation.py", f"requirements-{cfg['method']}.lock.txt"):
         shutil.copy2(ROOT / "e1" / name, harness / name)
         records.append(dict(path=f"e1/{name}", sha256=file_hash(harness / name)))
     (harness / "__init__.py").write_text("")
