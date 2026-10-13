@@ -14,7 +14,7 @@ CONTROLLED = METHODS[:5]
 EXPERT_METHODS = ('awbc', 'dapg', 'slppo')
 SCHEMA = 'aaai_e1_cvrp100_v1'
 SUPPORTED_CUSTOMERS = (15, 50, 100)
-SUPPORTED_SCHEMAS = {f'aaai_e1_cvrp{n}_v1' for n in SUPPORTED_CUSTOMERS}
+SUPPORTED_SCHEMAS = {f'aaai_e1_cvrp{n}_v1' for n in SUPPORTED_CUSTOMERS} | {'aaai_e1_vrptw100_v1'}
 
 def schema_for_customers(customers):
     if isinstance(customers, bool) or customers not in SUPPORTED_CUSTOMERS:

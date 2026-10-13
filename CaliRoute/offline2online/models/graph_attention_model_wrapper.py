@@ -224,6 +224,7 @@ class Backbone(nn.Module):
         decoder_observation_mode: str = "feasible",
         e1_base_distance_row: bool = False,
         e1_no_road_input: bool = False,
+        e1_no_road_task: str = "cvrp",
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
@@ -255,6 +256,9 @@ class Backbone(nn.Module):
         if use_joint_graph_encoder:
             self.model_integration_settings.update(use_joint_graph_encoder=True,
                 joint_graph_edge_dim=joint_graph_edge_dim, joint_graph_dropout=joint_graph_dropout)
+        if e1_no_road_task not in ("cvrp", "vrptw"):
+            raise ValueError("Unsupported no-road input task")
+        self.e1_no_road_task = e1_no_road_task
         self.e1_no_road_input = bool(e1_no_road_input)
         if self.e1_no_road_input:
             if any((e1_base_distance_row, use_encoder_distance_bias, use_residual_edge_bias,
@@ -263,6 +267,8 @@ class Backbone(nn.Module):
                     use_resource_decoder, use_post_charge_adapter)):
                 raise ValueError('E1 no-road base cannot enable road/resource plugins')
             self.model_integration_settings['e1_no_road_input'] = True
+            if e1_no_road_task != 'cvrp':
+                self.model_integration_settings['e1_no_road_task'] = e1_no_road_task
         if e1_base_distance_row:
             self.model_integration_settings['e1_base_distance_row'] = True
         self.use_joint_graph_encoder = bool(use_joint_graph_encoder)
@@ -459,8 +465,9 @@ class Backbone(nn.Module):
 
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
         if self.e1_no_road_input:
-            from .no_road_observation import cvrp_no_road_observation
-            obs = cvrp_no_road_observation(obs)
+            from .no_road_observation import cvrp_no_road_observation, vrptw_no_road_observation
+            boundary = vrptw_no_road_observation if self.e1_no_road_task == "vrptw" else cvrp_no_road_observation
+            obs = boundary(obs)
         return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
 
     def _encode_from_state(self, state: StateWrapper, use_mask: bool = False):
@@ -620,6 +627,7 @@ class Agent(nn.Module):
         decoder_observation_mode: str = "feasible",
         e1_base_distance_row: bool = False,
         e1_no_road_input: bool = False,
+        e1_no_road_task: str = "cvrp",
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -665,6 +673,7 @@ class Agent(nn.Module):
             decoder_observation_mode=decoder_observation_mode,
             e1_base_distance_row=e1_base_distance_row,
             e1_no_road_input=e1_no_road_input,
+            e1_no_road_task=e1_no_road_task,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

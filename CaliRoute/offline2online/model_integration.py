@@ -32,6 +32,9 @@ def _canonical_model(model):
         raise ValueError('e1_no_road_input must be a boolean')
     if no_road:
         result[E1_NO_ROAD_FLAG] = True
+        task = model.get('e1_no_road_task', 'cvrp')
+        if task not in ('cvrp', 'vrptw'):raise ValueError('Unsupported no-road task')
+        if task != 'cvrp':result['e1_no_road_task'] = task
     e1_row = model.get(E1_ROW_FLAG, False)
     if not isinstance(e1_row, bool):
         raise ValueError('e1_base_distance_row must be a boolean')
@@ -77,8 +80,8 @@ def enabled(profile):
 def signature(cfg):
     model = cfg.get('model', {}) or {}
     result = {'schema': SCHEMA, **_canonical_model(model)}
-    if result.get(E1_NO_ROAD_FLAG) and cfg.get('data', {}).get('problem_type') != 'cvrp':
-        raise ValueError('E1 no-road base is restricted to CVRP')
+    if result.get(E1_NO_ROAD_FLAG) and cfg.get('data', {}).get('problem_type') != result.get('e1_no_road_task', 'cvrp'):
+        raise ValueError('E1 no-road task must match data problem_type')
     if any(result[name] for name in FLAGS) or result.get(JOINT_GRAPH_FLAG, False):
         from .input_normalization import signature as input_signature
         inputs = input_signature(cfg)

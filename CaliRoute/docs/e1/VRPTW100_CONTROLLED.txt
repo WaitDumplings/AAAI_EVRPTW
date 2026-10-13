@@ -1,0 +1,42 @@
+Local successor campaign: VRPTW Cus100, PPO base versus PPO + RDI + AGDA
+=====================================================================
+Run from CaliRoute: bash scripts/queue_e1_vrptw100_local.sh
+Preparation/data audit/CPU smoke runs in the foreground. The watcher then detaches
+with stdin closed and a separate session; closing the terminal does not stop it.
+
+Wait for all three corrected CVRP100/50/15 PPO base runs listed in the shell to
+complete successfully. A stopped/failed predecessor blocks handoff. Status alone
+is insufficient: final checkpoint epoch must match its full training budget.
+After handoff the scheduler additionally waits for idle GPUs and acquires GPU
+locks. No predecessor is killed, no checkpoint is used as an initialization.
+
+GPU0/1: PPO base; GPU2/3: PPO + RDI + AGDA. Both scratch seed3009, 1500 online
+loops, global batch64 (32 per rank), n_traj50, PPO passes4, minibatches4, LR1e-4,
+gamma.99, FP32. Formal evaluation: 1000 validation instances, best-of-50 every
+50 loops. Execution chunks: base32, graph8. Two-loop full-geometry GPU preflight
+runs first; formal initialization is fresh. The chunk does not change sample or
+optimizer-update budgets. GPU memory occupancy is not a fairness metric.
+
+Base removes explicit distance/time/energy matrices and graph/physical contexts
+from actor and critic input; keeps node coordinates, demands, capacity, history,
+time windows, service duration, current clock and the physical feasible mask.
+Clock/mask/reward still depend on real roads: this is not a road-independent MDP.
+Both environments use authoritative physical roads/time for feasibility and cost.
+Enhanced architecture matches the prior CVRP E1 RDI+AGDA configuration; this adds
+VRPTW task semantics, not new optimization modules. CVRP no-road behavior is kept.
+Every evaluation candidate is independently checked for capacity, time windows,
+service and depot closing in physical units, and its road distance is recomputed.
+
+Source/config/train-val hashes are frozen. Train-only median depot-customer round
+trip distance is the shared frozen distance unit. No test labels or test payloads
+are opened during preparation, training or selection. This queue trains two E1
+methods, not all seven; independent best-checkpoint tests remain a separate step.
+
+CAMPAIGN defaults to:
+results/e1/E1_VRPTW100_PPO_COMPARE_S3009_E1500_2080TI_A_20261013_R1
+watcher_status.json / watcher.log / watcher_pid.json: waiting and handoff.
+scheduler_2080ti_a/status.json / supervisor.log: GPU preflight and formal training.
+runs/METHOD/{train.log,monitoring,validation}: progress and per-instance validation.
+artifacts/logs/Cus_100_CS_0/RUN/seed_3009/{train_log.csv,eval_log.csv}: metrics.
+To cancel a waiting queue, SIGTERM only its watcher_pid.json PID. After handoff,
+watcher exits and the scheduler owns the jobs; inspect scheduler pid.json instead.

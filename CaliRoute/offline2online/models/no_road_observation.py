@@ -44,3 +44,17 @@ def cvrp_no_road_observation(obs):
     out['full_charge_time'] = constant((batch, 1))
     out['fixed_full_charge'] = constant((batch, 1), 1.)
     return out
+
+
+def vrptw_no_road_observation(obs):
+    """Keep observable clock/windows and the physical mask, but no road matrices.
+
+    Clock and feasibility are consequences of interaction with the real world;
+    this is a no explicit road-input baseline, not a road-independent MDP.
+    """
+    from .graph_attention_model_wrapper import prepare_observation_batch
+    source = prepare_observation_batch(obs)
+    out = cvrp_no_road_observation(source)
+    for key in ('time_window', 'service_time', 'current_time'):
+        out[key] = source[key]
+    return out

@@ -1834,7 +1834,7 @@ def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: 
     was_training = agent.training
     try:
         with _isolated_eval_rng(eval_seed, device):
-            if cfg.get("experiment_protocol", {}).get("schema") in ("aaai_e1_cvrp15_v1", "aaai_e1_cvrp50_v1", "aaai_e1_cvrp100_v1"):
+            if cfg.get("experiment_protocol", {}).get("schema") in ("aaai_e1_cvrp15_v1", "aaai_e1_cvrp50_v1", "aaai_e1_cvrp100_v1", "aaai_e1_vrptw100_v1"):
                 from e1.evaluation import evaluate_controlled_agent
                 return evaluate_controlled_agent(agent, cfg, seed=seed, epoch=epoch, device=device)
             return _evaluate_fixed_dataset_impl(agent, cfg, seed, epoch, device, eval_seed=eval_seed)
@@ -4786,6 +4786,7 @@ def train_from_config(
             use_encoder_distance_bias=use_encoder_distance_bias,
             e1_base_distance_row=bool(model_cfg.get("e1_base_distance_row", False)),
             e1_no_road_input=bool(model_cfg.get("e1_no_road_input", False)),
+            e1_no_road_task=model_cfg.get("e1_no_road_task", "cvrp"),
             use_residual_edge_bias=bool(model_cfg.get("use_residual_edge_bias", False)),
             use_rdi_v2=bool(model_cfg.get("use_rdi_v2", False)),
             rdi_hidden_dim=int(model_cfg.get("rdi_hidden_dim", 32)),

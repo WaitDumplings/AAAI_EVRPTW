@@ -237,7 +237,7 @@ def smoke(args):
                 checkpoint=torch.load(last,map_location='cpu',weights_only=False)
                 result=dict(state='passed',commands=commands,last_checkpoint=str(last),last_sha256=digest(last),
                     epoch=checkpoint['epoch'],config_sha256=digest(run/'config.yaml'),
-                    evidence=f'Real CVRP{cfg["data"]["num_customers"]} subset, real optimizer/expert path, validation, save, new process full resume')
+                    evidence=f'Real {cfg["data"]["problem_type"].upper()}{cfg["data"]["num_customers"]} subset, real optimizer/expert path, validation, save, new process full resume')
             atomic_json(run/'smoke_result.json',result);results[method]=result
         except Exception as error:
             result=dict(state='failed',reason=f'{type(error).__name__}: {error}',logs=str(run))

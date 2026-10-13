@@ -97,7 +97,7 @@ def controlled_rows(agent, cfg, *, seed, checkpoint_id, device='cpu', split='val
     limit = evaluation.get('eval_limit'); cap = evaluation['eval_max_steps']
     if k != 50 and not cfg.get('experiment_protocol', {}).get('smoke_only'):
         raise ValueError('Formal E1 evaluation requires exactly K=50')
-    data = iter_adapted_instances(evaluation['eval_path'], problem_type='cvrp', strict_road_metric=True, limit=limit)
+    data = iter_adapted_instances(evaluation['eval_path'], problem_type=cfg['data']['problem_type'], strict_road_metric=True, limit=limit)
     batches_limit = evaluation.get('eval_num_batches')
     seen = 0; batch_index = 0
     while True:
