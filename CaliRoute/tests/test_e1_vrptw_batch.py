@@ -39,8 +39,13 @@ def test_profiles_fit_card_counts_and_do_not_overlap():
     spec=importlib.util.spec_from_file_location('vrptw_batch',Path(__file__).parents[1]/'scripts/run_e1_vrptw_batch.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
     for profile,budget in [('2080ti_a',2),('2080ti_b',4),('a6000',2),('2080ti_3',3)]:
-        cards=[g for _,placements in m.PROFILES[profile] for gs in placements.values() for g in gs]
-        assert len(cards)==len(set(cards)) and min(cards)>=0 and max(cards)<budget
+        for _,placements in m.PROFILES[profile]:
+            cards=[g for gs in placements.values() for g in gs]
+            assert len(cards)==len(set(cards)) and min(cards)>=0 and max(cards)<budget
+        if profile!='2080ti_a':
+            cards=[g for _,placements in m.PROFILES[profile] for gs in placements.values() for g in gs]
+            assert len(cards)==len(set(cards))
+    assert [n for n,_ in m.PROFILES['2080ti_a']]==[15,50]
     assert m.PROFILES['2080ti_3']==[(100,{'slppo':[0,1]})]
 
 
@@ -70,3 +75,21 @@ def test_real_vrptw_expert_audit_rejects_wrong_cost_without_reading_test_solutio
     assert report['expert_pool']['accepted_count']==1
     assert report['expert_pool']['teacher_forcing_required_for_acceptance']
     assert not any('test/Cus15/expert_solutions' in r['path'] for r in inputs)
+
+
+def test_local_cus50_waits_for_training_and_tests_but_not_cus100(tmp_path):
+    import json
+    spec=importlib.util.spec_from_file_location('vrptw_queue',Path(__file__).parents[1]/'scripts/run_e1_vrptw_batch.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    assert m.predecessor_state(tmp_path)=='waiting_for_cus15'
+    scheduler=tmp_path/'scheduler_2080ti_a/status.json';scheduler.parent.mkdir()
+    tests=tmp_path/'test_watcher/status.json';tests.parent.mkdir()
+    def state(a,b,ta,tb):
+        scheduler.write_text(json.dumps({'methods':{'ppo_base':{'state':a},'ppo_rdi_agda':{'state':b}}}))
+        tests.write_text(json.dumps({'jobs':{'vrptw15_ppo_base':{'state':ta},'vrptw15_ppo_rdi_agda':{'state':tb}}}))
+        return m.predecessor_state(tmp_path)
+    assert state('completed','training','completed','waiting_for_training')=='waiting_for_cus15'
+    assert state('completed','completed','completed','testing')=='waiting_for_cus15'
+    assert state('completed','completed','completed','blocked')=='blocked_by_cus15'
+    assert state('completed','completed','completed','completed')=='ready'
+    # No Cus100 folder/status is needed or consulted.

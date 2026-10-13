@@ -10,13 +10,15 @@ preflight; training starts only on idle, locked GPUs. Existing runs are preserve
 | `a6000` | 1 | Cus15 SL-PPO |
 | `2080ti_b` | 0 / 1 | Cus50 AWBC / DAPG |
 | `2080ti_b` | 2 / 3 | Cus15 AWBC / DAPG |
-| `2080ti_a` (local) | 0 / 1 | Cus15 PPO base / PPO + RDI + AGDA |
+| `2080ti_a` (local) | 0 / 1 | Cus15 PPO base / PPO + RDI + AGDA, then Cus50 |
 | `2080ti_3` | 0 + 1 | Cus100 SL-PPO, one distributed run |
 
 The third card on `2080ti_3` is unassigned. Two ranks retain global batch64 and
 four equal minibatches; three ranks would change that protocol. Cus15 and Cus50
 use **one GPU per method**, not two GPUs per run. Local GPU2/3 keep the existing
-Cus100 PPO + RDI + AGDA run. Cus50 PPO experiments are not added by this batch.
+Cus100 PPO + RDI + AGDA run. Cus50 PPO base and PPO + RDI + AGDA are prepared next and wait for both Cus15
+training and accepted tests/reporting. This dependency does not include Cus100
+or GPUs2/3. See `<Cus50 campaign>/handoff_status.json` for queue status.
 
 ```bash
 bash scripts/run_e1_vrptw_batch.sh a6000 --execute

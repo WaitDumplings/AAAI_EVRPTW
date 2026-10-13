@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -18,7 +19,7 @@ from e1.runner import verify_campaign
 PROFILES={
  'a6000':[(50,{'slppo':[0]}),(15,{'slppo':[1]})],
  '2080ti_b':[(50,{'awbc':[0],'dapg':[1]}),(15,{'awbc':[2],'dapg':[3]})],
- '2080ti_a':[(15,{'ppo_base':[0],'ppo_rdi_agda':[1]})],
+ '2080ti_a':[(15,{'ppo_base':[0],'ppo_rdi_agda':[1]}),(50,{'ppo_base':[0],'ppo_rdi_agda':[1]})],
  '2080ti_3':[(100,{'slppo':[0,1]})],
 }
 LABELS={'ppo_base':'PPO (base)','ppo_rdi_agda':'PPO (RDI+AGDA)','awbc':'AWBC','dapg':'DAPG','slppo':'SL-PPO'}
@@ -60,6 +61,42 @@ def run_command(manifest,*args):
     subprocess.run([sys.executable,'-m','e1.runner',*map(str,args)],cwd=manifest['code_root'],env=env,check=True)
 
 
+
+def predecessor_state(campaign):
+    """Both Cus15 methods must finish training AND accepted test/reporting."""
+    scheduler=campaign/'scheduler_2080ti_a/status.json'
+    watcher=campaign/'test_watcher/status.json'
+    if not scheduler.exists() or not watcher.exists():return 'waiting_for_cus15'
+    training=json.loads(scheduler.read_text()).get('methods',{})
+    tests=json.loads(watcher.read_text()).get('jobs',{})
+    for method in ('ppo_base','ppo_rdi_agda'):
+        a=training.get(method,{}).get('state')
+        b=tests.get('vrptw15_'+method,{}).get('state')
+        if a in ('failed','blocked','interrupted','stopped_by_user') or b=='blocked':
+            return 'blocked_by_cus15'
+    if all(training.get(m,{}).get('state')=='completed' and
+           tests.get('vrptw15_'+m,{}).get('state')=='completed' for m in ('ppo_base','ppo_rdi_agda')):
+        return 'ready'
+    return 'waiting_for_cus15'
+
+
+def wait_for_cus15(args, campaign):
+    previous=args.output/'E1_VRPTW15_S3009_E1500_2080TI_A_V1'
+    while True:
+        state=predecessor_state(previous)
+        atomic_json(campaign/'handoff_status.json',dict(state=state,pid=os.getpid(),
+            predecessor=str(previous),target=str(campaign),gpus=[0,1],waits_for_cus100=False,
+            updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
+        if state=='blocked_by_cus15':raise RuntimeError('Cus15 training/test failed; automatic handoff blocked')
+        if state=='ready':
+            from e1.lifecycle import assert_accepted_test_result
+            manifest=verify_campaign(previous)
+            for method in ('ppo_base','ppo_rdi_agda'):
+                assert_accepted_test_result(manifest,method)
+            return
+        time.sleep(30)
+
+
 def run_scale(args, scale, placements):
     campaign=args.output/f'E1_VRPTW{scale}_S3009_E1500_{args.profile.upper()}_V1'
     defaults={'ppo_base':32,'ppo_rdi_agda':14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
@@ -78,7 +115,11 @@ def run_scale(args, scale, placements):
                 raise RuntimeError('Existing formal artifacts; inspect and explicitly resume rather than restart')
             retry=['--retry'] if (run/'smoke').exists() else []
             run_command(manifest,'smoke','--campaign',campaign,'--method',method,*retry)
+        if args.profile=='2080ti_a' and scale==50:
+            wait_for_cus15(args,campaign)
         run_command(manifest,'launch','--campaign',campaign,'--server',args.profile,'--execute')
+        if args.profile=='2080ti_a' and scale==50:
+            atomic_json(campaign/'handoff_status.json',dict(state='handed_off',predecessor=str(args.output/'E1_VRPTW15_S3009_E1500_2080TI_A_V1'),target=str(campaign),gpus=[0,1],waits_for_cus100=False,updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
     else:
         print(f'Existing scheduler preserved: {scheduler}',flush=True)
     reports=ROOT/'results/e1/reports';overview=ensure_reports(reports)
