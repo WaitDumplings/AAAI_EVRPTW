@@ -1,0 +1,89 @@
+VRPTW Cus100: A6000 native-baseline campaign
+==========================================
+
+Assignment
+----------
+GPU 0: RRNCO, native rcvrptw model/environment with explicit road-time adapter.
+GPU 1: RADAR VRPTW adaptation (not an unmodified upstream VRPTW implementation).
+One independent single-GPU job per method. Existing CVRP runs are not reused.
+
+Launch from CaliRoute after pulling fix/e1-no-road-base-20261012:
+
+    bash scripts/run_e1_vrptw100_a6000.sh
+    bash scripts/run_e1_vrptw100_a6000.sh --execute
+
+The first command prints the plan. --execute starts the entire preparation and
+training workflow with nohup. Use the existing RRNCO/RADAR Python environments
+from the completed CVRP runs; if they are separate environments, export
+E1_RRNCO_PYTHON and E1_RADAR_PYTHON to their Python executable paths first.
+E1_PYTHON selects the launcher interpreter; E1_DATA_ROOT overrides AAAI_Dataset.
+
+Protocol
+--------
+Task: VRPTW100. Seed: 3009. Scratch initialization for each formal run.
+Batch: 64 instances, 50 trajectories. Native REINFORCE/POMO objectives, no PPO
+passes, expert labels or CaliRoute RDI/AGDA/SL-PPO plugins.
+Budget: 96,000 instance exposures (1500 nominal loops x 64); native optimizer
+updates are recorded separately. Pool/evaluation boundaries may split batches,
+so this is not a promise of exactly 1500 optimizer updates or dataset passes.
+Native learning rate: 4e-4; weight decay: 1e-6 (same as the CVRP native harness).
+Validation: 1000 separate val instances, best-of-50, every 3200 exposures.
+Best checkpoint selection: feasible count first, then lower physical road km.
+No test data is opened during training or checkpoint selection.
+
+Before training, each arm must pass:
+1. CPU small-batch training, checkpoint save, separate-process resume and
+   independent physical-unit validation.
+2. Its assigned GPU must be idle and the shared GPU lock acquired.
+3. A separate full-batch GPU preflight (128 exposures, 8 validation instances),
+   requiring 8/8 feasible selected routes and no native/recomputed cost mismatch.
+Formal training initializes afresh; preflight weights are not reused.
+The GPU preflight verifies execution, not 80% memory utilization. Do not inflate
+statistical batch simply to fill VRAM; record any batch/budget change explicitly.
+Local verification uses CPU; actual A6000 execution is checked on that server.
+
+Adaptation and physical invariants
+---------------------------------
+RRNCO reuses upstream rcvrptw embeddings, time-aware context and road duration
+attention. Its mask is specialized to directed travel times, waiting, service,
+capacity and a feasible return before depot closing, with inclusive deadlines.
+RADAR retains its original embedding/encoder/decoder and native objective; it
+adds learned window/service node projections before the encoder, a current-time
+projection before the decoder query, and the same physical feasibility rules.
+Report it as "RADAR (VRPTW adaptation)" in experiment tables.
+
+Travel seconds, time windows, service durations and current clock all use the
+same per-instance working-horizon unit, relative to depot opening. Road distance
+remains the physical-km cost. No Euclidean travel-time substitution is made.
+Every vehicle starts at depot opening; customer service may start at the window
+end, and service duration counts toward the depot return deadline. Native costs
+and complete candidate routes are independently checked using original physical
+units. Instances with an individually infeasible forced customer start fail
+conversion rather than being silently repaired.
+
+Monitoring and recovery
+-----------------------
+Default campaign:
+results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V1
+
+CAMPAIGN.launch.log: detached coordinator startup/errors.
+CAMPAIGN/status.json: coordinator and per-method process states.
+CAMPAIGN/manifest.json: source/config/data hashes and GPU assignment.
+CAMPAIGN/runs/{rrnco,radar}/launcher.log: each arm's preparation and training.
+CAMPAIGN/runs/{rrnco,radar}/native_status.json: training counters and progress.
+CAMPAIGN/runs/{rrnco,radar}/native_validation.jsonl: validation metrics.
+CAMPAIGN/runs/{rrnco,radar}/native_checkpoints/: best/latest checkpoints.
+
+After a formal run interruption, use:
+    bash scripts/run_e1_vrptw100_a6000.sh --resume
+
+Source, configuration and data hashes are checked before resuming. Completed
+arms are skipped. Failed/partial preflights are retained for investigation; use
+E1_VRPTW100_CAMPAIGN=/absolute/path/to/a/new/campaign for a new attempt.
+Keep the campaign in its original location for resume (manifest paths absolute).
+Stop the coordinator PID with SIGTERM to stop both arms and their workers.
+
+After training, evaluate selected best checkpoints on the independent VRPTW100
+test split using e1.native.evaluate; training completion is not test completion.
+The current local VRPTW dataset has train/val only, so independent test must be
+provided/checked before producing an E1 main-results table.

@@ -1,4 +1,4 @@
-"""Independent CVRP route checks in physical kilometres, plus environment replay."""
+"""Independent CVRP/VRPTW route checks in physical kilometres, plus environment replay."""
 from __future__ import annotations
 
 import json
@@ -38,6 +38,24 @@ def validate_routes(instance, routes, reported_cost=None):
             edge=float(d[left,right])
             if not math.isfinite(edge) or edge<0: reasons.append('invalid_road_edge')
             else: distance+=edge
+    if getattr(instance,'metadata',{}).get('time_window_constraint',False):
+        travel=np.asarray(instance.travel_time_matrix_s,dtype=np.float64)
+        tw=np.asarray(instance.tw_s,dtype=np.float64)
+        service=np.asarray(instance.service_time_s,dtype=np.float64)
+        opening,closing=float(instance.working_start_s),float(instance.working_end_s)
+        if not np.isfinite([opening,closing]).all() or closing<=opening or (tw.shape==(n,2) and (tw[:,1]<tw[:,0]).any()) or travel.shape!=(n+1,n+1) or tw.shape!=(n,2) or service.shape!=(n,) or not all(np.isfinite(v).all() for v in (travel,tw,service)) or (travel<0).any() or (service<0).any():
+            reasons.append('invalid_time_arrays')
+        else:
+            for route in routes:
+                if not isinstance(route,(list,tuple)) or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,(int,np.integer)) or not 0<=x<=n for x in route):continue
+                clock=float(instance.working_start_s)
+                for left,right in zip(route,route[1:]):
+                    clock+=float(travel[left,right])
+                    if right:
+                        clock=max(clock,float(tw[right-1,0]))
+                        if clock>tw[right-1,1]+.01:reasons.append('time_window_exceeded')
+                        clock+=float(service[right-1])
+                    elif clock>float(instance.working_end_s)+.01:reasons.append('depot_closing_exceeded')
     if np.any(coverage==0): reasons.append('missing_customers')
     if np.any(coverage>1): reasons.append('repeated_customers')
     feasible=not reasons

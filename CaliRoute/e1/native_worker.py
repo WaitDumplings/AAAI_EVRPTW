@@ -68,12 +68,20 @@ def load_data(run, split):
 
 
 def instance_for(arrays, metadata, index):
-    return SimpleNamespace(num_customers=arrays["demand"].shape[1],
+    instance = SimpleNamespace(num_customers=arrays["demand"].shape[1],
         distance_matrix_km=arrays["distance_matrix"][index], demands_cm3=arrays["demand"][index],
         vehicle={"cargo_capacity_cm3": float(arrays["capacity"][index])},
         instance_id=metadata["instances"][index]["instance_id"],
         region_id=metadata["instances"][index]["territory_id"],
         metadata={"service_territory_id": metadata["instances"][index]["territory_id"]})
+
+    if metadata.get('problem_type')=='vrptw':
+        instance.travel_time_matrix_s=arrays['travel_time_s'][index]
+        instance.tw_s=arrays['tw_s'][index]
+        instance.service_time_s=arrays['service_s'][index]
+        instance.working_start_s,instance.working_end_s=arrays['working_window_s'][index]
+        instance.metadata['time_window_constraint']=True
+    return instance
 
 
 def action_routes(sequence, *, implicit_final_return=False):
@@ -124,6 +132,11 @@ class RadarRunner:
         from ACVRPEnv import ACVRPEnv
         from utils.utils import set_result_folder
         set_result_folder(str(run / "native_logs"))
+        if cfg.get('problem_type')=='vrptw':
+            import ACVRPTrainer as trainer_module
+            from e1.native_vrptw import radar_environment
+            ACVRPEnv=radar_environment(ACVRPEnv)
+            trainer_module.Env=ACVRPEnv
         self.cfg, self.device, self.env_class = cfg, device, ACVRPEnv
         n, width, heads = cfg["num_customers"], 256, 8
         model = dict(embedding_dim=width, sqrt_embedding_dim=width ** .5,
@@ -139,6 +152,12 @@ class RadarRunner:
                        epochs=1, train_episodes=1, train_batch_size=cfg["batch_size"], model_load=dict(enable=False))
         self.trainer = ACVRPTrainer(env, model, optimizer, trainer)
         self.model, self.optimizer, self.scheduler = self.trainer.model, self.trainer.optimizer, self.trainer.scheduler
+        if cfg.get('problem_type')=='vrptw':
+            from e1.native_vrptw import install_radar_time_inputs
+            install_radar_time_inputs(self.model)
+            self.model.to(device)
+            old_ids={id(p) for g in self.optimizer.param_groups for p in g['params']}
+            self.optimizer.param_groups[0]['params'].extend(p for p in self.model.parameters() if id(p) not in old_ids)
         if cfg.get("allow_repeated_starts", False):
             install_radar_cyclic_starts(self.model, n)
         self.optimizer.register_step_pre_hook(_guard_step)
@@ -189,6 +208,7 @@ class RadarRunner:
         distance = torch.from_numpy(arrays["distance_matrix"][start:stop]).to(self.device)
         demand = torch.from_numpy(arrays["demand"][start:stop] / arrays["capacity"][start:stop, None]).to(self.device)
         env.load_problems_manual(distance, demand)
+        if self.cfg.get('problem_type')=='vrptw':env.set_time_data(arrays,start,stop)
         reset, _, _ = env.reset()
         self.model.eval(); self.model.pre_forward(reset)
         state, reward, done = env.pre_step()
@@ -209,10 +229,16 @@ class RrncoRunner:
         from rrnco.envs.rcvrp.fixed_generator import FixedRCVRPGenerator
         from rrnco.models.policy import RRNetPolicy
         from rrnco.models.rl import RRNet
+        if cfg.get('problem_type')=='vrptw':
+            from rrnco.envs.rmtvrp.env import RMTVRPEnv
+            from rrnco.envs.rmtvrp.fixed_generator import FixedRMTVRPGenerator
+            from e1.native_vrptw import rrnco_environment
+            RCVRPEnv=rrnco_environment(RMTVRPEnv)
+            FixedRCVRPGenerator=FixedRMTVRPGenerator
         self.cfg, self.device = cfg, device
         self.generator = FixedRCVRPGenerator(str(run / "native_data/train.npz"), sample_with_replacement=True)
         self.env = RCVRPEnv(generator=self.generator, normalize=True)
-        self.architecture = dict(env_name="rcvrp", embed_dim=128, num_heads=8,
+        self.architecture = dict(env_name="rcvrptw" if cfg.get("problem_type")=="vrptw" else "rcvrp", embed_dim=128, num_heads=8,
             num_encoder_layers=6, normalization="instance", use_graph_context=False, nab_type="gating",
             init_embedding_kwargs=dict(use_coords=True, use_polar_feats=True, use_dist=True,
                                        use_matnet_init=False, sample_type="prob", sample_size=25))
@@ -279,7 +305,11 @@ class RrncoRunner:
         self.batch_decision_cap = None
         td = TensorDict({key: torch.from_numpy(arrays[key][start:stop]).to(self.device)
                          for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start])
-        td["demand"] = td["demand"] / td["capacity"][:, None]
+        if self.cfg.get('problem_type')=='vrptw':
+            for key in ('demand_linehaul','duration_matrix','time_windows','service_time'):
+                td[key]=torch.from_numpy(arrays[key][start:stop]).to(self.device)
+        else:
+            td["demand"] = td["demand"] / td["capacity"][:, None]
         self.model.eval()
         out = self.model.policy(self.env.reset(td), self.env, phase="test", num_starts=k,
                                 max_steps=self.cfg["decode_cap"]-1, decode_type="multistart_greedy")
@@ -484,6 +514,7 @@ def main():
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(cfg["training_seed"])
     runner = (RadarRunner if cfg["method"] == "radar" else RrncoRunner)(cfg, run, device)
     atomic_json(run / "native_architecture.json", dict(method=cfg["method"], architecture=runner.architecture,
+                problem_type=cfg.get("problem_type", "cvrp"), task_adapter=cfg.get("task_adapter", "native_cvrp"),
                 parameters=sum(p.numel() for p in runner.model.parameters()), native_objective=True))
     if args.command == "train":
         if args.checkpoint is not None and not args.resume: raise ValueError("Training checkpoint requires --resume")

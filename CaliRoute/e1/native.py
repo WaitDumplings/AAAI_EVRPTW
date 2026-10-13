@@ -171,7 +171,7 @@ def convert_cvrp_instances(instances, *, expected_customers=100):
     return {name: np.stack(values) for name, values in arrays.items()}, identities
 
 
-def export_native_dataset(source_path, output_path, *, split, expected_customers=100, limit=None):
+def export_native_dataset(source_path, output_path, *, split, expected_customers=100, limit=None, problem_type="cvrp"):
     from offline2online.instance_adapter import iter_instance_payloads, adapt_instance_payload
     import itertools
     source = Path(source_path).resolve()
@@ -179,15 +179,20 @@ def export_native_dataset(source_path, output_path, *, split, expected_customers
     payloads = iter_instance_payloads(bundle)
     if limit is not None:
         payloads = itertools.islice(payloads, int(limit))
-    instances = (adapt_instance_payload(item, problem_type="cvrp", strict_road_metric=True) for item in payloads)
-    arrays, identities = convert_cvrp_instances(instances, expected_customers=expected_customers)
+    instances = (adapt_instance_payload(item, problem_type=problem_type, strict_road_metric=True) for item in payloads)
+    if problem_type == 'vrptw':
+        from e1.native_vrptw import convert_vrptw_instances
+        arrays, identities = convert_vrptw_instances(instances, expected_customers)
+    elif problem_type == 'cvrp':
+        arrays, identities = convert_cvrp_instances(instances, expected_customers=expected_customers)
+    else: raise ValueError('Native task must be cvrp or vrptw')
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         raise FileExistsError(target)
     with target.open("wb") as stream:
         np.savez(stream, **arrays)
-    manifest = dict(split=split, source_path=str(bundle), source_sha256=file_hash(bundle),
+    manifest = dict(problem_type=problem_type, split=split, source_path=str(bundle), source_sha256=file_hash(bundle),
                     npz_sha256=file_hash(target), instances=identities, count=len(identities),
                     customers=expected_customers, distance_unit="km", directed=True,
                     demand_storage="raw_demand_and_raw_capacity", coordinate_transform="native_per_axis_minmax")
@@ -202,6 +207,8 @@ def _config(config):
     method = cfg["method"]
     if method not in REQUIRED:
         raise ValueError("Only native rrnco/radar are handled here")
+    cfg.setdefault("problem_type", "cvrp")
+    if cfg['problem_type'] not in ('cvrp','vrptw'):raise ValueError('Unsupported native task')
     cfg.setdefault("training_seed", 3009)
     cfg.setdefault("instance_exposures", 96000)
     cfg.setdefault("batch_size", 64)
@@ -258,13 +265,13 @@ def prepare_native(config, run_dir):
     harness = run / "native_harness" / "e1"
     harness.mkdir(parents=True)
     records = []
-    for name in ("native.py", "native_worker.py", "validator.py", "evaluation.py", f"requirements-{cfg['method']}.lock.txt"):
+    for name in ("native.py", "native_worker.py", "native_vrptw.py", "validator.py", "evaluation.py", f"requirements-{cfg['method']}.lock.txt"):
         shutil.copy2(ROOT / "e1" / name, harness / name)
         records.append(dict(path=f"e1/{name}", sha256=file_hash(harness / name)))
     (harness / "__init__.py").write_text("")
     records.append(dict(path="e1/__init__.py", sha256=file_hash(harness / "__init__.py")))
     manifests = {split: export_native_dataset(cfg[f"{split}_path"], run / "native_data" / f"{split}.npz",
-                 split=split, expected_customers=cfg["num_customers"], limit=cfg.get(f"smoke_{split}_limit")) for split in ("train", "val")}
+                 split=split, expected_customers=cfg["num_customers"], limit=cfg.get(f"smoke_{split}_limit"), problem_type=cfg["problem_type"]) for split in ("train", "val")}
     protocol = cfg.get("experiment_protocol", {})
     if not protocol.get("smoke_only", False) and manifests["val"]["count"] != 1000:
         raise ValueError("Formal native validation requires all 1000 instances (use smoke_only only for a separate smoke run)")
@@ -346,5 +353,5 @@ def evaluate(config, run_dir, checkpoint, *, split="val", device="cpu", output_p
         cfg = json.loads((run / "native_resolved.json").read_text())
         if "test_path" not in config:
             raise ValueError("Explicit test_path is required; training never reads test")
-        export_native_dataset(config["test_path"], run / "native_data/test.npz", split="test", expected_customers=cfg["num_customers"])
+        export_native_dataset(config["test_path"], run / "native_data/test.npz", split="test", expected_customers=cfg["num_customers"], problem_type=cfg.get("problem_type","cvrp"))
     return _dispatch(run, "evaluate", device=device, checkpoint=checkpoint, split=split, output_path=output_path, eval_batch_size=eval_batch_size)
