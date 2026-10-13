@@ -1,0 +1,52 @@
+A6000 successor assignment: CVRP50 and CVRP15 SL-PPO
+==================================================
+Branch: fix/e1-no-road-base-20261012. Run from CaliRoute after pulling.
+
+    bash scripts/run_e1_slppo_a6000.sh
+    bash scripts/run_e1_slppo_a6000.sh --execute
+
+Preview is read-only. --execute uses nohup for all audits/preparation/smoke;
+formal training supervisors also detach. Closing SSH does not stop these jobs.
+GPU0 runs Cus50, GPU1 runs Cus15 independently, one GPU per method/scale.
+No wait for the remote Cus100 SL-PPO run, no RRNCO/RADAR jobs, no DDP here.
+Existing CVRP/native run directories are preserved. A GPU that is still busy
+causes the corresponding training scheduler to wait for its shared GPU lock.
+
+Same E1 quality protocol as the 2080 Ti SL-PPO runs:
+seed3009, scratch, global batch64, n_traj50, 1500 online loops, PPO passes4,
+minibatches4, accumulation1, LR1e-4, FP32. Uses the same audited per-scale train
+expert pool and SL-PPO loss/reference rules. Validation:1000, K50, every50 loops;
+checkpoint selected by validation, then independent test later. No old learned
+checkpoint initializes these runs; CPU smoke/full-size GPU preflight are separate.
+A missing/invalid expert pool must pass the standard data/expert audit first.
+
+Only execution chunks change for the larger A6000: PPO32, expert128. These are
+candidates, not measured A6000 throughput optima or promises of80% memory usage.
+The full-batch GPU preflight must pass before fresh formal training starts. A
+chunk changes batching of computations, not the number of samples or PPO passes;
+floating-point accumulation order may differ. No batch scaling/LR scaling is used.
+Optional BEFORE preparing a campaign:
+  E1_CVRP50_SLPPO_PPO_CHUNK=16 E1_CVRP50_SLPPO_EXPERT_CHUNK=64 bash scripts/run_e1_slppo_a6000.sh --execute
+Per-scale variables also exist for CVRP15; fallback globals are
+E1_SLPPO_PPO_CHUNK and E1_EXPERT_CHUNK. Existing frozen configs are never rewritten.
+
+Default campaigns:
+results/e1/E1_CVRP50_SLPPO_S3009_A6000_V1
+results/e1/E1_CVRP15_SLPPO_S3009_A6000_V1
+
+Monitor each campaign:
+  scheduler_a6000/status.json, supervisor.log, hardware.jsonl
+  runs/slppo/train.log, monitoring/, validation/
+  artifacts/logs/Cus_N_CS_0/RUN/seed_3009/{train_log.csv,eval_log.csv}
+Background preparation logs:
+  results/e1/launchers/E1_SLPPO_CVRP50_15_A6000_S3009_V1/{supervisor,cus50,cus15}.log
+A failure of one scale does not stop the other. Inspect both statuses.
+
+Overrides: E1_PYTHON (CaliRoute environment, not just native-baseline deps),
+E1_DATA_ROOT, E1_BATCH2_ASSETS_ROOT, E1_A6000_SLPPO_ROOT (new output parent),
+E1_A6000_SLPPO_SCALES=50 or15, E1_CVRP50_SLPPO_GPU, E1_CVRP15_SLPPO_GPU.
+Starting the wrapper again preserves existing formal/preflight artifacts. To
+resume a stopped formal run use its explicit checkpoint, e.g.:
+  bash scripts/run_e1.sh resume --campaign CAMPAIGN --method slppo --checkpoint LATEST --gpus GPU --execute
+Failed GPU preflights are retained; profile/fix settings and choose a new output
+parent for a scratch attempt. Do not erase provenance or relabel a failed trial.
