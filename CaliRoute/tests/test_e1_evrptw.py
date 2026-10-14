@@ -121,3 +121,25 @@ def test_electric_base_hides_road_inputs_but_keeps_resources(tmp_path):
         assert cfg['training']['num_envs_per_gpu']==32
         assert cfg['model']['e1_no_road_task']=='evrptw'
     finally:env.close()
+
+
+def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from e1.runner import parser as build_parser
+    spec=importlib.util.spec_from_file_location('local_ev_batch',Path(__file__).parents[1]/'scripts/run_e1_vrptw_batch.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    monkeypatch.setattr(m,'ROOT',tmp_path)
+    calls=[]
+    def prepare(folder,data,scale,server,placements,*args,**kwargs):
+        assert server=='2080ti_a'
+        folder.mkdir(parents=True)
+        return {'methods':{method:{'run_dir':str(folder/'runs'/method)} for method in placements}}
+    def command(manifest,*args):
+        parsed=build_parser().parse_args(list(map(str,args)))
+        calls.append(parsed.command)
+        if parsed.command=='launch':assert parsed.server=='2080ti_a'
+    monkeypatch.setattr(m,'prepare',prepare);monkeypatch.setattr(m,'run_command',command)
+    monkeypatch.setattr(m.subprocess,'run',lambda *a,**k:None)
+    args=SimpleNamespace(problem='evrptw',profile='2080ti_a_ev15',output=tmp_path/'campaigns',data_root=tmp_path/'data',execute=True)
+    m.run_scale(args,15,{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]})
+    assert calls==['smoke','smoke','launch']

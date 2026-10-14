@@ -90,5 +90,5 @@ duration, time windows, service time, clock and physical action masks. Road
 distance/time/energy matrices and derived graph input contexts are excluded at
 the actor/critic boundary. The simulator and reward retain real physical costs.
 
-Campaign: `results/e1/E1_EVRPTW15_S3009_E1500_2080TI_A_EV15_V1`.
-Progress: `scheduler_2080ti_a_ev15/status.json` inside that campaign.
+Campaign: `results/e1/E1_EVRPTW15_S3009_E1500_2080TI_A_EV15_V2`.
+Progress: `scheduler_2080ti_a/status.json` inside that campaign.

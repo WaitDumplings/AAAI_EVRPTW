@@ -100,7 +100,9 @@ def wait_for_cus15(args, campaign):
 
 def run_scale(args, scale, placements):
     problem=getattr(args,'problem','vrptw').upper()
-    campaign=args.output/f'E1_{problem}{scale}_S3009_E1500_{args.profile.upper()}_V1'
+    version='V2' if args.profile=='2080ti_a_ev15' else 'V1'
+    server='2080ti_a' if args.profile=='2080ti_a_ev15' else args.profile
+    campaign=args.output/f'E1_{problem}{scale}_S3009_E1500_{args.profile.upper()}_{version}'
     defaults={'ppo_base':32,'ppo_rdi_agda':32 if args.profile=='2080ti_a_ev15' else 14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
     chunks={m:int(os.environ.get('E1_'+m.upper()+'_PPO_CHUNK',defaults[m])) for m in placements}
     expert=int(os.environ.get('E1_EXPERT_CHUNK',128 if args.profile=='a6000' else 32))
@@ -108,8 +110,8 @@ def run_scale(args, scale, placements):
     print(json.dumps(dict(campaign=str(campaign),scale=scale,placements=placements,chunks=chunks,expert_chunk=expert,
           protocol='scratch seed3009; 1500 online loops; global batch64; n_traj50; PPO passes4; minibatches4; K50; validation every50')),flush=True)
     if not args.execute:return
-    manifest=prepare(campaign,args.data_root,scale,args.profile,placements,chunks,expert,problem_type=problem.lower())
-    scheduler=campaign/f'scheduler_{args.profile}'
+    manifest=prepare(campaign,args.data_root,scale,server,placements,chunks,expert,problem_type=problem.lower())
+    scheduler=campaign/f'scheduler_{server}'
     if not (scheduler/'pid.json').exists():
         for method in placements:
             spec=manifest['methods'][method];run=Path(spec['run_dir'])
@@ -119,7 +121,7 @@ def run_scale(args, scale, placements):
             run_command(manifest,'smoke','--campaign',campaign,'--method',method,*retry)
         if args.profile=='2080ti_a' and scale==50:
             wait_for_cus15(args,campaign)
-        run_command(manifest,'launch','--campaign',campaign,'--server',args.profile,'--execute')
+        run_command(manifest,'launch','--campaign',campaign,'--server',server,'--execute')
         if args.profile=='2080ti_a' and scale==50:
             atomic_json(campaign/'handoff_status.json',dict(state='handed_off',predecessor=str(args.output/'E1_VRPTW15_S3009_E1500_2080TI_A_V1'),target=str(campaign),gpus=[0,1],waits_for_cus100=False,updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
     else:
