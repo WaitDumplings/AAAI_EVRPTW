@@ -38,20 +38,20 @@ def csv_write(path,fields,rows):
     tmp.replace(path)
 
 
-def ensure_reports(reports):
+def ensure_reports(reports, problem="VRPTW"):
     reports.mkdir(parents=True,exist_ok=True)
-    overview=reports/'CVRP_VRPTW_test_overview_20261013.csv'
+    overview=reports/('EVRPTW_test_overview.csv' if problem=='EVRPTW' else 'CVRP_VRPTW_test_overview_20261013.csv')
     with (reports/'.test_report.lock').open('a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         rows=csv_read(overview) if overview.exists() else []
         for scale in (15,50,100):
-            path=reports/f'E1_VRPTW{scale}_partial_20261013';path.mkdir(exist_ok=True)
+            path=reports/f'E1_{problem}{scale}_partial_20261013';path.mkdir(exist_ok=True)
             for label in METHODS:
-                if not any(r['problem']=='VRPTW' and r['customers']==str(scale) and r['method']==label for r in rows):
+                if not any(r['problem']==problem and r['customers']==str(scale) and r['method']==label for r in rows):
                     r=dict.fromkeys(FIELDS,'TBD');r.update(method=label,status='Independent test result not yet received',test_count='1000')
-                    rows.append(dict(problem='VRPTW',customers=str(scale),**r))
+                    rows.append(dict(problem=problem,customers=str(scale),**r))
             main=path/'main_results_partial.csv'
-            if not main.exists():csv_write(main,FIELDS,[{k:r[k] for k in FIELDS} for r in rows if r['problem']=='VRPTW' and r['customers']==str(scale)])
+            if not main.exists():csv_write(main,FIELDS,[{k:r[k] for k in FIELDS} for r in rows if r['problem']==problem and r['customers']==str(scale)])
         csv_write(overview,['problem','customers',*FIELDS],rows)
     return overview
 
@@ -98,7 +98,8 @@ def wait_for_cus15(args, campaign):
 
 
 def run_scale(args, scale, placements):
-    campaign=args.output/f'E1_VRPTW{scale}_S3009_E1500_{args.profile.upper()}_V1'
+    problem=getattr(args,'problem','vrptw').upper()
+    campaign=args.output/f'E1_{problem}{scale}_S3009_E1500_{args.profile.upper()}_V1'
     defaults={'ppo_base':32,'ppo_rdi_agda':14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
     chunks={m:int(os.environ.get('E1_'+m.upper()+'_PPO_CHUNK',defaults[m])) for m in placements}
     expert=int(os.environ.get('E1_EXPERT_CHUNK',128 if args.profile=='a6000' else 32))
@@ -106,7 +107,7 @@ def run_scale(args, scale, placements):
     print(json.dumps(dict(campaign=str(campaign),scale=scale,placements=placements,chunks=chunks,expert_chunk=expert,
           protocol='scratch seed3009; 1500 online loops; global batch64; n_traj50; PPO passes4; minibatches4; K50; validation every50')),flush=True)
     if not args.execute:return
-    manifest=prepare(campaign,args.data_root,scale,args.profile,placements,chunks,expert)
+    manifest=prepare(campaign,args.data_root,scale,args.profile,placements,chunks,expert,problem_type=problem.lower())
     scheduler=campaign/f'scheduler_{args.profile}'
     if not (scheduler/'pid.json').exists():
         for method in placements:
@@ -122,11 +123,11 @@ def run_scale(args, scale, placements):
             atomic_json(campaign/'handoff_status.json',dict(state='handed_off',predecessor=str(args.output/'E1_VRPTW15_S3009_E1500_2080TI_A_V1'),target=str(campaign),gpus=[0,1],waits_for_cus100=False,updated_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())))
     else:
         print(f'Existing scheduler preserved: {scheduler}',flush=True)
-    reports=ROOT/'results/e1/reports';overview=ensure_reports(reports)
+    reports=ROOT/'results/e1/reports';overview=ensure_reports(reports,problem)
     watcher=campaign/'test_watcher';watcher.mkdir(exist_ok=True)
     plan=dict(batch_size=8,poll_seconds=60,overview=str(overview),renderer=str(ROOT/'scripts/render_e1_test_table.py'),
-              jobs=[dict(id=f'vrptw{scale}_{m}',campaign=str(campaign),method=m,label=LABELS[m],problem='VRPTW',customers=scale,
-                         gpus=gpus,scheduler=str(scheduler),report_dir=str(reports/f'E1_VRPTW{scale}_partial_20261013')) for m,gpus in placements.items()])
+              jobs=[dict(id=f'{problem.lower()}{scale}_{m}',campaign=str(campaign),method=m,label=LABELS[m],problem=problem,customers=scale,
+                         gpus=gpus,scheduler=str(scheduler),report_dir=str(reports/f'E1_{problem}{scale}_partial_20261013')) for m,gpus in placements.items()])
     status=watcher/'status.json'
     if status.exists():
         s=json.loads(status.read_text());pid=s.get('pid',0);proc=Path(f'/proc/{pid}/cmdline')
@@ -142,16 +143,18 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile',choices=PROFILES)
     parser.add_argument('--execute',action='store_true')
+    parser.add_argument('--problem',choices=('vrptw','evrptw'),default='vrptw')
     parser.add_argument('--scale',type=int,choices=(15,50,100))
     parser.add_argument('--data-root',type=Path,default=ROOT.parent/'AAAI_Dataset')
     parser.add_argument('--output',type=Path,default=ROOT/'results/e1')
     args=parser.parse_args();args.data_root=args.data_root.resolve();args.output=args.output.resolve()
+    if args.problem=='evrptw' and args.profile!='a6000':parser.error('EVRPTW launcher currently supports a6000 only')
     choices=[(n,g) for n,g in PROFILES[args.profile] if args.scale is None or n==args.scale]
     if not choices:parser.error('Scale is not assigned to this profile')
     if not args.execute:
         for n,g in choices:run_scale(args,n,g)
         return
-    launcher=args.output/'launchers'/f'VRPTW_{args.profile}_V1';launcher.mkdir(parents=True,exist_ok=True)
+    launcher=args.output/'launchers'/f'{args.problem.upper()}_{args.profile}_V1';launcher.mkdir(parents=True,exist_ok=True)
     # Independent scale workers allow Cus15 to proceed while Cus50 audits experts.
     children=[]
     for n,g in choices:
@@ -161,7 +164,7 @@ def main():
             return
         log=(launcher/f'cus{n}.log').open('a')
         cmd=[sys.executable,str(Path(__file__).resolve()),args.profile,'--execute','--scale',str(n),
-             '--data-root',str(args.data_root),'--output',str(args.output)]
+             '--data-root',str(args.data_root),'--output',str(args.output),'--problem',args.problem]
         child=subprocess.Popen(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL)
         children.append((child,log))
     codes=[]

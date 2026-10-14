@@ -13,6 +13,9 @@ DISTANCE_RTOL = 1e-6
 
 def validate_routes(instance, routes, reported_cost=None):
     """Require complete depot-to-depot routes; never repair an incomplete route."""
+    if getattr(instance, 'num_charging_stations', 0) or getattr(instance, 'metadata', {}).get('charging_constraint') is True:
+        from e1.evrptw_contract import validate_evrptw_routes
+        return validate_evrptw_routes(instance, routes, reported_cost)
     n = int(instance.num_customers)
     d = np.asarray(instance.distance_matrix_km, dtype=np.float64)
     demand = np.asarray(instance.demands_cm3, dtype=np.float64)

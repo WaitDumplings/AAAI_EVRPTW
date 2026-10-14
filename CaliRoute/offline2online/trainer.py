@@ -1834,7 +1834,7 @@ def evaluate_fixed_dataset(agent: Agent, cfg: dict[str, Any], seed: int, epoch: 
     was_training = agent.training
     try:
         with _isolated_eval_rng(eval_seed, device):
-            if cfg.get("experiment_protocol", {}).get("schema") in ("aaai_e1_cvrp15_v1", "aaai_e1_cvrp50_v1", "aaai_e1_cvrp100_v1", "aaai_e1_vrptw100_v1"):
+            if cfg.get("experiment_protocol", {}).get("schema") in ("aaai_e1_cvrp15_v1", "aaai_e1_cvrp50_v1", "aaai_e1_cvrp100_v1", "aaai_e1_vrptw100_v1", "aaai_e1_evrptw15_v1", "aaai_e1_evrptw50_v1", "aaai_e1_evrptw100_v1"):
                 from e1.evaluation import evaluate_controlled_agent
                 return evaluate_controlled_agent(agent, cfg, seed=seed, epoch=epoch, device=device)
             return _evaluate_fixed_dataset_impl(agent, cfg, seed, epoch, device, eval_seed=eval_seed)

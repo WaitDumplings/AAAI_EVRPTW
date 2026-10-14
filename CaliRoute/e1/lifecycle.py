@@ -33,7 +33,7 @@ def _config(manifest, method):
 
 def _checkpoint_dir(manifest, cfg):
     return (Path(manifest.get('artifacts_root', str(Path(manifest['code_root']) / 'results'))) / 'checkpoints'
-            / f'Cus_{cfg["data"]["num_customers"]}_CS_0' / cfg['run_name']
+            / f'Cus_{cfg["data"]["num_customers"]}_CS_{cfg["data"].get("num_charging_stations", 0)}' / cfg['run_name']
             / f'seed_{cfg["experiment_protocol"]["training_seed"]}')
 
 
@@ -55,7 +55,7 @@ def assert_can_start(manifest, method):
         checkpoint = _checkpoint_dir(manifest, cfg)
         artifacts.append(checkpoint)
         artifacts.append(Path(manifest['code_root']) / 'results/logs'
-            / f'Cus_{cfg["data"]["num_customers"]}_CS_0' / cfg['run_name']
+            / f'Cus_{cfg["data"]["num_customers"]}_CS_{cfg["data"].get("num_charging_stations", 0)}' / cfg['run_name']
             / f'seed_{cfg["experiment_protocol"]["training_seed"]}')
     existing = [str(path) for path in artifacts if path.exists()]
     if existing:

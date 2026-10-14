@@ -154,7 +154,7 @@ def _process_env(manifest,gpus=None):
 
 
 def _checkpoint_dir(manifest,cfg):
-    return Path(manifest['code_root'])/'results/checkpoints'/f'Cus_{cfg["data"]["num_customers"]}_CS_0'/cfg['run_name']/f'seed_{cfg["experiment_protocol"]["training_seed"]}'
+    return Path(manifest['code_root'])/'results/checkpoints'/f'Cus_{cfg["data"]["num_customers"]}_CS_{cfg["data"].get("num_charging_stations", 0)}'/cfg['run_name']/f'seed_{cfg["experiment_protocol"]["training_seed"]}'
 
 
 def _small_assets(manifest,method):
