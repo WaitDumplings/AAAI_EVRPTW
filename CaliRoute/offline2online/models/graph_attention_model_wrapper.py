@@ -256,7 +256,7 @@ class Backbone(nn.Module):
         if use_joint_graph_encoder:
             self.model_integration_settings.update(use_joint_graph_encoder=True,
                 joint_graph_edge_dim=joint_graph_edge_dim, joint_graph_dropout=joint_graph_dropout)
-        if e1_no_road_task not in ("cvrp", "vrptw"):
+        if e1_no_road_task not in ("cvrp", "vrptw", "evrptw"):
             raise ValueError("Unsupported no-road input task")
         self.e1_no_road_task = e1_no_road_task
         self.e1_no_road_input = bool(e1_no_road_input)
@@ -465,8 +465,9 @@ class Backbone(nn.Module):
 
     def _build_state(self, obs: dict[str, Any]) -> StateWrapper:
         if self.e1_no_road_input:
-            from .no_road_observation import cvrp_no_road_observation, vrptw_no_road_observation
-            boundary = vrptw_no_road_observation if self.e1_no_road_task == "vrptw" else cvrp_no_road_observation
+            from .no_road_observation import cvrp_no_road_observation, vrptw_no_road_observation, evrptw_no_road_observation
+            boundary = {"cvrp": cvrp_no_road_observation, "vrptw": vrptw_no_road_observation,
+                        "evrptw": evrptw_no_road_observation}[self.e1_no_road_task]
             obs = boundary(obs)
         return StateWrapper(obs, device=self.device, problem=self.problem.NAME)
 

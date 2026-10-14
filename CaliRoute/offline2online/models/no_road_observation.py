@@ -58,3 +58,19 @@ def vrptw_no_road_observation(obs):
     for key in ('time_window', 'service_time', 'current_time'):
         out[key] = source[key]
     return out
+
+
+def evrptw_no_road_observation(obs):
+    """Preserve electric/time resources and physical mask; exclude road edge inputs."""
+    from .graph_attention_model_wrapper import prepare_observation_batch
+    source = prepare_observation_batch(obs)
+    resources = {'time_window', 'service_time', 'current_time', 'current_battery',
+                 'remaining_battery', 'battery_capacity', 'full_charge_time', 'fixed_full_charge'}
+    out = {k: v for k, v in source.items() if k in KEEP or k in resources}
+    like = source['cus_loc']
+    batch, customers = like.shape[:2]
+    nodes = 1 + customers + source['rs_loc'].shape[1]
+    for key in ('edge_distance', 'edge_time', 'edge_energy'):
+        out[key] = (torch.zeros((batch, nodes, nodes), device=like.device, dtype=torch.float32)
+                    if torch.is_tensor(like) else np.zeros((batch, nodes, nodes), dtype=np.float32))
+    return out

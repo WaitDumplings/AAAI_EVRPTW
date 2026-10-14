@@ -29,7 +29,7 @@ def configuration(method, data, run, unit, backup, customers, world_size, ppo_ch
     if method in EXPERT_METHODS:
         cfg['offline']['expert_dataset_path'] = cfg['data']['train_dataset_path']
     if problem_type=='evrptw':
-        if method!='slppo':raise ValueError('This EVRPTW release enables SL-PPO only')
+        if method not in ('slppo','ppo_base','ppo_rdi_agda'):raise ValueError('Unsupported EVRPTW method')
         stations={15:3,50:10,100:20}[customers]
         cap=4*(1+customers+stations)
         cfg['data']['num_charging_stations']=stations
@@ -37,8 +37,10 @@ def configuration(method, data, run, unit, backup, customers, world_size, ppo_ch
         cfg['evaluation']['eval_max_steps']=cap
         cfg['experiment_protocol'].update(decode_cap=cap,charging_mode='fixed_full',physical_charging_stations=stations)
     if method == 'ppo_base':
-        cfg['model']['e1_no_road_task'] = 'vrptw'
+        cfg['model']['e1_no_road_task'] = problem_type
         cfg['experiment_protocol']['base_preserves'] = ['coordinates','demand','capacity','time_windows','service_time','current_clock','history','physical_feasibility_mask']
+        if problem_type=='evrptw':
+            cfg['experiment_protocol']['base_preserves'] += ['charging_station_coordinates','current_battery','remaining_battery','battery_capacity','full_charge_time','fixed_full_charge']
     cfg['experiment_protocol'].update(schema=f'aaai_e1_{problem_type}{customers}_v1', task=f'{problem_type}{customers}',
                                      actor_sha256=content_hash(cfg['model']))
     return cfg

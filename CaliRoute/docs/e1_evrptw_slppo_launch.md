@@ -72,3 +72,23 @@ scale, preserving failures and reporting zero cost mismatches. These reduced
 smoke runs do not estimate solution quality, full-dataset acceptance or A6000
 memory use, and are never published as E1 test results. A6000 GPU preflight runs
 on the target server before the formal scratch run.
+
+## Local four-card host: Cus15 PPO comparison
+
+```bash
+bash scripts/run_e1_evrptw15_ppo_2080ti_a.sh --execute
+```
+
+GPU 0+1 run PPO base; GPU 2+3 run PPO + RDI + AGDA. Each is a two-rank
+experiment with batch 32 per GPU (global 64), n_traj 50 and PPO passes 4,
+from scratch for 1500 epochs. Both PPO time chunks default to 32. CPU smoke,
+full-size GPU preflight, frozen sources, checkpoint backups and automatic best
+checkpoint test are shared with the existing E1 lifecycle.
+
+The EVRPTW base preserves station coordinates, battery state/capacity, charging
+duration, time windows, service time, clock and physical action masks. Road
+distance/time/energy matrices and derived graph input contexts are excluded at
+the actor/critic boundary. The simulator and reward retain real physical costs.
+
+Campaign: `results/e1/E1_EVRPTW15_S3009_E1500_2080TI_A_EV15_V1`.
+Progress: `scheduler_2080ti_a_ev15/status.json` inside that campaign.

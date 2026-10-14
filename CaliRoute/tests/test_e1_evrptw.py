@@ -82,3 +82,42 @@ def test_ev_reports_do_not_replace_vrptw(tmp_path):
     new=m.ensure_reports(tmp_path,'EVRPTW')
     assert new.name=='EVRPTW_test_overview.csv' and old.read_bytes()==before
     assert {r['problem'] for r in csv.DictReader(new.open())}=={'EVRPTW'}
+
+
+def test_electric_base_hides_road_inputs_but_keeps_resources(tmp_path):
+    from copy import deepcopy
+    import inspect
+    import torch
+    from offline2online.models import Agent
+    from offline2online.model_integration import configure, checkpoint_metadata, load_checkpoint_profile
+    from EVRPTW_Benchmark.Reinforcement_Learning.TERRAN.env_factory import make_terran_env
+    from offline2online.models.no_road_observation import evrptw_no_road_observation
+    cfg=configuration('ppo_base',tmp_path,tmp_path/'runs/ppo_base',40,tmp_path/'backup',15,2,32,32,problem_type='evrptw')
+    cfg['model'].update(embedding_dim=32,n_encode_layers=1)
+    agent=Agent(device='cpu',**{k:v for k,v in cfg['model'].items() if k in inspect.signature(Agent).parameters})
+    configure(agent,cfg);agent.eval()
+    env=make_terran_env(instance=tiny(),n_traj=2,use_jit_mask=False,prefer_explicit_edge_matrices=True)
+    try:
+        obs=env.reset()[0];changed=deepcopy(obs)
+        for key in ('edge_distance','edge_time','edge_energy'):
+            changed[key]=np.full_like(changed[key],99.)
+        changed['node_input_context']=np.ones((4,8))*999
+        changed['graph_input_context']=np.ones(12)*999
+        changed['future_road_summary']=np.array([999.])
+        a=evrptw_no_road_observation(obs);b=evrptw_no_road_observation(changed)
+        for key in ('time_window','service_time','current_time','current_battery','remaining_battery','battery_capacity','full_charge_time','fixed_full_charge','rs_loc','action_mask'):
+            np.testing.assert_array_equal(a[key],b[key])
+        assert 'future_road_summary' not in b
+        for k in ('edge_distance','edge_time','edge_energy'):assert not np.any(b[k])
+        with torch.no_grad():
+            x=agent.backbone(obs);y=agent.backbone(changed)
+            assert torch.equal(x[0],y[0]) and torch.equal(x[1],y[1])
+            assert torch.equal(agent.critic(x),agent.critic(y))
+            cache=agent.backbone.encode(obs)
+            x=agent.backbone.decode(obs,cache);y=agent.backbone.decode(changed,cache)
+            assert torch.equal(x[0],y[0])
+        prof={'config':cfg,**checkpoint_metadata(agent,cfg)}
+        assert not load_checkpoint_profile(agent,prof,resume=True)['migrated']
+        assert cfg['training']['num_envs_per_gpu']==32
+        assert cfg['model']['e1_no_road_task']=='evrptw'
+    finally:env.close()

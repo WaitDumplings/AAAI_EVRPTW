@@ -33,7 +33,7 @@ def _canonical_model(model):
     if no_road:
         result[E1_NO_ROAD_FLAG] = True
         task = model.get('e1_no_road_task', 'cvrp')
-        if task not in ('cvrp', 'vrptw'):raise ValueError('Unsupported no-road task')
+        if task not in ('cvrp', 'vrptw', 'evrptw'):raise ValueError('Unsupported no-road task')
         if task != 'cvrp':result['e1_no_road_task'] = task
     e1_row = model.get(E1_ROW_FLAG, False)
     if not isinstance(e1_row, bool):

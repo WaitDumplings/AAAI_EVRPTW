@@ -21,6 +21,7 @@ PROFILES={
  '2080ti_b':[(50,{'awbc':[0],'dapg':[1]}),(15,{'awbc':[2],'dapg':[3]})],
  '2080ti_a':[(15,{'ppo_base':[0],'ppo_rdi_agda':[1]}),(50,{'ppo_base':[0],'ppo_rdi_agda':[1]})],
  '2080ti_3':[(100,{'slppo':[0,1]})],
+ '2080ti_a_ev15':[(15,{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]})],
 }
 LABELS={'ppo_base':'PPO (base)','ppo_rdi_agda':'PPO (RDI+AGDA)','awbc':'AWBC','dapg':'DAPG','slppo':'SL-PPO'}
 METHODS=[*LABELS.values(),'RRNCO','RADAR','Gurobi (2 h, 1 thread)']
@@ -100,7 +101,7 @@ def wait_for_cus15(args, campaign):
 def run_scale(args, scale, placements):
     problem=getattr(args,'problem','vrptw').upper()
     campaign=args.output/f'E1_{problem}{scale}_S3009_E1500_{args.profile.upper()}_V1'
-    defaults={'ppo_base':32,'ppo_rdi_agda':14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
+    defaults={'ppo_base':32,'ppo_rdi_agda':32 if args.profile=='2080ti_a_ev15' else 14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
     chunks={m:int(os.environ.get('E1_'+m.upper()+'_PPO_CHUNK',defaults[m])) for m in placements}
     expert=int(os.environ.get('E1_EXPERT_CHUNK',128 if args.profile=='a6000' else 32))
     if min([*chunks.values(),expert])<1:raise ValueError('Chunks must be positive')
@@ -148,7 +149,8 @@ def main():
     parser.add_argument('--data-root',type=Path,default=ROOT.parent/'AAAI_Dataset')
     parser.add_argument('--output',type=Path,default=ROOT/'results/e1')
     args=parser.parse_args();args.data_root=args.data_root.resolve();args.output=args.output.resolve()
-    if args.problem=='evrptw' and args.profile!='a6000':parser.error('EVRPTW launcher currently supports a6000 only')
+    if args.problem=='evrptw' and args.profile not in ('a6000','2080ti_a_ev15'):parser.error('Unsupported EVRPTW profile')
+    if args.profile=='2080ti_a_ev15' and args.problem!='evrptw':parser.error('This profile requires --problem evrptw')
     choices=[(n,g) for n,g in PROFILES[args.profile] if args.scale is None or n==args.scale]
     if not choices:parser.error('Scale is not assigned to this profile')
     if not args.execute:
