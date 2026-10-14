@@ -25,7 +25,7 @@ bash scripts/run_e1_vrptw_batch.sh a6000 --execute
 # On B:
 bash scripts/run_e1_vrptw_batch.sh 2080ti_b --execute
 # On the three-card server:
-bash scripts/run_e1_vrptw_batch.sh 2080ti_3 --execute
+bash scripts/run_e1_vrptw100_slppo_2080ti3.sh --execute
 # Local A (already started; do not duplicate):
 bash scripts/run_e1_vrptw_batch.sh 2080ti_a --execute
 ```
@@ -60,3 +60,26 @@ used. Only accepted results update per-scale main/partial CSVs, evidence JSON,
 subset metrics remain TBD until aligned per-instance results are collected.
 Remote tables initially contain placeholders for unsynchronized results; they
 are not a replacement for the consolidated report on the local server.
+
+## Three-card server: VRPTW Cus100 SL-PPO
+
+The dedicated shell is an alias for the existing `2080ti_3` profile, so both
+entry points share the same campaign and do not create duplicate experiments.
+Use GPU0+1 together (32 instances per rank, global batch64); GPU2 is unused.
+It starts from scratch, with no initialization checkpoint to copy. All data,
+including VRPTW train expert solutions and independent test release, must be
+available under `AAAI_Dataset` (or `E1_DATA_ROOT`). Preparation validates these
+inputs before training. No local training is started by a preview.
+
+```bash
+git fetch origin
+git switch fix/e1-no-road-base-20261012
+git pull --ff-only
+cd CaliRoute
+bash scripts/run_e1_vrptw100_slppo_2080ti3.sh           # preview
+bash scripts/run_e1_vrptw100_slppo_2080ti3.sh --execute # background launch
+```
+
+Campaign: `results/e1/E1_VRPTW100_S3009_E1500_2080TI_3_V1`.
+Read `scheduler_2080ti_3/status.json` and `test_watcher/status.json` inside it.
+Preparation log: `results/e1/launchers/VRPTW_2080ti_3_V1/cus100.log`.
