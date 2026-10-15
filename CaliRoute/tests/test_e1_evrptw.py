@@ -123,7 +123,8 @@ def test_electric_base_hides_road_inputs_but_keeps_resources(tmp_path):
     finally:env.close()
 
 
-def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch):
+@pytest.mark.parametrize('scale',[15,100])
+def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch, scale):
     from types import SimpleNamespace
     from e1.runner import parser as build_parser
     spec=importlib.util.spec_from_file_location('local_ev_batch',Path(__file__).parents[1]/'scripts/run_e1_vrptw_batch.py')
@@ -140,6 +141,6 @@ def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch):
         if parsed.command=='launch':assert parsed.server=='2080ti_a'
     monkeypatch.setattr(m,'prepare',prepare);monkeypatch.setattr(m,'run_command',command)
     monkeypatch.setattr(m.subprocess,'run',lambda *a,**k:None)
-    args=SimpleNamespace(problem='evrptw',profile='2080ti_a_ev15',output=tmp_path/'campaigns',data_root=tmp_path/'data',execute=True)
-    m.run_scale(args,15,{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]})
+    args=SimpleNamespace(problem='evrptw',profile=f'2080ti_a_ev{scale}',output=tmp_path/'campaigns',data_root=tmp_path/'data',execute=True)
+    m.run_scale(args,scale,{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]})
     assert calls==['smoke','smoke','launch']

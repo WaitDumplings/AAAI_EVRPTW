@@ -92,3 +92,22 @@ the actor/critic boundary. The simulator and reward retain real physical costs.
 
 Campaign: `results/e1/E1_EVRPTW15_S3009_E1500_2080TI_A_EV15_V2`.
 Progress: `scheduler_2080ti_a/status.json` inside that campaign.
+
+## Local four-card host: Cus100 PPO comparison
+
+```bash
+bash scripts/run_e1_evrptw100_ppo_2080ti_a.sh --execute
+```
+
+GPU 0+1 run the no-road PPO base and GPU 2+3 run PPO + RDI + AGDA, each from
+scratch for 1500 epochs, seed 3009, global batch 64 (32 per GPU), n_traj 50,
+PPO passes 4. Cus100 uses 20 physical stations and a 484-step cap, matching the
+4x-terminal environment cap. PPO time chunks are 32 for base and 8 for graph
+RDI+AGDA to fit the 11 GiB cards; this does not change sampling/update budgets.
+GPU preflight must pass before each formal run. Best-checkpoint test runs
+automatically at the end and updates the EVRPTW report.
+
+Campaign: `results/e1/E1_EVRPTW100_S3009_E1500_2080TI_A_EV100_V1`.
+Preparation log: `results/e1/launchers/EVRPTW_2080ti_a_ev100_V1/cus100.log`.
+Training/test status: `scheduler_2080ti_a/status.json` and
+`test_watcher/status.json` inside the campaign.
