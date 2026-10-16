@@ -386,16 +386,51 @@ class ExpertReplayBuffer:
         return obs_batch, action_tensor, objective_tensor
 
 
-def compute_bc_loss(agent, buffer: ExpertReplayBuffer, batch_size: int, device: str | torch.device):
+def _expert_policy_statistics(agent, obs_batch, action, microbatch_size=None):
+    """Bound activation memory without resampling or changing loss reduction.
+
+    Checkpoint each microbatch so graphs are recomputed during backward instead
+    of retaining all expert activations. AWBC weights are still computed over
+    the complete sampled batch by the caller. The legacy path is the default.
+    """
+    size = action.shape[0]
+    chunk = size if microbatch_size is None else int(microbatch_size)
+    if chunk <= 0:
+        raise ValueError("expert microbatch size must be positive")
+    if chunk < size and any(isinstance(m, torch.nn.modules.batchnorm._BatchNorm)
+                            and m.training for m in agent.modules()):
+        raise ValueError("Expert microbatching cannot preserve training BatchNorm semantics")
+
+    def policy(obs, selected_action):
+        _, logprob, entropy, _ = agent.get_action_and_value(obs, action=selected_action)
+        return logprob, entropy
+
+    logprobs, entropies, predictions = [], [], []
+    for start in range(0, size, chunk):
+        stop = min(start + chunk, size)
+        obs = {key: value[start:stop] if isinstance(value, (np.ndarray, torch.Tensor))
+               and value.ndim > 0 and value.shape[0] == size else value
+               for key, value in obs_batch.items()}
+        selected = action[start:stop]
+        if chunk < size and torch.is_grad_enabled():
+            from torch.utils.checkpoint import checkpoint
+            logprob, entropy = checkpoint(policy, obs, selected, use_reentrant=False)
+        else:
+            logprob, entropy = policy(obs, selected)
+        logprobs.append(logprob.reshape(-1))
+        entropies.append(entropy.reshape(-1))
+        with torch.no_grad():
+            _, logits = agent(obs)
+            predictions.append(logits.reshape(-1, logits.size(-1)).argmax(dim=-1))
+    return torch.cat(logprobs), torch.cat(entropies), torch.cat(predictions)
+
+
+def compute_bc_loss(agent, buffer: ExpertReplayBuffer, batch_size: int, device: str | torch.device, *, microbatch_size=None):
     obs_batch, action = buffer.sample_step_batch(batch_size)
     action = action.to(device)
-    _, logprob, entropy, _ = agent.get_action_and_value(obs_batch, action=action)
-    logprob_flat = logprob.reshape(-1)
-    entropy_flat = entropy.reshape(-1)
+    logprob_flat, entropy_flat, pred_action = _expert_policy_statistics(agent, obs_batch, action, microbatch_size)
     loss = -logprob_flat.mean()
     with torch.no_grad():
-        _, logits = agent(obs_batch)
-        pred_action = logits.reshape(-1, logits.size(-1)).argmax(dim=-1)
         acc = (pred_action == action.reshape(-1)).float().mean()
     return loss, {
         "bc_loss": float(loss.detach().cpu().item()),
@@ -416,13 +451,12 @@ def compute_awbc_loss(
     normalize: str = "p95",
     baseline: str = "batch_mean",
     baseline_objective: float | None = None,
+    microbatch_size=None,
 ):
     obs_batch, action, objective = buffer.sample_step_batch_with_objectives(batch_size)
     action = action.to(device)
     objective = objective.to(device)
-    _, logprob, entropy, _ = agent.get_action_and_value(obs_batch, action=action)
-    logprob_flat = logprob.reshape(-1)
-    entropy_flat = entropy.reshape(-1)
+    logprob_flat, entropy_flat, pred_action = _expert_policy_statistics(agent, obs_batch, action, microbatch_size)
     obj_flat = objective.reshape(-1).to(logprob_flat.dtype)
 
     with torch.no_grad():
@@ -449,8 +483,6 @@ def compute_awbc_loss(
     denom = weights.sum().clamp_min(1.0)
     loss = -(weights * logprob_flat).sum() / denom
     with torch.no_grad():
-        _, logits = agent(obs_batch)
-        pred_action = logits.reshape(-1, logits.size(-1)).argmax(dim=-1)
         acc = (pred_action == action.reshape(-1)).float().mean()
         active = weights > 0
     return loss, {

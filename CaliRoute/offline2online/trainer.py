@@ -4619,7 +4619,8 @@ def _run_bc_updates(
     for _ in range(int(updates)):
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(device, amp_enabled):
-            loss, info = compute_bc_loss(agent, expert_buffer, batch_size=batch_size, device=device)
+            loss, info = compute_bc_loss(agent, expert_buffer, batch_size=batch_size, device=device,
+                                         microbatch_size=offline_cfg.get("expert_microbatch_size"))
         _backward(float(coef) * loss, scaler, amp_enabled)
         _optimizer_step(optimizer, agent, max_grad_norm, scaler, amp_enabled)
         losses.append(float(info["bc_loss"]))
@@ -6437,6 +6438,7 @@ def train_from_config(
                                     expert_buffer,
                                     batch_size=dapg_bc_batch_size,
                                     device=device,
+                                    microbatch_size=offline_cfg.get("expert_microbatch_size"),
                                 )
                             _backward(float(dapg_demo_coef) * demo_loss, scaler, amp_enabled)
                             dapg_bc_losses.append(float(demo_info["bc_loss"]))
@@ -6458,6 +6460,7 @@ def train_from_config(
                                     expert_buffer,
                                     batch_size=dapg_bc_batch_size,
                                     device=device,
+                                    microbatch_size=offline_cfg.get("expert_microbatch_size"),
                                     eta=awbc_eta,
                                     normalize=awbc_normalize,
                                     baseline=awbc_baseline,

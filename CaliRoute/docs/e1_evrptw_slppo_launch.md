@@ -111,3 +111,63 @@ Campaign: `results/e1/E1_EVRPTW100_S3009_E1500_2080TI_A_EV100_V1`.
 Preparation log: `results/e1/launchers/EVRPTW_2080ti_a_ev100_V1/cus100.log`.
 Training/test status: `scheduler_2080ti_a/status.json` and
 `test_watcher/status.json` inside the campaign.
+
+## Local four-card host: Cus15/Cus50 AWBC and DAPG
+
+```bash
+bash scripts/run_e1_evrptw_awbc_dapg_2080ti_a.sh          # preview
+bash scripts/run_e1_evrptw_awbc_dapg_2080ti_a.sh --execute # nohup + setsid
+```
+
+GPU0 runs Cus50 AWBC; GPU1 Cus50 DAPG; GPU2 Cus15 AWBC; GPU3 Cus15
+DAPG. Each independent run uses one GPU, global batch64, n_traj50, four PPO
+passes and 1500 online loops. The existing E1 method presets retain their own
+BC warmup and expert losses; these additional loops are recorded separately
+from the online budget. Models and reward definitions match the other E1
+expert-method runs. PPO chunks default to 8 for Cus50 and 32 for Cus15;
+these are execution settings, not changes to batch or optimizer budgets.
+Cus50 keeps 512 sampled expert transitions per loss, computed in microbatches
+of 64 with activation checkpointing; AWBC weights use the full sampled batch.
+Loss/gradient equivalence is tested for BC, DAPG and AWBC.
+
+Training experts must pass independent EV energy/time/capacity validation and
+teacher-forced action replay. Each scale runs CPU training/resume checks, then
+each method runs full-batch GPU preflight before fresh formal initialization.
+Failures block the affected run. No preflight checkpoint initializes training.
+Final validation-selected best checkpoints automatically run the independent
+1000-instance test, K50, batch8, and accepted results update the EVRPTW table.
+
+Logs: `results/e1/launchers/EVRPTW_2080ti_a_ev_experts_V1/cus{15,50}.log`.
+Campaigns: `results/e1/E1_EVRPTW15_S3009_E1500_2080TI_A_EV_EXPERTS_V1`
+and `results/e1/E1_EVRPTW50_S3009_E1500_2080TI_A_EV_EXPERTS_V2`.
+Cus50 V1 failed hardware preflight before formal training (OOM); it is retained
+for audit and never supplies a training/test checkpoint.
+Each has `scheduler_2080ti_a/status.json` and `test_watcher/status.json`.
+Overrides before preparation: `E1_AWBC_PPO_CHUNK`, `E1_DAPG_PPO_CHUNK`,
+`E1_EXPERT_CHUNK`, and the shared interpreter/data/output overrides above.
+
+## Three-card 2080 Ti host: Cus50 PPO comparison
+
+```bash
+bash scripts/run_e1_evrptw50_ppo_2080ti3.sh          # preview
+bash scripts/run_e1_evrptw50_ppo_2080ti3.sh --execute # nohup + setsid
+```
+
+GPU0 runs PPO base, GPU1 PPO + RDI + AGDA, each on one GPU; GPU2 is unused.
+Both run from scratch with seed3009, batch64 per GPU/global, n_traj50, four
+PPO passes, four minibatches, 1500 online epochs and constant LR1e-4.
+Base hides road inputs while preserving physical EV resource state; enhanced
+uses the same E1 graph RDI/AGDA configuration as the other scales. The PPO
+chunks default to 32/8, respectively, subject to full-batch GPU preflight.
+No experts or initialization checkpoint are used for either PPO method.
+
+CPU smoke/resume, GPU preflight, source snapshots and GPU locks precede formal
+training. Automatic best-checkpoint test uses 1000 independent instances, K50
+and batch8; accepted tests update EVRPTW reports. Existing runs are preserved.
+
+Campaign: `results/e1/E1_EVRPTW50_S3009_E1500_2080TI_3_EV50_V1`.
+Status: `scheduler_2080ti_3/status.json` and `test_watcher/status.json` within
+that campaign. Preparation log:
+`results/e1/launchers/EVRPTW_2080ti_3_ev50_V1/cus50.log`.
+Use `E1_PPO_BASE_PPO_CHUNK` / `E1_PPO_RDI_AGDA_PPO_CHUNK` before preparation
+to adjust execution chunks; global batch and trajectory budgets stay fixed.

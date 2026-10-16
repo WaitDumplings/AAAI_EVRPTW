@@ -29,7 +29,10 @@ def configuration(method, data, run, unit, backup, customers, world_size, ppo_ch
     if method in EXPERT_METHODS:
         cfg['offline']['expert_dataset_path'] = cfg['data']['train_dataset_path']
     if problem_type=='evrptw':
-        if method not in ('slppo','ppo_base','ppo_rdi_agda'):raise ValueError('Unsupported EVRPTW method')
+        if method not in CONTROLLED:raise ValueError('Unsupported EVRPTW method')
+        if method in ('awbc','dapg') and customers>=50:
+            cfg['offline']['expert_microbatch_size']=64
+            cfg['experiment_protocol']['expert_microbatch_size']=64
         stations={15:3,50:10,100:20}[customers]
         cap=4*(1+customers+stations)
         cfg['data']['num_charging_stations']=stations
