@@ -31,8 +31,8 @@ def configuration(method, data, run, unit, backup, customers, world_size, ppo_ch
     if problem_type=='evrptw':
         if method not in CONTROLLED:raise ValueError('Unsupported EVRPTW method')
         if method in ('awbc','dapg') and customers>=50:
-            cfg['offline']['expert_microbatch_size']=64
-            cfg['experiment_protocol']['expert_microbatch_size']=64
+            cfg['offline']['expert_microbatch_size']=32 if customers==100 else 64
+            cfg['experiment_protocol']['expert_microbatch_size']=cfg['offline']['expert_microbatch_size']
         stations={15:3,50:10,100:20}[customers]
         cap=4*(1+customers+stations)
         cfg['data']['num_charging_stations']=stations

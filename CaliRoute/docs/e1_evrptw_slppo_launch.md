@@ -171,3 +171,43 @@ that campaign. Preparation log:
 `results/e1/launchers/EVRPTW_2080ti_3_ev50_V1/cus50.log`.
 Use `E1_PPO_BASE_PPO_CHUNK` / `E1_PPO_RDI_AGDA_PPO_CHUNK` before preparation
 to adjust execution chunks; global batch and trajectory budgets stay fixed.
+
+## Four-card 2080 Ti B host: Cus100 AWBC/DAPG
+
+```bash
+git fetch origin
+git switch fix/e1-no-road-base-20261012
+git pull --ff-only
+cd CaliRoute  # omit if already inside CaliRoute
+bash scripts/run_e1_evrptw100_awbc_dapg_2080ti_b.sh          # preview
+bash scripts/run_e1_evrptw100_awbc_dapg_2080ti_b.sh --execute # nohup + setsid
+```
+
+GPU0+1 run AWBC as a single two-rank experiment; GPU2+3 run DAPG likewise.
+Each method starts from scratch with seed3009, global batch64 (32 per GPU),
+n_traj50, four PPO passes, four minibatches and 1500 online loops. DAPG retains
+its three BC-only warmup loops (1503 total outer loops); AWBC has no separate
+BC warmup. The current E1 model, reward and expert-loss presets are retained.
+Both use 20 physical charging stations and a 484-step episode cap.
+
+PPO chunks default to 8. Each existing 512-transition expert sample is evaluated
+in microbatches of 32 with activation checkpointing; the full-sample BC/AWBC
+reduction and update counts are unchanged. This reduces activation memory;
+full-size two-GPU preflight on the destination host is still required and runs
+automatically. It is not a guarantee of GPU memory occupancy or throughput.
+
+The launcher audits all train experts against time, capacity, battery, charging
+and route cost, then tests CPU training/resume and full-batch GPU execution.
+Only successful preflight proceeds to a fresh formal run. Source snapshots and
+GPU locks protect existing jobs. Failures block the affected method.
+Validation is every 50 online loops; automatic test uses the validation-selected
+best checkpoint, 1000 independent instances, K50, batch8. Accepted tests update
+the EVRPTW CSV/HTML/PNG/PDF. The report marks incomplete feasible subsets.
+
+Campaign: `results/e1/E1_EVRPTW100_S3009_E1500_2080TI_B_EV100_V1`.
+Inside: `scheduler_2080ti_b/status.json` and `test_watcher/status.json`.
+Launcher log: `results/e1/launchers/EVRPTW_2080ti_b_ev100_V1/cus100.log`.
+The standard interpreter/data/output environment overrides apply. Before
+preparation, `E1_AWBC_PPO_CHUNK` and `E1_DAPG_PPO_CHUNK` can change execution
+chunks without changing optimizer budgets. Do not rerun over failed formal
+artifacts; inspect the recorded failure and explicitly resume when appropriate.

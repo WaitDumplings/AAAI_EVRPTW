@@ -25,6 +25,7 @@ PROFILES={
  '2080ti_a_ev100':[(100,{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]})],
  '2080ti_a_ev_experts':[(50,{'awbc':[0],'dapg':[1]}),(15,{'awbc':[2],'dapg':[3]})],
  '2080ti_3_ev50':[(50,{'ppo_base':[0],'ppo_rdi_agda':[1]})],
+ '2080ti_b_ev100':[(100,{'awbc':[0,1],'dapg':[2,3]})],
 }
 LABELS={'ppo_base':'PPO (base)','ppo_rdi_agda':'PPO (RDI+AGDA)','awbc':'AWBC','dapg':'DAPG','slppo':'SL-PPO'}
 METHODS=[*LABELS.values(),'RRNCO','RADAR','Gurobi (2 h, 1 thread)']
@@ -104,7 +105,7 @@ def wait_for_cus15(args, campaign):
 def run_scale(args, scale, placements):
     problem=getattr(args,'problem','vrptw').upper()
     version='V2' if args.profile=='2080ti_a_ev15' or (args.profile=='2080ti_a_ev_experts' and scale==50) else 'V1'
-    server='2080ti_a' if args.profile in ('2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts') else '2080ti_3' if args.profile=='2080ti_3_ev50' else args.profile
+    server='2080ti_a' if args.profile in ('2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts') else '2080ti_3' if args.profile=='2080ti_3_ev50' else '2080ti_b' if args.profile=='2080ti_b_ev100' else args.profile
     campaign=args.output/f'E1_{problem}{scale}_S3009_E1500_{args.profile.upper()}_{version}'
     defaults={'ppo_base':32,'ppo_rdi_agda':32 if args.profile=='2080ti_a_ev15' else 8 if args.profile=='2080ti_a_ev100' else 14,'awbc':8,'dapg':8,'slppo':32 if args.profile=='a6000' else 8}
     if args.profile=='2080ti_a_ev_experts':
@@ -158,8 +159,8 @@ def main():
     parser.add_argument('--data-root',type=Path,default=ROOT.parent/'AAAI_Dataset')
     parser.add_argument('--output',type=Path,default=ROOT/'results/e1')
     args=parser.parse_args();args.data_root=args.data_root.resolve();args.output=args.output.resolve()
-    if args.problem=='evrptw' and args.profile not in ('a6000','2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts','2080ti_3_ev50'):parser.error('Unsupported EVRPTW profile')
-    if args.profile in ('2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts','2080ti_3_ev50') and args.problem!='evrptw':parser.error('This profile requires --problem evrptw')
+    if args.problem=='evrptw' and args.profile not in ('a6000','2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts','2080ti_3_ev50','2080ti_b_ev100'):parser.error('Unsupported EVRPTW profile')
+    if args.profile in ('2080ti_a_ev15','2080ti_a_ev100','2080ti_a_ev_experts','2080ti_3_ev50','2080ti_b_ev100') and args.problem!='evrptw':parser.error('This profile requires --problem evrptw')
     choices=[(n,g) for n,g in PROFILES[args.profile] if args.scale is None or n==args.scale]
     if not choices:parser.error('Scale is not assigned to this profile')
     if not args.execute:

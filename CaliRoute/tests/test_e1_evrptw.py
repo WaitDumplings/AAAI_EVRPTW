@@ -39,20 +39,22 @@ def test_energy_charge_and_time_checked_independently():
 
 
 @pytest.mark.parametrize('method',['slppo','awbc','dapg'])
-@pytest.mark.parametrize('scale,stations,cap',[(15,3,76),(50,10,244)])
+@pytest.mark.parametrize('scale,stations,cap',[(15,3,76),(50,10,244),(100,20,484)])
 def test_electric_config_and_checkpoint_paths(tmp_path,scale,stations,cap,method):
-    cfg=configuration(method,tmp_path,tmp_path/f'runs/{method}',40,tmp_path/'backup',scale,1,32,128,problem_type='evrptw')
+    world_size=2 if scale==100 else 1
+    cfg=configuration(method,tmp_path,tmp_path/f'runs/{method}',40,tmp_path/'backup',scale,world_size,8,32,problem_type='evrptw')
     assert cfg['data']['problem_type']=='evrptw'
     assert cfg['data']['num_charging_stations']==stations
     assert cfg['training']['rollout_steps']==cfg['evaluation']['eval_max_steps']==cap
-    assert cfg['training']['num_envs_per_gpu']==64
+    assert cfg['training']['num_envs_per_gpu']==64//world_size
     assert cfg['training']['n_traj']==50 and cfg['training']['ppo_update_epochs']==4
     if method=='slppo':
         assert cfg['offline']['solution_reference_contract']=='e1_cost_incumbent_v1'
     assert cfg['offline']['strict_replay'] is True
-    if method in ('awbc','dapg') and scale==50:
+    if method in ('awbc','dapg') and scale>=50:
         assert cfg['offline']['bc_batch_size']==512
-        assert cfg['offline']['expert_microbatch_size']==64
+        assert cfg['offline']['expert_microbatch_size']==(32 if scale==100 else 64)
+        assert cfg['experiment_protocol']['expert_microbatch_size']==cfg['offline']['expert_microbatch_size']
     assert cfg['experiment_protocol']['total_online_loops']==1500
     assert '/evrptw/train/' in cfg['offline']['expert_dataset_path']
     assert f'CS_{stations}' in str(_checkpoint_dir({'code_root':str(tmp_path)},cfg))
@@ -130,7 +132,7 @@ def test_electric_base_hides_road_inputs_but_keeps_resources(tmp_path):
     finally:env.close()
 
 
-@pytest.mark.parametrize('scale,profile,placements',[(15,'2080ti_a_ev15',{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]}),(100,'2080ti_a_ev100',{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]}),(15,'2080ti_a_ev_experts',{'awbc':[2],'dapg':[3]}),(50,'2080ti_a_ev_experts',{'awbc':[0],'dapg':[1]}),(50,'2080ti_3_ev50',{'ppo_base':[0],'ppo_rdi_agda':[1]})])
+@pytest.mark.parametrize('scale,profile,placements',[(15,'2080ti_a_ev15',{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]}),(100,'2080ti_a_ev100',{'ppo_base':[0,1],'ppo_rdi_agda':[2,3]}),(15,'2080ti_a_ev_experts',{'awbc':[2],'dapg':[3]}),(50,'2080ti_a_ev_experts',{'awbc':[0],'dapg':[1]}),(50,'2080ti_3_ev50',{'ppo_base':[0],'ppo_rdi_agda':[1]}),(100,'2080ti_b_ev100',{'awbc':[0,1],'dapg':[2,3]})])
 def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch, scale,profile,placements):
     from types import SimpleNamespace
     from e1.runner import parser as build_parser
@@ -138,7 +140,7 @@ def test_local_electric_profile_uses_supported_scheduler(tmp_path, monkeypatch, 
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
     monkeypatch.setattr(m,'ROOT',tmp_path)
     calls=[]
-    expected_server='2080ti_3' if profile=='2080ti_3_ev50' else '2080ti_a'
+    expected_server='2080ti_3' if profile=='2080ti_3_ev50' else '2080ti_b' if profile=='2080ti_b_ev100' else '2080ti_a'
     assert m.PROFILES[profile]==[(scale,placements)] or profile=='2080ti_a_ev_experts'
     def prepare(folder,data,scale,server,placements,*args,**kwargs):
         assert server==expected_server
