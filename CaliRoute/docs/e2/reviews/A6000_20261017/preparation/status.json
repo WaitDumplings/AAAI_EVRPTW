@@ -1,0 +1,39 @@
+{
+  "state": "prepared_not_training",
+  "prepared_at": "2026-10-18T06:30:43.205603+00:00",
+  "pid": 2102669,
+  "formal_training_started": false,
+  "launchable": false,
+  "blockers": [
+    "rrnco_vrptw100_ppo: end-to-end E2 trainer/adapter and real-instance acceptance are not implemented",
+    "rrnco_vrptw100_awbc: end-to-end E2 trainer/adapter and real-instance acceptance are not implemented",
+    "rrnco_vrptw100_slppo: end-to-end E2 trainer/adapter and real-instance acceptance are not implemented",
+    "rrnco_vrptw100_dapg: end-to-end E2 trainer/adapter and real-instance acceptance are not implemented",
+    "RRNCO step-level PPO recurrent/static replay checks and quartet budget are pending; native E1 REINFORCE is not a PPO substitute"
+  ],
+  "datasets": {
+    "vrptw/train": {
+      "path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/vrptw/train/Cus100/instances.pkl",
+      "exists": true,
+      "sha256_verified": false
+    },
+    "vrptw/val": {
+      "path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/vrptw/val/Cus100/instances.pkl",
+      "exists": true,
+      "sha256_verified": false
+    },
+    "vrptw/test": {
+      "path": "/data/Maojie/AAAI/AAAI_Dataset/test_release/vrptw/test/Cus100/instances.pkl",
+      "exists": true,
+      "sha256_verified": false
+    }
+  },
+  "missing_data": [],
+  "plan": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_CUS100_S3009_V1_a6000/server_plan.json",
+  "runs": {
+    "rrnco_vrptw100_ppo": "pending_integration",
+    "rrnco_vrptw100_awbc": "pending_integration",
+    "rrnco_vrptw100_slppo": "pending_integration",
+    "rrnco_vrptw100_dapg": "pending_integration"
+  }
+}

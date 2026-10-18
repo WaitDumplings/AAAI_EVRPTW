@@ -1,0 +1,2 @@
+# Preserve audit diff context, including its required leading blank marker.
+patches/*.patch -whitespace

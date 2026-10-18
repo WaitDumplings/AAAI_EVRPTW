@@ -42,3 +42,20 @@ def test_disabled_and_zero_initialized_adapter_preserve_native_probabilities_and
     assert not torch.allclose(updated,expected)
     assert (updated[:,:,7]==0).all() and torch.isfinite(updated).all()
     torch.testing.assert_close(updated.sum(-1),torch.ones(2,3))
+
+
+def test_action_bias_is_added_after_native_clipping():
+    torch.manual_seed(7)
+    native=native_decoder();nodes=torch.randn(2,11,32);native.set_kv(nodes)
+    query=nodes[:,:3];load=torch.ones(2,3);mask=torch.zeros(2,3,11);mask[:,:,4]=-torch.inf
+    original=native(query,load,mask)
+    bias=torch.linspace(-2,2,11).expand(2,3,11)
+    class BiasOnly(torch.nn.Module):
+        def forward(self,*args,**kwargs):
+            return 0,0,torch.zeros(2,3,11,32),bias
+    adapter=RadarAGDADecoder(native,enabled=True);adapter.agda=BiasOnly()
+    actual=adapter(query,load,mask,node_embeddings=nodes,
+        decision_tokens=torch.zeros(2,3,1,32),candidate_features=torch.zeros(2,3,11,30),
+        system_features=torch.zeros(2,3,15))
+    expected=torch.softmax(original.log()+bias,dim=-1)
+    torch.testing.assert_close(actual,expected,atol=1e-7,rtol=1e-6)

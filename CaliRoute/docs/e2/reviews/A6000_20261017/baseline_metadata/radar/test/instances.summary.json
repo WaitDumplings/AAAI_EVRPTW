@@ -1,0 +1,49 @@
+{
+  "actual_K": [
+    50
+  ],
+  "actual_candidates": 50000,
+  "checkpoint_id": "9a26c61420b27830dab845146ecbf88967987ca6a7a699b1de8d74b10ccb2c17",
+  "cost_mismatch_candidates": 0,
+  "evaluation_batch_size": 1,
+  "failure_count": 0,
+  "feasible_count": 1000,
+  "feasible_instances": 1000,
+  "feasible_rate": 1.0,
+  "instances": 1000,
+  "mean_distance_km": 204.3652851530332,
+  "mean_runtime_s": 0.07344711947627365,
+  "mean_vehicle_count": 1.865,
+  "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/test/instances.jsonl",
+  "output_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+  "requested_K": [
+    50
+  ],
+  "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+  "split": "test",
+  "state": "completed",
+  "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+  "training_seeds": [
+    3009
+  ],
+  "updated": "2026-10-11T20:26:54.157208+00:00",
+  "wall_time_s": 73.54419038398191,
+  "_archive_provenance": {
+    "not_an_original_run_file": true,
+    "derived_at_utc": "2026-10-18T06:46:00.472988+00:00",
+    "source": "manifest.json.result, rechecked against original instances.jsonl",
+    "manifest_sha256": "615b24d076b35312890d7f1d662444f38c8015164a48ce3254ac4e9e12689164",
+    "instances_jsonl_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+    "generator": "scripts/derive_e2_review_test_summary.py",
+    "generator_sha256": "0a4c7b4299b20db2e0f14fffd7fbf5e5f27f330097e13229dd6433eb7a24a748",
+    "checks": {
+      "unique_instances": 1000,
+      "all_test_K50": true,
+      "feasible": 1000,
+      "mean_recomputed_cost_km": 204.3652851530332,
+      "matching_original_mean_keys": [
+        "mean_distance_km"
+      ]
+    }
+  }
+}

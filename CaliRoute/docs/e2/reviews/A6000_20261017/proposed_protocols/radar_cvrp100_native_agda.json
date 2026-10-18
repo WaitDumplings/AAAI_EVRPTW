@@ -1,0 +1,92 @@
+{
+  "status": "proposed_not_approved",
+  "panel": "E2-A",
+  "host": "radar",
+  "task": "cvrp",
+  "customers": 100,
+  "base_commit": "ca71bd3df61205992803b0f8309e6826df5f2aae",
+  "source_sha256": "c3fd4de8ccd1621c3cd69b28870ae3c037c4510f31c6ce2ad87f3a7ec3cf1ecf",
+  "initialization": "scratch",
+  "training_seed": 3009,
+  "training_pool": 5000,
+  "instance_exposures": 96000,
+  "n_traj": 50,
+  "batch": 64,
+  "batch_sequence": "../radar_batch_sequence.csv",
+  "optimizer": "Adam",
+  "lr": 0.0004,
+  "weight_decay": 1e-06,
+  "milestones": [
+    2001,
+    2101
+  ],
+  "gamma": 0.1,
+  "sampler": "without_replacement_per_pass; default_rng(3009+pass); first pass=1",
+  "native_encoder_randomness": "torch randomized SVD",
+  "preserve_plugin_initialization_rng": true,
+  "validation": {
+    "interval_exposures": 3200,
+    "K": 50,
+    "batch": 8,
+    "count": 1000,
+    "selection": "highest feasible count then smallest independently validated mean km"
+  },
+  "test": {
+    "K": 50,
+    "batch": 1,
+    "count": 1000,
+    "seed": 17003009,
+    "decode": "native_greedy_multistart",
+    "augment": 1,
+    "cap": 201
+  },
+  "datasets": {
+    "train": {
+      "coordinate_transform": "native_per_axis_minmax",
+      "count": 5000,
+      "customers": 100,
+      "demand_storage": "raw_demand_and_raw_capacity",
+      "directed": true,
+      "distance_unit": "km",
+      "npz_sha256": "10fe88aa977b70f8cf81d6cc34b35d0efd0ee204131fafca618e0d43b83afbb2",
+      "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/cvrp/train/Cus100/instances.pkl",
+      "source_sha256": "2e381c2c1d4508180b634cc76587e09e4437764d5cb24f5b47562a3e30b755b5",
+      "split": "train",
+      "metadata_sha256": "e48de5c4bc3c98ee9fd4542a3a8c1575ca77e318eae53e96795b1794c6a90685",
+      "id_list_sha256": "75faac184c111b5f488bc11ee38569b196eb5978856754e8359c7933cf0720b8",
+      "hashes_verified_now": true
+    },
+    "val": {
+      "coordinate_transform": "native_per_axis_minmax",
+      "count": 1000,
+      "customers": 100,
+      "demand_storage": "raw_demand_and_raw_capacity",
+      "directed": true,
+      "distance_unit": "km",
+      "npz_sha256": "e680547227b8991dc833002a4801f0a4575e2fff92489a6db1e3022c34cda4a1",
+      "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/cvrp/val/Cus100/instances.pkl",
+      "source_sha256": "f05de226bf129f361c6bf974795077f007daaacf47bdd3df5e88d133bd48478a",
+      "split": "val",
+      "metadata_sha256": "27568278e4f384c11748f2df629fea74e3b1d539fac91d41df5ba0ed060dbaaa",
+      "id_list_sha256": "db25d93692858c717ba8b89d9ebfd6153a69697c378e603e96bafb1b1427f02e",
+      "hashes_verified_now": true
+    },
+    "test": {
+      "coordinate_transform": "native_per_axis_minmax",
+      "count": 1000,
+      "customers": 100,
+      "demand_storage": "raw_demand_and_raw_capacity",
+      "directed": true,
+      "distance_unit": "km",
+      "npz_sha256": "b13d3bfd8d22c2de97b2a0965bf475f41e8cd69732e4e77ffb212ad23eccf589",
+      "source_path": "/data/Maojie/AAAI/AAAI_Dataset/test_release/cvrp/test/Cus100/instances.pkl",
+      "source_sha256": "a024aaa7c5c3945c03e8fc0e4ee3eca24604956c4ac7df6a2a17246381362a65",
+      "split": "test",
+      "metadata_sha256": "028ba72cba1b0689af44e4af4ac4d49b4182bec4cdcf8d208635c6f0b99fc24e",
+      "id_list_sha256": "edb136ab7840826f180509157e61f529d93abedc4083d262a84253f75c8b59be",
+      "hashes_verified_now": true
+    }
+  },
+  "host_specific_agda_schema": "CVRP candidate9/system4/tokens4; action-key before scaling and clipping, bias after clipping",
+  "formal_readiness": "blocked_pending_matched_protocol_and_worker"
+}

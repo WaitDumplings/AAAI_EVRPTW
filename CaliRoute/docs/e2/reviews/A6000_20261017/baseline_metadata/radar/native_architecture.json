@@ -1,0 +1,22 @@
+{
+  "architecture": {
+    "att_type": "normal",
+    "embedding_dim": 256,
+    "encoder_layer_num": 5,
+    "eval_type": "softma",
+    "ff_hidden_dim": 512,
+    "head_num": 8,
+    "init": "svd",
+    "logit_clipping": 10,
+    "ms_hidden_dim": 16,
+    "ms_layer1_init": 0.7071067811865476,
+    "ms_layer2_init": 0.25,
+    "one_hot_seed_cnt": 100,
+    "qkv_dim": 32,
+    "sqrt_embedding_dim": 16.0,
+    "sqrt_qkv_dim": 5.656854249492381
+  },
+  "method": "radar",
+  "native_objective": true,
+  "parameters": 3300264
+}

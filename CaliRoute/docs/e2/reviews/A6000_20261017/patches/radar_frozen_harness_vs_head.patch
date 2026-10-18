@@ -1,0 +1,275 @@
+--- a/CaliRoute/e1/native.py
++++ b/CaliRoute/e1/native.py
+@@ -171,7 +171,7 @@
+     return {name: np.stack(values) for name, values in arrays.items()}, identities
+ 
+ 
+-def export_native_dataset(source_path, output_path, *, split, expected_customers=100, limit=None, problem_type="cvrp"):
++def export_native_dataset(source_path, output_path, *, split, expected_customers=100, limit=None):
+     from offline2online.instance_adapter import iter_instance_payloads, adapt_instance_payload
+     import itertools
+     source = Path(source_path).resolve()
+@@ -179,20 +179,15 @@
+     payloads = iter_instance_payloads(bundle)
+     if limit is not None:
+         payloads = itertools.islice(payloads, int(limit))
+-    instances = (adapt_instance_payload(item, problem_type=problem_type, strict_road_metric=True) for item in payloads)
+-    if problem_type == 'vrptw':
+-        from e1.native_vrptw import convert_vrptw_instances
+-        arrays, identities = convert_vrptw_instances(instances, expected_customers)
+-    elif problem_type == 'cvrp':
+-        arrays, identities = convert_cvrp_instances(instances, expected_customers=expected_customers)
+-    else: raise ValueError('Native task must be cvrp or vrptw')
++    instances = (adapt_instance_payload(item, problem_type="cvrp", strict_road_metric=True) for item in payloads)
++    arrays, identities = convert_cvrp_instances(instances, expected_customers=expected_customers)
+     target = Path(output_path)
+     target.parent.mkdir(parents=True, exist_ok=True)
+     if target.exists():
+         raise FileExistsError(target)
+     with target.open("wb") as stream:
+         np.savez(stream, **arrays)
+-    manifest = dict(problem_type=problem_type, split=split, source_path=str(bundle), source_sha256=file_hash(bundle),
++    manifest = dict(split=split, source_path=str(bundle), source_sha256=file_hash(bundle),
+                     npz_sha256=file_hash(target), instances=identities, count=len(identities),
+                     customers=expected_customers, distance_unit="km", directed=True,
+                     demand_storage="raw_demand_and_raw_capacity", coordinate_transform="native_per_axis_minmax")
+@@ -207,8 +202,6 @@
+     method = cfg["method"]
+     if method not in REQUIRED:
+         raise ValueError("Only native rrnco/radar are handled here")
+-    cfg.setdefault("problem_type", "cvrp")
+-    if cfg['problem_type'] not in ('cvrp','vrptw'):raise ValueError('Unsupported native task')
+     cfg.setdefault("training_seed", 3009)
+     cfg.setdefault("instance_exposures", 96000)
+     cfg.setdefault("batch_size", 64)
+@@ -233,7 +226,7 @@
+     for key in ("instance_exposures", "batch_size", "n_traj", "eval_k", "eval_interval_exposures", "eval_batch_size", "checkpoint_interval_updates", "num_customers", "cpu_threads"):
+         if isinstance(cfg[key], bool) or not isinstance(cfg[key], int) or cfg[key] <= 0:
+             raise ValueError(f"{key} must be a positive integer")
+-    if cfg["n_traj"] < 2 or (max(cfg["n_traj"], cfg["eval_k"]) > cfg["num_customers"] and not cfg.get("allow_repeated_starts", False)):
++    if cfg["n_traj"] < 2 or cfg["n_traj"] > cfg["num_customers"] or cfg["eval_k"] > cfg["num_customers"]:
+         raise ValueError("Native multistart counts must fit customer count; training needs at least two starts")
+     for key in ("train_path", "val_path"):
+         cfg[key] = str(Path(cfg[key]).resolve())
+@@ -265,13 +258,13 @@
+     harness = run / "native_harness" / "e1"
+     harness.mkdir(parents=True)
+     records = []
+-    for name in ("native.py", "native_worker.py", "native_vrptw.py", "validator.py", "evaluation.py", f"requirements-{cfg['method']}.lock.txt"):
++    for name in ("native.py", "native_worker.py", "validator.py", "evaluation.py", f"requirements-{cfg["method"]}.lock.txt"):
+         shutil.copy2(ROOT / "e1" / name, harness / name)
+         records.append(dict(path=f"e1/{name}", sha256=file_hash(harness / name)))
+     (harness / "__init__.py").write_text("")
+     records.append(dict(path="e1/__init__.py", sha256=file_hash(harness / "__init__.py")))
+     manifests = {split: export_native_dataset(cfg[f"{split}_path"], run / "native_data" / f"{split}.npz",
+-                 split=split, expected_customers=cfg["num_customers"], limit=cfg.get(f"smoke_{split}_limit"), problem_type=cfg["problem_type"]) for split in ("train", "val")}
++                 split=split, expected_customers=cfg["num_customers"], limit=cfg.get(f"smoke_{split}_limit")) for split in ("train", "val")}
+     protocol = cfg.get("experiment_protocol", {})
+     if not protocol.get("smoke_only", False) and manifests["val"]["count"] != 1000:
+         raise ValueError("Formal native validation requires all 1000 instances (use smoke_only only for a separate smoke run)")
+@@ -353,5 +346,5 @@
+         cfg = json.loads((run / "native_resolved.json").read_text())
+         if "test_path" not in config:
+             raise ValueError("Explicit test_path is required; training never reads test")
+-        export_native_dataset(config["test_path"], run / "native_data/test.npz", split="test", expected_customers=cfg["num_customers"], problem_type=cfg.get("problem_type","cvrp"))
++        export_native_dataset(config["test_path"], run / "native_data/test.npz", split="test", expected_customers=cfg["num_customers"])
+     return _dispatch(run, "evaluate", device=device, checkpoint=checkpoint, split=split, output_path=output_path, eval_batch_size=eval_batch_size)
+--- a/CaliRoute/e1/native_worker.py
++++ b/CaliRoute/e1/native_worker.py
+@@ -68,20 +68,12 @@
+ 
+ 
+ def instance_for(arrays, metadata, index):
+-    instance = SimpleNamespace(num_customers=arrays["demand"].shape[1],
++    return SimpleNamespace(num_customers=arrays["demand"].shape[1],
+         distance_matrix_km=arrays["distance_matrix"][index], demands_cm3=arrays["demand"][index],
+         vehicle={"cargo_capacity_cm3": float(arrays["capacity"][index])},
+         instance_id=metadata["instances"][index]["instance_id"],
+         region_id=metadata["instances"][index]["territory_id"],
+         metadata={"service_territory_id": metadata["instances"][index]["territory_id"]})
+-
+-    if metadata.get('problem_type')=='vrptw':
+-        instance.travel_time_matrix_s=arrays['travel_time_s'][index]
+-        instance.tw_s=arrays['tw_s'][index]
+-        instance.service_time_s=arrays['service_s'][index]
+-        instance.working_start_s,instance.working_end_s=arrays['working_window_s'][index]
+-        instance.metadata['time_window_constraint']=True
+-    return instance
+ 
+ 
+ def action_routes(sequence, *, implicit_final_return=False):
+@@ -104,26 +96,6 @@
+         raise FloatingPointError("Native optimizer has missing or nonfinite gradients; update refused")
+ 
+ 
+-def install_radar_cyclic_starts(model, customers):
+-    """Adapt only forced start IDs when K>N; retain native objective/decoding.
+-
+-    Fifty actual trajectories are decoded. Greedy repeats may yield duplicate
+-    solutions; these are counted as attempts, never advertised as unique routes.
+-    RRNCO already cycles starts modulo generator.num_loc in its native selector.
+-    """
+-    original = model.forward
+-    def forward(state):
+-        batch, starts = state.BATCH_IDX.shape
+-        if state.selected_count != 1 or starts <= customers:
+-            return original(state)
+-        encoded = model.encoded_node
+-        selected = (torch.arange(starts, device=encoded.device) % customers + 1)[None].expand(batch, -1)
+-        first = encoded.gather(1, selected[..., None].expand(-1, -1, encoded.shape[-1]))
+-        model.decoder.set_q1(first)
+-        return selected, torch.ones((batch, starts), device=encoded.device, dtype=encoded.dtype)
+-    model.forward = forward
+-
+-
+ class RadarRunner:
+     def __init__(self, cfg, run, device):
+         source = run / "native_source"
+@@ -132,11 +104,6 @@
+         from ACVRPEnv import ACVRPEnv
+         from utils.utils import set_result_folder
+         set_result_folder(str(run / "native_logs"))
+-        if cfg.get('problem_type')=='vrptw':
+-            import ACVRPTrainer as trainer_module
+-            from e1.native_vrptw import radar_environment
+-            ACVRPEnv=radar_environment(ACVRPEnv)
+-            trainer_module.Env=ACVRPEnv
+         self.cfg, self.device, self.env_class = cfg, device, ACVRPEnv
+         n, width, heads = cfg["num_customers"], 256, 8
+         model = dict(embedding_dim=width, sqrt_embedding_dim=width ** .5,
+@@ -152,14 +119,6 @@
+                        epochs=1, train_episodes=1, train_batch_size=cfg["batch_size"], model_load=dict(enable=False))
+         self.trainer = ACVRPTrainer(env, model, optimizer, trainer)
+         self.model, self.optimizer, self.scheduler = self.trainer.model, self.trainer.optimizer, self.trainer.scheduler
+-        if cfg.get('problem_type')=='vrptw':
+-            from e1.native_vrptw import install_radar_time_inputs
+-            install_radar_time_inputs(self.model)
+-            self.model.to(device)
+-            old_ids={id(p) for g in self.optimizer.param_groups for p in g['params']}
+-            self.optimizer.param_groups[0]['params'].extend(p for p in self.model.parameters() if id(p) not in old_ids)
+-        if cfg.get("allow_repeated_starts", False):
+-            install_radar_cyclic_starts(self.model, n)
+         self.optimizer.register_step_pre_hook(_guard_step)
+         self.dataset_size = self.trainer.env.fixed_dataset_size
+         self.data_pass = 1
+@@ -208,7 +167,6 @@
+         distance = torch.from_numpy(arrays["distance_matrix"][start:stop]).to(self.device)
+         demand = torch.from_numpy(arrays["demand"][start:stop] / arrays["capacity"][start:stop, None]).to(self.device)
+         env.load_problems_manual(distance, demand)
+-        if self.cfg.get('problem_type')=='vrptw':env.set_time_data(arrays,start,stop)
+         reset, _, _ = env.reset()
+         self.model.eval(); self.model.pre_forward(reset)
+         state, reward, done = env.pre_step()
+@@ -229,16 +187,10 @@
+         from rrnco.envs.rcvrp.fixed_generator import FixedRCVRPGenerator
+         from rrnco.models.policy import RRNetPolicy
+         from rrnco.models.rl import RRNet
+-        if cfg.get('problem_type')=='vrptw':
+-            from rrnco.envs.rmtvrp.env import RMTVRPEnv
+-            from rrnco.envs.rmtvrp.fixed_generator import FixedRMTVRPGenerator
+-            from e1.native_vrptw import rrnco_environment
+-            RCVRPEnv=rrnco_environment(RMTVRPEnv)
+-            FixedRCVRPGenerator=FixedRMTVRPGenerator
+         self.cfg, self.device = cfg, device
+         self.generator = FixedRCVRPGenerator(str(run / "native_data/train.npz"), sample_with_replacement=True)
+         self.env = RCVRPEnv(generator=self.generator, normalize=True)
+-        self.architecture = dict(env_name="rcvrptw" if cfg.get("problem_type")=="vrptw" else "rcvrp", embed_dim=128, num_heads=8,
++        self.architecture = dict(env_name="rcvrp", embed_dim=128, num_heads=8,
+             num_encoder_layers=6, normalization="instance", use_graph_context=False, nab_type="gating",
+             init_embedding_kwargs=dict(use_coords=True, use_polar_feats=True, use_dist=True,
+                                        use_matnet_init=False, sample_type="prob", sample_size=25))
+@@ -303,13 +255,10 @@
+         from tensordict import TensorDict
+         from rl4co.utils.ops import unbatchify
+         self.batch_decision_cap = None
++        # RCVRPEnv allocates reset state from td.device, not its leaf tensors.
+         td = TensorDict({key: torch.from_numpy(arrays[key][start:stop]).to(self.device)
+-                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start])
+-        if self.cfg.get('problem_type')=='vrptw':
+-            for key in ('demand_linehaul','duration_matrix','time_windows','service_time'):
+-                td[key]=torch.from_numpy(arrays[key][start:stop]).to(self.device)
+-        else:
+-            td["demand"] = td["demand"] / td["capacity"][:, None]
++                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start], device=self.device)
++        td["demand"] = td["demand"] / td["capacity"][:, None]
+         self.model.eval()
+         out = self.model.policy(self.env.reset(td), self.env, phase="test", num_starts=k,
+                                 max_steps=self.cfg["decode_cap"]-1, decode_type="multistart_greedy")
+@@ -361,10 +310,7 @@
+                     checkpoint_id=checkpoint_id, requested_k=cfg["eval_k"],
+                     decode_mode="native_greedy_multistart", timing_batch_size=stop-start)
+                 row.update(split=split, num_augment=1, implicit_final_return=cfg["method"] == "rrnco",
+-                           offline_dataset_conversion_excluded_from_timing=True,
+-                           start_policy="cyclic_customers" if cfg.get("allow_repeated_starts", False) else "native_distinct_customers",
+-                           unique_first_customers=min(cfg["eval_k"], cfg["num_customers"]),
+-                           candidate_unique_completed_routes=len({tuple(tuple(r) for r in c["routes"]) for c in candidates if c["completed"]}))
++                           offline_dataset_conversion_excluded_from_timing=True)
+                 batch_rows.append(row)
+             if runner.device.type == "cuda": torch.cuda.synchronize(runner.device)
+             batch_time = time.perf_counter() - begin
+@@ -514,7 +460,6 @@
+     if torch.cuda.is_available(): torch.cuda.manual_seed_all(cfg["training_seed"])
+     runner = (RadarRunner if cfg["method"] == "radar" else RrncoRunner)(cfg, run, device)
+     atomic_json(run / "native_architecture.json", dict(method=cfg["method"], architecture=runner.architecture,
+-                problem_type=cfg.get("problem_type", "cvrp"), task_adapter=cfg.get("task_adapter", "native_cvrp"),
+                 parameters=sum(p.numel() for p in runner.model.parameters()), native_objective=True))
+     if args.command == "train":
+         if args.checkpoint is not None and not args.resume: raise ValueError("Training checkpoint requires --resume")
+--- a/CaliRoute/e1/validator.py
++++ b/CaliRoute/e1/validator.py
+@@ -1,4 +1,4 @@
+-"""Independent CVRP/VRPTW route checks in physical kilometres, plus environment replay."""
++"""Independent CVRP route checks in physical kilometres, plus environment replay."""
+ from __future__ import annotations
+ 
+ import json
+@@ -13,9 +13,6 @@
+ 
+ def validate_routes(instance, routes, reported_cost=None):
+     """Require complete depot-to-depot routes; never repair an incomplete route."""
+-    if getattr(instance, 'num_charging_stations', 0) or getattr(instance, 'metadata', {}).get('charging_constraint') is True:
+-        from e1.evrptw_contract import validate_evrptw_routes
+-        return validate_evrptw_routes(instance, routes, reported_cost)
+     n = int(instance.num_customers)
+     d = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+     demand = np.asarray(instance.demands_cm3, dtype=np.float64)
+@@ -41,24 +38,6 @@
+             edge=float(d[left,right])
+             if not math.isfinite(edge) or edge<0: reasons.append('invalid_road_edge')
+             else: distance+=edge
+-    if getattr(instance,'metadata',{}).get('time_window_constraint',False):
+-        travel=np.asarray(instance.travel_time_matrix_s,dtype=np.float64)
+-        tw=np.asarray(instance.tw_s,dtype=np.float64)
+-        service=np.asarray(instance.service_time_s,dtype=np.float64)
+-        opening,closing=float(instance.working_start_s),float(instance.working_end_s)
+-        if not np.isfinite([opening,closing]).all() or closing<=opening or (tw.shape==(n,2) and (tw[:,1]<tw[:,0]).any()) or travel.shape!=(n+1,n+1) or tw.shape!=(n,2) or service.shape!=(n,) or not all(np.isfinite(v).all() for v in (travel,tw,service)) or (travel<0).any() or (service<0).any():
+-            reasons.append('invalid_time_arrays')
+-        else:
+-            for route in routes:
+-                if not isinstance(route,(list,tuple)) or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,(int,np.integer)) or not 0<=x<=n for x in route):continue
+-                clock=float(instance.working_start_s)
+-                for left,right in zip(route,route[1:]):
+-                    clock+=float(travel[left,right])
+-                    if right:
+-                        clock=max(clock,float(tw[right-1,0]))
+-                        if clock>tw[right-1,1]+.01:reasons.append('time_window_exceeded')
+-                        clock+=float(service[right-1])
+-                    elif clock>float(instance.working_end_s)+.01:reasons.append('depot_closing_exceeded')
+     if np.any(coverage==0): reasons.append('missing_customers')
+     if np.any(coverage>1): reasons.append('repeated_customers')
+     feasible=not reasons
+--- a/CaliRoute/e1/evaluation.py
++++ b/CaliRoute/e1/evaluation.py
+@@ -97,7 +97,7 @@
+     limit = evaluation.get('eval_limit'); cap = evaluation['eval_max_steps']
+     if k != 50 and not cfg.get('experiment_protocol', {}).get('smoke_only'):
+         raise ValueError('Formal E1 evaluation requires exactly K=50')
+-    data = iter_adapted_instances(evaluation['eval_path'], problem_type=cfg['data']['problem_type'], strict_road_metric=True, limit=limit)
++    data = iter_adapted_instances(evaluation['eval_path'], problem_type='cvrp', strict_road_metric=True, limit=limit)
+     batches_limit = evaluation.get('eval_num_batches')
+     seen = 0; batch_index = 0
+     while True:
+--- a/CaliRoute/e1/__init__.py
++++ b/CaliRoute/e1/__init__.py
+@@ -1 +0,0 @@
+-"""E1: CVRP100, seven scratch methods and a fixed, audited evaluation contract."""

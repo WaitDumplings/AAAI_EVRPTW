@@ -1,0 +1,269 @@
+diff --git a/CaliRoute/e1/lifecycle.py b/CaliRoute/e1/lifecycle.py
+index eb4c1b4..4fcf51f 100644
+--- a/CaliRoute/e1/lifecycle.py
++++ b/CaliRoute/e1/lifecycle.py
+@@ -181,8 +181,10 @@ def assert_test_ready(manifest, method, checkpoint):
+             raise ValueError('Native actual instance exposure budget has not completed')
+         if result.get('checkpoint', {}).get('sha256') != digest(final_path):
+             raise ValueError('Native completion checkpoint hash changed')
+-        if (final.get('best_metric') is None or best.get('best_metric') != final.get('best_metric')
+-                or result.get('best_metric') != final.get('best_metric')):
++        # JSON turns checkpoint tuples into lists; compare the metric values.
++        metrics = (best.get('best_metric'), final.get('best_metric'), result.get('best_metric'))
++        if (any(not isinstance(metric, (list, tuple)) or len(metric) != 2 for metric in metrics)
++                or tuple(metrics[0]) != tuple(metrics[1]) or tuple(metrics[2]) != tuple(metrics[1])):
+             raise ValueError('Native best checkpoint disagrees with final validation selection')
+     return dict(checkpoint_sha256=selected_sha, final_checkpoint_sha256=digest(final_path),
+                 formal_training_complete=True, method=method)
+diff --git a/CaliRoute/e1/native_vrptw.py b/CaliRoute/e1/native_vrptw.py
+index 6dd4a28..94ff357 100644
+--- a/CaliRoute/e1/native_vrptw.py
++++ b/CaliRoute/e1/native_vrptw.py
+@@ -12,6 +12,21 @@ from torch import nn
+ TIME_EPS = 1e-7
+ 
+ 
++def checkpoint_rrnco_encoder(policy):
++    """Recompute encoder-layer activations; retain native weights and batch loss."""
++    from torch.utils.checkpoint import checkpoint
++    for layer in policy.encoder.net.layers:
++        original = layer.forward
++
++        def forward(*args, _original=original, **kwargs):
++            if torch.is_grad_enabled():
++                return checkpoint(_original, *args, use_reentrant=False,
++                                  preserve_rng_state=True, **kwargs)
++            return _original(*args, **kwargs)
++
++        layer.forward = forward
++
++
+ def convert_vrptw_instances(instances, expected_customers):
+     from e1.native import convert_cvrp_instances, json_hash
+     instances=list(instances)
+diff --git a/CaliRoute/e1/native_worker.py b/CaliRoute/e1/native_worker.py
+index 5ee63e3..e43201e 100644
+--- a/CaliRoute/e1/native_worker.py
++++ b/CaliRoute/e1/native_worker.py
+@@ -243,6 +243,9 @@ class RrncoRunner:
+             init_embedding_kwargs=dict(use_coords=True, use_polar_feats=True, use_dist=True,
+                                        use_matnet_init=False, sample_type="prob", sample_size=25))
+         policy = RRNetPolicy(**self.architecture)
++        if cfg.get('rrnco_encoder_checkpointing', False):
++            from e1.native_vrptw import checkpoint_rrnco_encoder
++            checkpoint_rrnco_encoder(policy)
+         self.model = RRNet(self.env, policy=policy, num_augment=1, num_starts=cfg["n_traj"],
+             no_aug_coords=False, batch_size=cfg["batch_size"], train_data_size=self.generator.dataset_size,
+             val_data_size=1, test_data_size=1, optimizer_kwargs=dict(lr=cfg["native_learning_rate"],
+@@ -303,8 +306,9 @@ class RrncoRunner:
+         from tensordict import TensorDict
+         from rl4co.utils.ops import unbatchify
+         self.batch_decision_cap = None
++        # RCVRPEnv allocates reset state from td.device, not its leaf tensors.
+         td = TensorDict({key: torch.from_numpy(arrays[key][start:stop]).to(self.device)
+-                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start])
++                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start], device=self.device)
+         if self.cfg.get('problem_type')=='vrptw':
+             for key in ('demand_linehaul','duration_matrix','time_windows','service_time'):
+                 td[key]=torch.from_numpy(arrays[key][start:stop]).to(self.device)
+diff --git a/CaliRoute/scripts/run_e1_vrptw_batch.py b/CaliRoute/scripts/run_e1_vrptw_batch.py
+index 0fadffe..7d4d8f4 100644
+--- a/CaliRoute/scripts/run_e1_vrptw_batch.py
++++ b/CaliRoute/scripts/run_e1_vrptw_batch.py
+@@ -150,6 +150,9 @@ def main():
+     args=parser.parse_args();args.data_root=args.data_root.resolve();args.output=args.output.resolve()
+     if args.problem=='evrptw' and args.profile!='a6000':parser.error('EVRPTW launcher currently supports a6000 only')
+     choices=[(n,g) for n,g in PROFILES[args.profile] if args.scale is None or n==args.scale]
++    # Explicit Cus100 opt-in; preserve the existing Cus50/Cus15 default profile.
++    if args.problem=='evrptw' and args.profile=='a6000' and args.scale==100:
++        choices=[(100,{'slppo':[0,1]})]
+     if not choices:parser.error('Scale is not assigned to this profile')
+     if not args.execute:
+         for n,g in choices:run_scale(args,n,g)
+diff --git a/CaliRoute/scripts/run_e1_vrptw_native.py b/CaliRoute/scripts/run_e1_vrptw_native.py
+index f28d419..6ebd1b5 100644
+--- a/CaliRoute/scripts/run_e1_vrptw_native.py
++++ b/CaliRoute/scripts/run_e1_vrptw_native.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Frozen VRPTW100 native-baseline campaign; one GPU per method, no CVRP changes."""
++"""Frozen VRPTW native-baseline campaign; one GPU per method, no CVRP changes."""
+ import argparse
+ import copy
+ import json
+@@ -15,17 +15,21 @@ sys.path.insert(0,str(ROOT))
+ from e1.native import atomic_json, file_hash, native_status, train
+ 
+ 
+-def configuration(method,data,run,seed):
++def configuration(method,data,run,seed,customers=100):
++    if customers not in (15,50,100):raise ValueError('Unsupported VRPTW scale')
+     return dict(method=method,problem_type='vrptw',run_id=f'{run.parent.parent.name}_{method}',training_seed=seed,
+-        num_customers=100,world_size=1,train_path=str(data/'dataset/vrptw/train/Cus100'),
+-        val_path=str(data/'dataset/vrptw/val/Cus100'),batch_size=64,n_traj=50,eval_k=50,
+-        instance_exposures=1500*64,eval_interval_exposures=50*64,eval_batch_size=8,
++        num_customers=customers,world_size=1,train_path=str(data/f'dataset/vrptw/train/Cus{customers}'),
++        allow_repeated_starts=(customers<50),
++        rrnco_encoder_checkpointing=(method=='rrnco' and customers==100),
++        val_path=str(data/f'dataset/vrptw/val/Cus{customers}'),batch_size=64,n_traj=50,eval_k=50,
++        instance_exposures=1500*64,eval_interval_exposures=50*64,eval_batch_size={100:8,50:32,15:128}[customers],
+         inference_seed=17000000+seed,checkpoint_interval_updates=50,
+         backup_dir=str(run.parent.parent.parent/'checkpoint_backups'/run.parent.parent.name/method),
+         task_adapter='rrnco_native_rcvrptw_with_road_time_contract' if method=='rrnco' else 'radar_vrptw_time_inputs_and_mask_v1',
+-        experiment_protocol=dict(schema='aaai_e1_vrptw100_native_v1',method=method,training_seed=seed,
++        experiment_protocol=dict(schema=f'aaai_e1_vrptw{customers}_native_v1',method=method,training_seed=seed,
+           initialization='scratch',global_batch=64,n_traj=50,nominal_online_loops=1500,total_instance_exposures=96000,
+           validation_instances=1000,requested_K=50,selection_rule='feasibility_then_mean_physical_km',
++          native_start_policy='cyclic_customers_when_K_exceeds_N' if customers<50 else 'native_distinct_customers',
+           expert_data_used=False,test_used_for_training_or_selection=False,
+           time_unit='all_time_quantities_divided_by_same_working_horizon',distance_objective='directed_road_km'))
+ 
+@@ -42,13 +46,17 @@ def verify(campaign):
+ 
+ 
+ def prepare(args):
+-    if args.campaign.exists():return verify(args.campaign)
++    if args.campaign.exists():
++        manifest=verify(args.campaign)
++        if manifest['schema']!=f'aaai_e1_vrptw{args.customers}_native_v1' or manifest['seed']!=args.seed:
++            raise ValueError('Existing campaign scale/seed differs')
++        return manifest
+     readiness={m:native_status(m) for m in ('rrnco','radar')}
+     if not all(r['source_available'] and r['dependencies_available'] for r in readiness.values()):
+         raise RuntimeError(f'Install native dependencies first: {readiness}')
+     inputs=[]
+     for split in ['train','val']:
+-        path=args.data_root/f'dataset/vrptw/{split}/Cus100/instances.pkl'
++        path=args.data_root/f'dataset/vrptw/{split}/Cus{args.customers}/instances.pkl'
+         inputs.append(dict(path=str(path),sha256=file_hash(path)))
+     args.campaign.mkdir(parents=True)
+     sys.path.insert(0,str(ROOT/'scripts'))
+@@ -61,13 +69,13 @@ def prepare(args):
+     methods={}
+     for method,gpu in zip(('rrnco','radar'),args.gpus):
+         run=args.campaign/'runs'/method;run.mkdir(parents=True)
+-        cfg=configuration(method,args.data_root,run,args.seed)
++        cfg=configuration(method,args.data_root,run,args.seed,args.customers)
+         # Point native provenance at the frozen vendored source, not a later pull.
+         cfg['native_source_root']=str(source_root/'benchmarks/native_sources'/method)
+         cfg['native_python']=readiness[method]['python_executable']
+         path=run/'config.json';atomic_json(path,cfg)
+         methods[method]=dict(gpu=gpu,run_dir=str(run),config=str(path),sha256=file_hash(path))
+-    manifest=dict(schema='aaai_e1_vrptw100_native_v1',code_root=str(source_root),source=source,inputs=inputs,methods=methods,
++    manifest=dict(schema=f'aaai_e1_vrptw{args.customers}_native_v1',code_root=str(source_root),source=source,inputs=inputs,methods=methods,
+         seed=args.seed,created_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),test_status='separate independent test after training; no test data opened')
+     atomic_json(args.campaign/'manifest.json',manifest)
+     return manifest
+@@ -135,15 +143,18 @@ def main():
+     p.add_argument('--campaign',type=Path,required=True)
+     p.add_argument('--data-root',type=Path,default=ROOT.parent/'AAAI_Dataset')
+     p.add_argument('--seed',type=int,default=3009)
++    p.add_argument('--customers',type=int,choices=(15,50,100),default=100)
++    p.add_argument('--prepare-only',action='store_true')
+     p.add_argument('--gpus',type=int,nargs=2,default=[0,1])
+     p.add_argument('--execute',action='store_true');p.add_argument('--smoke-only',action='store_true')
+     p.add_argument('--resume',action='store_true');p.add_argument('--arm',choices=['rrnco','radar'])
+     args=p.parse_args();args.campaign=args.campaign.resolve();args.data_root=args.data_root.resolve()
+     if min(args.gpus)<0 or len(set(args.gpus))!=2:p.error('Choose two different GPU indices')
+-    if not (args.execute or args.smoke_only or args.arm):
+-        print(json.dumps(dict(task='VRPTW100',methods={'rrnco':args.gpus[0],'radar':args.gpus[1]},
++    if not (args.execute or args.smoke_only or args.arm or args.prepare_only):
++        print(json.dumps(dict(task=f'VRPTW{args.customers}',methods={'rrnco':args.gpus[0],'radar':args.gpus[1]},
+             global_batch=64,n_traj=50,nominal_epochs=1500,seed=args.seed,campaign=str(args.campaign),execute=False),indent=2));return
+     manifest=prepare(args)
++    if args.prepare_only:return
+     if args.arm:return arm(args,manifest)
+     import fcntl
+     lock=(args.campaign/'supervisor.lock').open('a')
+@@ -156,7 +167,7 @@ def main():
+     try:
+         for method,spec in manifest['methods'].items():
+             cmd=[sys.executable,str(Path(manifest['code_root'])/'scripts/run_e1_vrptw_native.py'),
+-                 '--campaign',str(args.campaign),'--arm',method]
++                 '--campaign',str(args.campaign),'--customers',str(args.customers),'--seed',str(args.seed),'--arm',method]
+             if args.smoke_only:cmd+=['--smoke-only']
+             if args.resume:cmd+=['--resume']
+             log=(Path(spec['run_dir'])/'launcher.log').open('a');logs.append(log)
+diff --git a/CaliRoute/tests/test_e1_lifecycle.py b/CaliRoute/tests/test_e1_lifecycle.py
+index d04060d..1e5b817 100644
+--- a/CaliRoute/tests/test_e1_lifecycle.py
++++ b/CaliRoute/tests/test_e1_lifecycle.py
+@@ -131,6 +131,24 @@ def test_native_status_cannot_claim_unfinished_checkpoint_complete(tmp_path):
+     with pytest.raises(ValueError,match='budget'):assert_test_ready(manifest,'radar',best)
+ 
+ 
++@pytest.mark.parametrize('changed', [None, 'best', 'last', 'status'])
++def test_native_checkpoint_tuple_metric_matches_json_list_only_when_values_agree(tmp_path, changed):
++    manifest,cfg,run=fixture(tmp_path,'radar');best,last=checkpoints(manifest,cfg,run,'radar')
++    for label,path in [('best',best),('last',last)]:
++        payload=torch.load(path,weights_only=False)
++        payload['best_metric']=(1000,-301. if changed==label else -300.)
++        torch.save(payload,path)
++    status=json.loads((run/'native_status.json').read_text())
++    status['checkpoint']['sha256']=digest(last)
++    if changed=='status':status['best_metric']=[1000,-301.]
++    write(run/'native_status.json',status)
++    if changed is None:
++        assert assert_test_ready(manifest,'radar',best)['formal_training_complete']
++    else:
++        with pytest.raises(ValueError,match='best checkpoint disagrees'):
++            assert_test_ready(manifest,'radar',best)
++
++
+ def accepted(manifest,run,best):
+     folder=run/'test';folder.mkdir();output=folder/'instances.jsonl'
+     rows=[dict(instance_id=f'test_{i}',method='ppo_base',training_seed=3009,split='test',
+diff --git a/CaliRoute/tests/test_e1_native_vrptw.py b/CaliRoute/tests/test_e1_native_vrptw.py
+index 332266a..8513678 100644
+--- a/CaliRoute/tests/test_e1_native_vrptw.py
++++ b/CaliRoute/tests/test_e1_native_vrptw.py
+@@ -8,6 +8,49 @@ from e1.native_vrptw import convert_vrptw_instances,radar_environment
+ from e1.validator import validate_routes
+ 
+ 
++def test_encoder_recomputation_preserves_outputs_gradients_and_state_keys():
++    import copy
++    from torch import nn
++    from e1.native_vrptw import checkpoint_rrnco_encoder
++
++    class Layer(nn.Module):
++        def __init__(self):
++            super().__init__()
++            self.projection = nn.Linear(4, 4)
++            self.dropout = nn.Dropout(.2)
++
++        def forward(self, left, right):
++            return self.dropout(self.projection(left)).tanh(), self.projection(right).sin()
++
++    reference = nn.Module()
++    reference.encoder = nn.Module()
++    reference.encoder.net = nn.Module()
++    reference.encoder.net.layers = nn.ModuleList([Layer(), Layer()])
++    recomputed = copy.deepcopy(reference)
++    checkpoint_rrnco_encoder(recomputed)
++    assert reference.state_dict().keys() == recomputed.state_dict().keys()
++    inputs = [torch.randn(3, 4), torch.randn(3, 4)]
++    outputs = []
++    for model in (reference, recomputed):
++        torch.manual_seed(3011)
++        left, right = [x.clone().requires_grad_() for x in inputs]
++        for layer in model.encoder.net.layers:
++            left, right = layer(left, right)
++        (left.square().sum() + right.square().sum()).backward()
++        outputs.append((left.detach(), right.detach()))
++    for expected, actual in zip(outputs[0], outputs[1]):
++        torch.testing.assert_close(actual, expected)
++    for expected, actual in zip(reference.parameters(), recomputed.parameters()):
++        torch.testing.assert_close(actual.grad, expected.grad)
++    with torch.no_grad():
++        torch.manual_seed(3011)
++        expected = reference.encoder.net.layers[0](*inputs)
++        torch.manual_seed(3011)
++        actual = recomputed.encoder.net.layers[0](*inputs)
++    for a, b in zip(expected, actual):
++        torch.testing.assert_close(a, b)
++
++
+ def instance():
+     return SimpleNamespace(num_customers=3,num_charging_stations=0,instance_id='x',
+         distance_matrix_km=np.array([[0,1,2,3],[1,0,1,2],[2,1,0,1],[3,2,1,0]],dtype=np.float32),

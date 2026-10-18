@@ -12,6 +12,21 @@ from torch import nn
 TIME_EPS = 1e-7
 
 
+def checkpoint_rrnco_encoder(policy):
+    """Recompute encoder-layer activations; retain native weights and batch loss."""
+    from torch.utils.checkpoint import checkpoint
+    for layer in policy.encoder.net.layers:
+        original = layer.forward
+
+        def forward(*args, _original=original, **kwargs):
+            if torch.is_grad_enabled():
+                return checkpoint(_original, *args, use_reentrant=False,
+                                  preserve_rng_state=True, **kwargs)
+            return _original(*args, **kwargs)
+
+        layer.forward = forward
+
+
 def convert_vrptw_instances(instances, expected_customers):
     from e1.native import convert_cvrp_instances, json_hash
     instances=list(instances)

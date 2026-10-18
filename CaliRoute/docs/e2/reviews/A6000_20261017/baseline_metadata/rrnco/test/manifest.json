@@ -1,0 +1,56 @@
+{
+  "accepted": true,
+  "checkpoint": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/native_checkpoints/best.pt",
+  "checkpoint_sha256": "31202343e857e387c0900ec3e1b9296dea031dc0bc3ae501002de827d59f4c94",
+  "evaluator_path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW50_NATIVE_S3009_A6000_V2/source/CaliRoute/scripts/evaluate_e1_vrptw_native.py",
+  "evaluator_sha256": "608e47238b3ad317f8997acb5cd56a879aa83395fce1e4d47286be460f34ea6d",
+  "formal_training_complete": true,
+  "gpu": {
+    "has_compute_process": false,
+    "index": 0,
+    "name": "NVIDIA RTX 6000 Ada Generation",
+    "total_mib": 49140,
+    "used_mib": 170,
+    "utilization": 0,
+    "uuid": "GPU-ac54cfb6-580f-8d72-d249-7bce81209a15"
+  },
+  "instances_sha256": "d8a21c3b94c16a10fd8e248970e7f7ee17a19be0330a5d39e80054a4a27e89bd",
+  "method": "rrnco",
+  "num_customers": 100,
+  "problem_type": "vrptw",
+  "result": {
+    "actual_K": [
+      50
+    ],
+    "actual_candidates": 50000,
+    "checkpoint_id": "31202343e857e387c0900ec3e1b9296dea031dc0bc3ae501002de827d59f4c94",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 1,
+    "failure_count": 0,
+    "feasible_count": 1000,
+    "feasible_instances": 1000,
+    "feasible_rate": 1.0,
+    "instances": 1000,
+    "mean_distance_km": 239.38207336870022,
+    "mean_runtime_s": 0.1986546188122593,
+    "mean_vehicle_count": 2.479,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/test/instances.jsonl",
+    "output_sha256": "d8a21c3b94c16a10fd8e248970e7f7ee17a19be0330a5d39e80054a4a27e89bd",
+    "requested_K": [
+      50
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "test",
+    "state": "completed",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "updated": "2026-10-13T02:07:00.650961+00:00",
+    "wall_time_s": 198.75116033200175
+  },
+  "test_batch_size": 1,
+  "test_data_sha256": "10f08f0f518f12dc433b977f8633d26d1d6097ffb2b27ca187e52f6c37757214",
+  "test_disjoint_from_train_and_val": true,
+  "training_seed": 3009
+}

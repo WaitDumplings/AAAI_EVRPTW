@@ -1,0 +1,41 @@
+{
+  "accepted": true,
+  "checkpoint": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/native_checkpoints/best.pt",
+  "checkpoint_sha256": "9a26c61420b27830dab845146ecbf88967987ca6a7a699b1de8d74b10ccb2c17",
+  "final_checkpoint_sha256": "2b2a64c872ad01757f888c4ac1e11cd6180b175f2840bbe91a005be20bdcb2fe",
+  "formal_training_complete": true,
+  "instances_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+  "method": "radar",
+  "result": {
+    "actual_K": [
+      50
+    ],
+    "actual_candidates": 50000,
+    "checkpoint_id": "9a26c61420b27830dab845146ecbf88967987ca6a7a699b1de8d74b10ccb2c17",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 1,
+    "failure_count": 0,
+    "feasible_count": 1000,
+    "feasible_instances": 1000,
+    "feasible_rate": 1.0,
+    "instances": 1000,
+    "mean_distance_km": 204.3652851530332,
+    "mean_runtime_s": 0.07344711947627365,
+    "mean_vehicle_count": 1.865,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/test/instances.jsonl",
+    "output_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+    "requested_K": [
+      50
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "test",
+    "state": "completed",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "updated": "2026-10-11T20:26:54.157208+00:00",
+    "wall_time_s": 73.54419038398191
+  },
+  "test_data_sha256": "a024aaa7c5c3945c03e8fc0e4ee3eca24604956c4ac7df6a2a17246381362a65"
+}

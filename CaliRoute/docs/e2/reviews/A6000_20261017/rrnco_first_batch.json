@@ -1,0 +1,31 @@
+{
+  "method": "rrnco",
+  "historical_initial_checkpoint_available": false,
+  "reconstructed_initial_sha256": "5da833c4b2d595a918166f79937d9798bb947c56130988e0aa0c47f5dac43acf",
+  "frozen_worker": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/native_harness/e1/native_worker.py",
+  "batch": 64,
+  "n_traj": 50,
+  "comparison": {
+    "loss": {
+      "recorded": -1.7209655046463013,
+      "reproduced": -1.7209655046463013,
+      "absolute_error": 0.0
+    },
+    "best_training_cost_km": {
+      "recorded": 2445.19921875,
+      "reproduced": 2445.19921875,
+      "absolute_error": 0.0
+    },
+    "decision_steps": {
+      "recorded": 488882,
+      "reproduced": 488882,
+      "absolute_error": 0
+    },
+    "completed_rollouts": {
+      "recorded": 3200,
+      "reproduced": 3200,
+      "absolute_error": 0
+    }
+  },
+  "exact_first_batch_match": true
+}

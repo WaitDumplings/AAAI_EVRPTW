@@ -8,6 +8,49 @@ from e1.native_vrptw import convert_vrptw_instances,radar_environment
 from e1.validator import validate_routes
 
 
+def test_encoder_recomputation_preserves_outputs_gradients_and_state_keys():
+    import copy
+    from torch import nn
+    from e1.native_vrptw import checkpoint_rrnco_encoder
+
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.projection = nn.Linear(4, 4)
+            self.dropout = nn.Dropout(.2)
+
+        def forward(self, left, right):
+            return self.dropout(self.projection(left)).tanh(), self.projection(right).sin()
+
+    reference = nn.Module()
+    reference.encoder = nn.Module()
+    reference.encoder.net = nn.Module()
+    reference.encoder.net.layers = nn.ModuleList([Layer(), Layer()])
+    recomputed = copy.deepcopy(reference)
+    checkpoint_rrnco_encoder(recomputed)
+    assert reference.state_dict().keys() == recomputed.state_dict().keys()
+    inputs = [torch.randn(3, 4), torch.randn(3, 4)]
+    outputs = []
+    for model in (reference, recomputed):
+        torch.manual_seed(3011)
+        left, right = [x.clone().requires_grad_() for x in inputs]
+        for layer in model.encoder.net.layers:
+            left, right = layer(left, right)
+        (left.square().sum() + right.square().sum()).backward()
+        outputs.append((left.detach(), right.detach()))
+    for expected, actual in zip(outputs[0], outputs[1]):
+        torch.testing.assert_close(actual, expected)
+    for expected, actual in zip(reference.parameters(), recomputed.parameters()):
+        torch.testing.assert_close(actual.grad, expected.grad)
+    with torch.no_grad():
+        torch.manual_seed(3011)
+        expected = reference.encoder.net.layers[0](*inputs)
+        torch.manual_seed(3011)
+        actual = recomputed.encoder.net.layers[0](*inputs)
+    for a, b in zip(expected, actual):
+        torch.testing.assert_close(a, b)
+
+
 def instance():
     return SimpleNamespace(num_customers=3,num_charging_stations=0,instance_id='x',
         distance_matrix_km=np.array([[0,1,2,3],[1,0,1,2],[2,1,0,1],[3,2,1,0]],dtype=np.float32),

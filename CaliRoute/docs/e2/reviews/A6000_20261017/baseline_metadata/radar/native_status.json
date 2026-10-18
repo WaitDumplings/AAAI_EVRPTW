@@ -1,0 +1,27 @@
+{
+  "best_metric": [
+    1000,
+    -204.30174066493848
+  ],
+  "checkpoint": {
+    "backup_path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/checkpoint_backups/E1_CVRP100_S3009_V1_a6000_cuda_fix1/radar/last.pt",
+    "backup_verified": true,
+    "path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/native_checkpoints/last.pt",
+    "sha256": "2b2a64c872ad01757f888c4ac1e11cd6180b175f2840bbe91a005be20bdcb2fe"
+  },
+  "counters": {
+    "complete_rollouts": 4800000,
+    "decision_steps": 496507190,
+    "evaluation_wall_time_s": 436.280432137195,
+    "instance_exposures": 96000,
+    "optimizer_updates": 1517,
+    "training_wall_time_s": 428.6926997471601
+  },
+  "method": "radar",
+  "pretrained_initialization": false,
+  "state": "completed",
+  "test_complete": false,
+  "total_instance_exposures": 96000,
+  "training_complete": true,
+  "updated": "2026-10-11T06:47:42.174487+00:00"
+}

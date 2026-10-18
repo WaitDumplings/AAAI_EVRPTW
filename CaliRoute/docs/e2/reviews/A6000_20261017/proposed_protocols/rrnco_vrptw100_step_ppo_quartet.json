@@ -1,0 +1,64 @@
+{
+  "status": "proposed_not_approved",
+  "panel": "E2-B",
+  "arms": [
+    "PPO",
+    "AWBC",
+    "DAPG",
+    "SL-PPO"
+  ],
+  "host": "same native RRNCO actor without RDI/AGDA",
+  "critic": "shared StepCritic architecture current+mean embedding and time/load; actor encoder receives value gradients in all arms",
+  "initialization": "same actor and critic scratch parameter hashes",
+  "seed": 3009,
+  "batch": 64,
+  "n_traj": 50,
+  "online_batches": 1500,
+  "instance_exposures": 96000,
+  "exposure_note": "proposal only, not approved by native 1517-update record",
+  "ppo_passes": 4,
+  "gamma": 1.0,
+  "gae_lambda": 0.95,
+  "clip": 0.2,
+  "optimizer": "Adam",
+  "actor_lr": 1e-06,
+  "critic_lr": 0.0001,
+  "weight_decay": 0.0,
+  "value_coef": 0.5,
+  "entropy_coef": 0.01,
+  "grad_clip": 1.0,
+  "reward_scale_km": 100.0,
+  "precision": "FP32 initially; BF16 replay was tested but must be pinned identically across arms",
+  "target_kl": 0.02,
+  "kl_guard": "required before formal training; stop/skip remaining passes for ALL arms using same rule",
+  "cache": "save per-instance neighbor indices; re-encode current parameters every update; preserve start-major layout",
+  "forced_actions": "first POMO/externally supplied expert customer excluded from learnable likelihood; included in physical-return and GAE bookkeeping",
+  "expert_pool": {
+    "split": "train",
+    "sha256": "c87e32e45dbe1639ffc75cde39b01df4879ce6822861698face19d006171e583",
+    "same_pool_for_all_three": true,
+    "small_sample_only_verified": true
+  },
+  "incumbent": "scalar physical cost only; no self trajectory replay",
+  "validation": {
+    "interval_exposures": 3200,
+    "K": 50,
+    "batch": 8,
+    "count": 1000
+  },
+  "test": {
+    "K": 50,
+    "batch": 1,
+    "count": 1000,
+    "seed": 17003009
+  },
+  "outstanding": [
+    "Formal rollout buffer, sharding and minibatch identity audit",
+    "Four-pass and full batch64 x50 memory/throughput preflight",
+    "Implement and verify target-KL rule",
+    "Complete E1 SL-PPO coefficients/gates/cost-incumbent curriculum and persistence",
+    "AWBC and DAPG losses with the identical external expert pool",
+    "Full checkpoint/resume RNG and optimizer/sampler tests",
+    "Explicit approval of the proposed common budget"
+  ]
+}

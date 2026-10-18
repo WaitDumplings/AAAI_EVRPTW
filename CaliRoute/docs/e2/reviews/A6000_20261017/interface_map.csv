@@ -1,0 +1,15 @@
+host,field,shape,meaning_units,code_boundary,status
+RADAR,reset.problems,"B,N,N",directed road km; feature ratios / per-instance max,install_radar_agda.pre,verified
+RADAR,reset.node_demand,"B,N-1",demand/capacity; native SVD projection additionally normalizes total demand,install_radar_agda.pre,verified
+RADAR,state.current_node / load,"B,S",node index / remaining capacity fraction,install_radar_agda.context_hook,verified
+RADAR,visited / mask,"B,S,N",visitation tracked from actions; mask native finite(ninf_mask),install_radar_agda.record_hook,verified
+RADAR,candidate features,"B,S,N,9","forward/reverse/D[j,0]/D[0,j]/demand/load/visited/feasible/is_depot; no time/battery",e2/adapters/radar.py,verified
+RADAR,system / tokens,"B,S,4 / B,S,4,D",load/unserved demand/unserved fraction/depot distance; current/depot/graph/unvisited embeddings,e2/adapters/radar.py,verified
+RADAR,decoder set_kv/set_q1,native,delegates unchanged; pre_forward invalidates parameter-dependent cache,RadarAGDADecoder,verified
+RADAR,residual order,native,"delta action-key then divide sqrt(D), native tanh, then action-bias, native hard mask",RadarAGDADecoder.forward,verified
+RRNCO,static encode,"B,N,D","AAFM/NAB unchanged; replay discrete indices B,N,25; recompute live parameter graph",rrnco_step.encode_static,verified
+RRNCO,step probabilities,"S*B,N","native pointer + alpha*D_norm+beta*T_horizon, log(exp(x)+1e-6), native tanh/mask/temperature",rrnco_step.step_logits,verified
+RRNCO,trajectory likelihood,"L,S*B","per-action FP32 logp/entropy, policy_valid; first external action and done padding excluded",rrnco_step.run_actions,verified
+RRNCO,critic,"S*B,258",128 current +128 graph mean +time +remaining capacity; same architecture all arms,rrnco_step.StepCritic,verified
+RRNCO,AGDA key insertion,"B,S,N,D","after native glimpse+FFN, residual into projected logit_key before dot product/sqrt(D)",RRNet_PointerAttention.forward,not_tested
+RRNCO,AGDA bias insertion,"S*B,N","AFTER native inductive bias nonlinear and tanh, BEFORE hard mask/temperature; requires decode-strategy context API",DecodingStrategy.step / process_logits,not_tested

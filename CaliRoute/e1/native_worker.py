@@ -243,6 +243,9 @@ class RrncoRunner:
             init_embedding_kwargs=dict(use_coords=True, use_polar_feats=True, use_dist=True,
                                        use_matnet_init=False, sample_type="prob", sample_size=25))
         policy = RRNetPolicy(**self.architecture)
+        if cfg.get('rrnco_encoder_checkpointing', False):
+            from e1.native_vrptw import checkpoint_rrnco_encoder
+            checkpoint_rrnco_encoder(policy)
         self.model = RRNet(self.env, policy=policy, num_augment=1, num_starts=cfg["n_traj"],
             no_aug_coords=False, batch_size=cfg["batch_size"], train_data_size=self.generator.dataset_size,
             val_data_size=1, test_data_size=1, optimizer_kwargs=dict(lr=cfg["native_learning_rate"],
@@ -303,8 +306,9 @@ class RrncoRunner:
         from tensordict import TensorDict
         from rl4co.utils.ops import unbatchify
         self.batch_decision_cap = None
+        # RCVRPEnv allocates reset state from td.device, not its leaf tensors.
         td = TensorDict({key: torch.from_numpy(arrays[key][start:stop]).to(self.device)
-                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start])
+                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start], device=self.device)
         if self.cfg.get('problem_type')=='vrptw':
             for key in ('demand_linehaul','duration_matrix','time_windows','service_time'):
                 td[key]=torch.from_numpy(arrays[key][start:stop]).to(self.device)

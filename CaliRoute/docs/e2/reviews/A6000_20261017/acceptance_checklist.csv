@@ -1,0 +1,17 @@
+item,status,evidence_or_limit
+prepare,verified,Background prepare completed; status prepared_not_training; no formal worker
+frozen_source,verified,136 native source files match HEAD and frozen manifest; 13 harness entries separately compared
+datasets,verified,"All 6 NPZ, metadata and source PKL hashes checked; ordered IDs exported"
+native_first_batch,verified,Both frozen first batches exactly reproduce recorded loss/cost/decisions/rollouts
+training_counters,verified,Actual 1517 row sequence and cumulative counters checked; 96000 exposures each
+checkpoint_selection,verified,"E1 archive best/last metadata+hashes, 30 validation records and test selected SHA retained"
+radar_adapter,verified,Real 2x3 CVRP100 routes; off/zero/gradient/mask/update/checkpoint checks
+rrnco_replay,verified,FP32/BF16 same-neighborhood per-action replay; native greedy parity
+rrnco_ppo_slppo_core,verified,Two updates per arm using GAE and external train expert; portable solution-level losses
+rrnco_agda,not_tested,Specific insertion map supplied; native AGDA wrapper not implemented
+full_slppo,not_tested,"Cost-incumbent persistence, complete E1 coefficients/gates and schedule not ported"
+awbc_dapg,not_tested,Formal loss integration and short updates pending after common trainer acceptance
+long_run_resume,not_tested,Model state replay tested; complete optimizer/sampler/RNG campaign resume pending
+formal_batch_memory,not_tested,First native 64x50 batch tested; NEW plugin/PPO full 64x50+four passes not certified
+formal_protocol,conditional,Proposed common configs only; no formal training started
+transport,conditional,User authorized review/e2-a6000-native-20261017; remote verification is performed after commit/push

@@ -1,0 +1,35 @@
+/data/Maojie/AAAI/.venvs/e1-radar/lib/python3.12/site-packages/torch/__init__.py:1240: UserWarning: torch.set_default_tensor_type() is deprecated as of PyTorch 2.1, please use torch.set_default_dtype() and torch.set_default_device() as alternatives. (Triggered internally at /pytorch/torch/csrc/tensor/python_tensor.cpp:434.)
+  _C._set_default_tensor_type(t)
+/data/Maojie/AAAI/.venvs/e1-radar/lib/python3.12/site-packages/torch/optim/lr_scheduler.py:182: UserWarning: Detected call of `lr_scheduler.step()` before `optimizer.step()`. In PyTorch 1.1.0 and later, you should call them in the opposite order: `optimizer.step()` before `lr_scheduler.step()`.  Failure to do this will result in PyTorch skipping the first value of the learning rate schedule. See more details at https://pytorch.org/docs/stable/optim.html#how-to-adjust-learning-rate
+  warnings.warn(
+{
+  "method": "radar",
+  "historical_initial_checkpoint_available": false,
+  "reconstructed_initial_sha256": "237f292a787d19593e2a34a0bea0dbc03b512762630c042b8bfdd056cc77bc8f",
+  "frozen_worker": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1_cvrp_cus100/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/native_harness/e1/native_worker.py",
+  "batch": 64,
+  "n_traj": 50,
+  "comparison": {
+    "loss": {
+      "recorded": -331.2273864746094,
+      "reproduced": -331.2273864746094,
+      "absolute_error": 0.0
+    },
+    "best_training_cost_km": {
+      "recorded": 1570.586669921875,
+      "reproduced": 1570.586669921875,
+      "absolute_error": 0.0
+    },
+    "decision_steps": {
+      "recorded": 354119,
+      "reproduced": 354119,
+      "absolute_error": 0
+    },
+    "completed_rollouts": {
+      "recorded": 3200,
+      "reproduced": 3200,
+      "absolute_error": 0
+    }
+  },
+  "exact_first_batch_match": true
+}

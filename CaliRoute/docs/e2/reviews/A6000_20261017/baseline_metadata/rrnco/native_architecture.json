@@ -1,0 +1,24 @@
+{
+  "architecture": {
+    "embed_dim": 128,
+    "env_name": "rcvrptw",
+    "init_embedding_kwargs": {
+      "sample_size": 25,
+      "sample_type": "prob",
+      "use_coords": true,
+      "use_dist": true,
+      "use_matnet_init": false,
+      "use_polar_feats": true
+    },
+    "nab_type": "gating",
+    "normalization": "instance",
+    "num_encoder_layers": 6,
+    "num_heads": 8,
+    "use_graph_context": false
+  },
+  "method": "rrnco",
+  "native_objective": true,
+  "parameters": 4290252,
+  "problem_type": "vrptw",
+  "task_adapter": "rrnco_native_rcvrptw_with_road_time_contract"
+}

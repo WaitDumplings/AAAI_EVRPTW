@@ -1,0 +1,74 @@
+--- a/CaliRoute/e1/native_worker.py
++++ b/CaliRoute/e1/native_worker.py
+@@ -243,6 +243,9 @@
+             init_embedding_kwargs=dict(use_coords=True, use_polar_feats=True, use_dist=True,
+                                        use_matnet_init=False, sample_type="prob", sample_size=25))
+         policy = RRNetPolicy(**self.architecture)
++        if cfg.get('rrnco_encoder_checkpointing', False):
++            from e1.native_vrptw import checkpoint_rrnco_encoder
++            checkpoint_rrnco_encoder(policy)
+         self.model = RRNet(self.env, policy=policy, num_augment=1, num_starts=cfg["n_traj"],
+             no_aug_coords=False, batch_size=cfg["batch_size"], train_data_size=self.generator.dataset_size,
+             val_data_size=1, test_data_size=1, optimizer_kwargs=dict(lr=cfg["native_learning_rate"],
+@@ -303,8 +306,9 @@
+         from tensordict import TensorDict
+         from rl4co.utils.ops import unbatchify
+         self.batch_decision_cap = None
++        # RCVRPEnv allocates reset state from td.device, not its leaf tensors.
+         td = TensorDict({key: torch.from_numpy(arrays[key][start:stop]).to(self.device)
+-                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start])
++                         for key in ("depot", "locs", "demand", "capacity", "distance_matrix")}, batch_size=[stop-start], device=self.device)
+         if self.cfg.get('problem_type')=='vrptw':
+             for key in ('demand_linehaul','duration_matrix','time_windows','service_time'):
+                 td[key]=torch.from_numpy(arrays[key][start:stop]).to(self.device)
+--- a/CaliRoute/e1/native_vrptw.py
++++ b/CaliRoute/e1/native_vrptw.py
+@@ -10,6 +10,21 @@
+ from torch import nn
+ 
+ TIME_EPS = 1e-7
++
++
++def checkpoint_rrnco_encoder(policy):
++    """Recompute encoder-layer activations; retain native weights and batch loss."""
++    from torch.utils.checkpoint import checkpoint
++    for layer in policy.encoder.net.layers:
++        original = layer.forward
++
++        def forward(*args, _original=original, **kwargs):
++            if torch.is_grad_enabled():
++                return checkpoint(_original, *args, use_reentrant=False,
++                                  preserve_rng_state=True, **kwargs)
++            return _original(*args, **kwargs)
++
++        layer.forward = forward
+ 
+ 
+ def convert_vrptw_instances(instances, expected_customers):
+--- a/CaliRoute/e1/validator.py
++++ b/CaliRoute/e1/validator.py
+@@ -13,9 +13,6 @@
+ 
+ def validate_routes(instance, routes, reported_cost=None):
+     """Require complete depot-to-depot routes; never repair an incomplete route."""
+-    if getattr(instance, 'num_charging_stations', 0) or getattr(instance, 'metadata', {}).get('charging_constraint') is True:
+-        from e1.evrptw_contract import validate_evrptw_routes
+-        return validate_evrptw_routes(instance, routes, reported_cost)
+     n = int(instance.num_customers)
+     d = np.asarray(instance.distance_matrix_km, dtype=np.float64)
+     demand = np.asarray(instance.demands_cm3, dtype=np.float64)
+--- a/CaliRoute/e1/evaluation.py
++++ b/CaliRoute/e1/evaluation.py
+@@ -97,7 +97,7 @@
+     limit = evaluation.get('eval_limit'); cap = evaluation['eval_max_steps']
+     if k != 50 and not cfg.get('experiment_protocol', {}).get('smoke_only'):
+         raise ValueError('Formal E1 evaluation requires exactly K=50')
+-    data = iter_adapted_instances(evaluation['eval_path'], problem_type=cfg['data']['problem_type'], strict_road_metric=True, limit=limit)
++    data = iter_adapted_instances(evaluation['eval_path'], problem_type='cvrp', strict_road_metric=True, limit=limit)
+     batches_limit = evaluation.get('eval_num_batches')
+     seen = 0; batch_index = 0
+     while True:
+--- a/CaliRoute/e1/__init__.py
++++ b/CaliRoute/e1/__init__.py
+@@ -1 +0,0 @@
+-"""E1: CVRP100, seven scratch methods and a fixed, audited evaluation contract."""

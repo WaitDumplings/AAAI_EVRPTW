@@ -1,0 +1,27 @@
+{
+  "best_metric": [
+    1000,
+    -239.08668082952127
+  ],
+  "checkpoint": {
+    "backup_path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/checkpoint_backups/E1_VRPTW100_NATIVE_S3009_A6000_V2/rrnco/last.pt",
+    "backup_verified": true,
+    "path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/native_checkpoints/last.pt",
+    "sha256": "fba07877c4b1ebe912bc514bfb4fb7f08a93c9e4818c1103cd077b64782ede6c"
+  },
+  "counters": {
+    "complete_rollouts": 4800000,
+    "decision_steps": 489933517,
+    "evaluation_wall_time_s": 1074.3436151635833,
+    "instance_exposures": 96000,
+    "optimizer_updates": 1517,
+    "training_wall_time_s": 2242.8016848210245
+  },
+  "method": "rrnco",
+  "pretrained_initialization": false,
+  "state": "completed",
+  "test_complete": false,
+  "total_instance_exposures": 96000,
+  "training_complete": true,
+  "updated": "2026-10-13T01:35:48.122222+00:00"
+}

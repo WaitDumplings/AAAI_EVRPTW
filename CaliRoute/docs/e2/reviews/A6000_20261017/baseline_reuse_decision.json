@@ -1,0 +1,55 @@
+{
+  "review_base_commit": "ca71bd3df61205992803b0f8309e6826df5f2aae",
+  "formal_training_started": false,
+  "radar_e2a": {
+    "status": "conditional",
+    "decision": "Reusable if enhancement arm adopts the pinned E1 protocol exactly; no unconditional approval",
+    "native_source_files_verified": 12,
+    "first_batch_exact": true,
+    "requirements": [
+      "native source and task adapter hashes",
+      "ordered dataset and split hashes",
+      "scratch seed and RNG initialization",
+      "batch sequence including boundary truncations",
+      "instance exposure budget and K",
+      "optimizer LR/weight decay/scheduler call order",
+      "validation frequency and checkpoint selection",
+      "inference mode/seed/batch/starts/cap and physical validator",
+      "augmentation and normalization",
+      "no loading trained E1 checkpoint into enhancement arm"
+    ],
+    "historical_initial_checkpoint_available": false
+  },
+  "rrnco_e2a": {
+    "status": "conditional",
+    "decision": "Same protocol conditional reuse; native AGDA decoder integration remains not_tested",
+    "native_source_files_verified": 124,
+    "first_batch_exact": true,
+    "requirements": [
+      "native source and task adapter hashes",
+      "ordered dataset and split hashes",
+      "scratch seed and RNG initialization",
+      "batch sequence including boundary truncations",
+      "instance exposure budget and K",
+      "optimizer LR/weight decay/scheduler call order",
+      "validation frequency and checkpoint selection",
+      "inference mode/seed/batch/starts/cap and physical validator",
+      "augmentation and normalization",
+      "no loading trained E1 checkpoint into enhancement arm"
+    ],
+    "historical_initial_checkpoint_available": false
+  },
+  "rrnco_e2b": {
+    "status": "verified",
+    "decision": "Native E1 REINFORCE is NOT a PPO baseline; all four actor-critic arms must start from the same new scratch initialization",
+    "step_replay": "verified",
+    "ppo_and_slppo_core_updates": "verified",
+    "complete_slppo_curriculum": "not_tested",
+    "awbc_dapg": "not_tested",
+    "formal_worker": "not_tested"
+  },
+  "rerun_conditions": [
+    "Any change to the pinned E2-A source/training/data/inference protocol requires a new matched native baseline",
+    "E2-B always needs a new step-PPO baseline; E1 native result cannot substitute"
+  ]
+}

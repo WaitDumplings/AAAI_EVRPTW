@@ -1,0 +1,6 @@
+Server: a6000; seed=3009; Cus100; test K=50; single GPU per job
+GPU0: rrnco_vrptw100_ppo -> rrnco_vrptw100_awbc
+GPU1: rrnco_vrptw100_slppo -> rrnco_vrptw100_dapg
+NOT READY FOR TRAINING: 5 unresolved integration/protocol items
+Prepared queue: /data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_CUS100_S3009_V1_a6000/server_plan.json
+Readiness: /data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_CUS100_S3009_V1_a6000/status.json

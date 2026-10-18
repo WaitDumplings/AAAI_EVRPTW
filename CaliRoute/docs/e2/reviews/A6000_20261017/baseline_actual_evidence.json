@@ -1,0 +1,250 @@
+{
+  "radar": {
+    "counters": {
+      "complete_rollouts": 4800000,
+      "decision_steps": 496507190,
+      "evaluation_wall_time_s": 436.280432137195,
+      "instance_exposures": 96000,
+      "optimizer_updates": 1517,
+      "training_wall_time_s": 428.6926997471601
+    },
+    "batch_histogram": {
+      "64": 1483,
+      "8": 5,
+      "56": 5,
+      "16": 5,
+      "48": 5,
+      "24": 5,
+      "40": 5,
+      "32": 4
+    },
+    "lr_values": [
+      0.0004
+    ],
+    "train_log_sha256": "a69ed3d21552b214f6189e594177bc4ded366c5a95d7554391091ffdabc5042e",
+    "datasets": {
+      "train": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 5000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "10fe88aa977b70f8cf81d6cc34b35d0efd0ee204131fafca618e0d43b83afbb2",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/cvrp/train/Cus100/instances.pkl",
+        "source_sha256": "2e381c2c1d4508180b634cc76587e09e4437764d5cb24f5b47562a3e30b755b5",
+        "split": "train",
+        "metadata_sha256": "e48de5c4bc3c98ee9fd4542a3a8c1575ca77e318eae53e96795b1794c6a90685",
+        "id_list_sha256": "75faac184c111b5f488bc11ee38569b196eb5978856754e8359c7933cf0720b8",
+        "hashes_verified_now": true
+      },
+      "val": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 1000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "e680547227b8991dc833002a4801f0a4575e2fff92489a6db1e3022c34cda4a1",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/cvrp/val/Cus100/instances.pkl",
+        "source_sha256": "f05de226bf129f361c6bf974795077f007daaacf47bdd3df5e88d133bd48478a",
+        "split": "val",
+        "metadata_sha256": "27568278e4f384c11748f2df629fea74e3b1d539fac91d41df5ba0ed060dbaaa",
+        "id_list_sha256": "db25d93692858c717ba8b89d9ebfd6153a69697c378e603e96bafb1b1427f02e",
+        "hashes_verified_now": true
+      },
+      "test": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 1000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "b13d3bfd8d22c2de97b2a0965bf475f41e8cd69732e4e77ffb212ad23eccf589",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/test_release/cvrp/test/Cus100/instances.pkl",
+        "source_sha256": "a024aaa7c5c3945c03e8fc0e4ee3eca24604956c4ac7df6a2a17246381362a65",
+        "split": "test",
+        "metadata_sha256": "028ba72cba1b0689af44e4af4ac4d49b4182bec4cdcf8d208635c6f0b99fc24e",
+        "id_list_sha256": "edb136ab7840826f180509157e61f529d93abedc4083d262a84253f75c8b59be",
+        "hashes_verified_now": true
+      }
+    },
+    "test_manifest": {
+      "accepted": true,
+      "checkpoint": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/native_checkpoints/best.pt",
+      "checkpoint_sha256": "9a26c61420b27830dab845146ecbf88967987ca6a7a699b1de8d74b10ccb2c17",
+      "final_checkpoint_sha256": "2b2a64c872ad01757f888c4ac1e11cd6180b175f2840bbe91a005be20bdcb2fe",
+      "formal_training_complete": true,
+      "instances_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+      "method": "radar",
+      "result": {
+        "actual_K": [
+          50
+        ],
+        "actual_candidates": 50000,
+        "checkpoint_id": "9a26c61420b27830dab845146ecbf88967987ca6a7a699b1de8d74b10ccb2c17",
+        "cost_mismatch_candidates": 0,
+        "evaluation_batch_size": 1,
+        "failure_count": 0,
+        "feasible_count": 1000,
+        "feasible_instances": 1000,
+        "feasible_rate": 1.0,
+        "instances": 1000,
+        "mean_distance_km": 204.3652851530332,
+        "mean_runtime_s": 0.07344711947627365,
+        "mean_vehicle_count": 1.865,
+        "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_CVRP100_S3009_V1_a6000_cuda_fix1/runs/radar/test/instances.jsonl",
+        "output_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+        "requested_K": [
+          50
+        ],
+        "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+        "split": "test",
+        "state": "completed",
+        "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+        "training_seeds": [
+          3009
+        ],
+        "updated": "2026-10-11T20:26:54.157208+00:00",
+        "wall_time_s": 73.54419038398191
+      },
+      "test_data_sha256": "a024aaa7c5c3945c03e8fc0e4ee3eca24604956c4ac7df6a2a17246381362a65"
+    },
+    "test_jsonl_sha256": "620fe3785cb025e2985cc06807ff5d0fa5a679a8a476133e35829f33c8f708de",
+    "current_source_diff_count": 0,
+    "head_source_diff_count": 0
+  },
+  "rrnco": {
+    "counters": {
+      "complete_rollouts": 4800000,
+      "decision_steps": 489933517,
+      "evaluation_wall_time_s": 1074.3436151635833,
+      "instance_exposures": 96000,
+      "optimizer_updates": 1517,
+      "training_wall_time_s": 2242.8016848210245
+    },
+    "batch_histogram": {
+      "64": 1483,
+      "8": 5,
+      "56": 5,
+      "16": 5,
+      "48": 5,
+      "24": 5,
+      "40": 5,
+      "32": 4
+    },
+    "lr_values": [
+      0.0004
+    ],
+    "train_log_sha256": "9e6e6d597452f8bc00bcb9fc98905c09e1eb894cc86c0432807fec3d63dd57af",
+    "datasets": {
+      "train": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 5000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "078096065c69b6d22b0fb67d4cf83712b739faebde45637845aef5347f69099b",
+        "problem_type": "vrptw",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/vrptw/train/Cus100/instances.pkl",
+        "source_sha256": "bc09aa2112a3827f98cb1ee564135b054ff3d2a14f8ff6e89d6e30fe0e2fc81f",
+        "split": "train",
+        "metadata_sha256": "db9842d8ca78a624647234e54c239f5e2e557cebf53ac0829ba03d5f70cbcebf",
+        "id_list_sha256": "75faac184c111b5f488bc11ee38569b196eb5978856754e8359c7933cf0720b8",
+        "hashes_verified_now": true
+      },
+      "val": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 1000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "acb940b7fc366f573369aec8ed4946a5a1fb251ae90031232fcd1660c6ba7adc",
+        "problem_type": "vrptw",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/dataset/vrptw/val/Cus100/instances.pkl",
+        "source_sha256": "41abd42dbf67877061bd4886c080536832edcbc2debdd0bf55735d6256837193",
+        "split": "val",
+        "metadata_sha256": "c502d24dfe601d83393223e19f9fa0d680959149445bef8d830b40e891602ead",
+        "id_list_sha256": "db25d93692858c717ba8b89d9ebfd6153a69697c378e603e96bafb1b1427f02e",
+        "hashes_verified_now": true
+      },
+      "test": {
+        "coordinate_transform": "native_per_axis_minmax",
+        "count": 1000,
+        "customers": 100,
+        "demand_storage": "raw_demand_and_raw_capacity",
+        "directed": true,
+        "distance_unit": "km",
+        "npz_sha256": "60ed303694e7f489e662247bf3100cd696ba04e040c5a3b382e298c20eea9d37",
+        "problem_type": "vrptw",
+        "source_path": "/data/Maojie/AAAI/AAAI_Dataset/test_release/vrptw/test/Cus100/instances.pkl",
+        "source_sha256": "10f08f0f518f12dc433b977f8633d26d1d6097ffb2b27ca187e52f6c37757214",
+        "split": "test",
+        "metadata_sha256": "ff79edb14474cb0c0d20ae9d6dd8ce122271edaf2a221334641feae3d19050ea",
+        "id_list_sha256": "edb136ab7840826f180509157e61f529d93abedc4083d262a84253f75c8b59be",
+        "hashes_verified_now": true
+      }
+    },
+    "test_manifest": {
+      "accepted": true,
+      "checkpoint": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/native_checkpoints/best.pt",
+      "checkpoint_sha256": "31202343e857e387c0900ec3e1b9296dea031dc0bc3ae501002de827d59f4c94",
+      "evaluator_path": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW50_NATIVE_S3009_A6000_V2/source/CaliRoute/scripts/evaluate_e1_vrptw_native.py",
+      "evaluator_sha256": "608e47238b3ad317f8997acb5cd56a879aa83395fce1e4d47286be460f34ea6d",
+      "formal_training_complete": true,
+      "gpu": {
+        "has_compute_process": false,
+        "index": 0,
+        "name": "NVIDIA RTX 6000 Ada Generation",
+        "total_mib": 49140,
+        "used_mib": 170,
+        "utilization": 0,
+        "uuid": "GPU-ac54cfb6-580f-8d72-d249-7bce81209a15"
+      },
+      "instances_sha256": "d8a21c3b94c16a10fd8e248970e7f7ee17a19be0330a5d39e80054a4a27e89bd",
+      "method": "rrnco",
+      "num_customers": 100,
+      "problem_type": "vrptw",
+      "result": {
+        "actual_K": [
+          50
+        ],
+        "actual_candidates": 50000,
+        "checkpoint_id": "31202343e857e387c0900ec3e1b9296dea031dc0bc3ae501002de827d59f4c94",
+        "cost_mismatch_candidates": 0,
+        "evaluation_batch_size": 1,
+        "failure_count": 0,
+        "feasible_count": 1000,
+        "feasible_instances": 1000,
+        "feasible_rate": 1.0,
+        "instances": 1000,
+        "mean_distance_km": 239.38207336870022,
+        "mean_runtime_s": 0.1986546188122593,
+        "mean_vehicle_count": 2.479,
+        "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/E1_VRPTW100_NATIVE_S3009_A6000_V2/runs/rrnco/test/instances.jsonl",
+        "output_sha256": "d8a21c3b94c16a10fd8e248970e7f7ee17a19be0330a5d39e80054a4a27e89bd",
+        "requested_K": [
+          50
+        ],
+        "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+        "split": "test",
+        "state": "completed",
+        "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+        "training_seeds": [
+          3009
+        ],
+        "updated": "2026-10-13T02:07:00.650961+00:00",
+        "wall_time_s": 198.75116033200175
+      },
+      "test_batch_size": 1,
+      "test_data_sha256": "10f08f0f518f12dc433b977f8633d26d1d6097ffb2b27ca187e52f6c37757214",
+      "test_disjoint_from_train_and_val": true,
+      "training_seed": 3009
+    },
+    "test_jsonl_sha256": "d8a21c3b94c16a10fd8e248970e7f7ee17a19be0330a5d39e80054a4a27e89bd",
+    "current_source_diff_count": 0,
+    "head_source_diff_count": 0
+  }
+}

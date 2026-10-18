@@ -1,0 +1,12 @@
+{
+  "base_commit": "ca71bd3df61205992803b0f8309e6826df5f2aae",
+  "review_time_utc": "2026-10-18T06:45:22.647217+00:00",
+  "hardware": "NVIDIA RTX 6000 Ada Generation",
+  "radar_torch": "2.7.0+cu126",
+  "rrnco_torch": "2.7.0+cu126",
+  "lock_files": [
+    "radar_environment.lock.txt",
+    "rrnco_environment.lock.txt"
+  ],
+  "environment_upgraded": false
+}
