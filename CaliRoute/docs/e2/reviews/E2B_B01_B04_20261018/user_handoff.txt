@@ -1,0 +1,124 @@
+# 给 A6000 agent：E2-B 的四个实验
+
+本轮目标：在同一个外部 RRNCO actor 上，比较 PPO、AWBC、DAPG、SL-PPO，验证经验利用方法能否迁移到 CaliRoute 以外的模型。四组均为 **VRPTW-Cus100，training seed=3009，从头训练，独立 test 1000 条，K=50**。
+
+本文件是实验定义与交接要求，不代表远端接口已经验收，也不是已启动训练的通知。具体训练预算和超参数需根据远端实际实现统一冻结。
+
+## 1. 需要跑的就是这四组
+
+| E2 表编号 | 实验名称 / 建议 run 标识 | Actor | 训练目标 | 专家数据 |
+|---|---|---|---|---|
+| B01 | RRNCO + PPO / `rrnco_vrptw100_ppo` | 同一 RRNCO | 逐动作 PPO/GAE | 不读取、不使用 |
+| B02 | RRNCO + AWBC / `rrnco_vrptw100_awbc` | 同上 | 同一 PPO + E1 提交版本的 AWBC | 同一份 VRPTW100 train 专家 |
+| B03 | RRNCO + DAPG / `rrnco_vrptw100_dapg` | 同上 | 同一 PPO + E1 提交版本的 DAPG | 同上 |
+| B04 | RRNCO + SL-PPO / `rrnco_vrptw100_slppo` | 同上 | 同一 PPO + E1 提交版本的完整 SL-PPO | 同上 |
+
+这里的 AWBC、DAPG、SL-PPO 是训练方法，不是三个不同网络。AWBC 的加权模仿、DAPG 的示范损失与衰减、SL-PPO 的解级训练信号，应迁移当前提交的 E1 实现，不临时换成名称相近的其他实现。
+
+**四组都不新增我们的 RDI 或 AGDA。** RRNCO 自己原本就有的道路编码、AAFM/NAB、距离/时间偏置继续保留。B01 不是 E1 那个“移除道路输入的 PPO base”；不要因为名字含 PPO 就删除 RRNCO 的原生道路输入。
+
+这四组也不是：RADAR 原版、RADAR+AGDA、RRNCO 原版、RRNCO+AGDA。后者属于 E2-A 的架构模块实验。
+
+## 2. 需要新建匹配 PPO 基线
+
+E1 的 RRNCO-VRPTW100 原生结果使用原生训练目标，不能直接填入 B01。即便 E1 baseline 已通过验收，也不能拿它与 B04 比较后，把差异全部归因于 SL-PPO。
+
+B01–B04 必须共用同一套逐动作 PPO：每一步保留动作 log-prob、value、reward、done/truncated、有效步 mask；GAE、bootstrap 和 PPO 重算规则一致。不能用“把完整构造过程视为 single-step MDP”的 PPO 替代。
+
+宿主建议从已核查的 E1 RRNCO 冻结源码出发，逐文件记录 hash。保留原生 encoder/decoder，不借用 CaliRoute actor 伪装成外部 actor。新增的 critic 结构、输入、参数共享和初始化在四组中完全相同。
+
+## 3. 公平比较中哪些必须相同
+
+| 类别 | 四组需要统一并留档的内容 |
+|---|---|
+| 数据 | train/val/test 路径、实例 ID、文件与语义哈希、split 隔离；专家只来自 train |
+| 物理环境 | 同一道路 D/T、容量、客户与 depot 时窗、等待、服务、末段返仓、decode cap、失败处理 |
+| 输入与结构 | 原生 RRNCO 输入/归一化、actor、critic、mask、原生道路/时间偏置；无新增 RDI/AGDA |
+| 初始化 | 同 seed、相同 actor/critic 初始参数哈希；从随机初始化开始，不加载 E1 best 或其他已训练 ckpt |
+| 在线采样 | sampler、全局实例 batch、每实例训练轨迹数、起点/解码规则、训练实例曝光预算 |
+| PPO | passes、minibatches、梯度累积、clip、gamma、GAE lambda、value/entropy系数、loss reduction、target KL及实际停止规则 |
+| 优化器 | LR、LR schedule、weight decay、梯度裁剪、FP32/AMP、实际 optimizer 更新与 AMP 跳步统计 |
+| 评估 | 相同验证集、验证频率、best规则、inference seed、K=50、候选生成方式、test batch和计时范围 |
+
+方法特有的专家项、系数/衰减、BC预热、专家重放量是允许的区别，必须显式记录。不能为了“其他字段都一样”而删除 DAPG 的方法组成，也不能给某组额外加入未声明的 PPO warm-up。
+
+“从头训练”指四组使用相同随机初始化规则，不使用外部已训练权重；若 E1 方法本身包含专家 BC 预热，单列预热轮次、专家曝光和耗时，并继续匹配在线预算。
+
+统一在线预算不等于总计算量相等：专家方法还有额外 teacher-forcing/损失计算。报告在线实例曝光、轨迹数、有效 decision steps、实际 optimizer steps、专家工作量以及累计训练 wall-clock。
+
+**尚未冻结的参数：** E2-B 的全局 batch、训练轨迹数、PPO passes、LR、gamma/GAE、target KL、在线采样轮次/曝光预算。先核对 E1 实际冻结配置并做短程预检，再输出一份四组共用配置；不要把远端当前默认值当成已商定协议。
+
+尤其不能照搬 E2-A 的更新数口径：POMO 的1500次REINFORCE更新、EVRPTW-RL的1500次更新、旧RRNCO的1517次更新，都不是E2-B已确定的PPO预算。记录 `online_rollout_iterations`、`instance_exposures`、`optimizer_steps_actual`，不要只写模糊的 epoch。
+
+## 4. 专家与 SL-PPO 的方法边界
+
+- AWBC、DAPG、SL-PPO 使用同一份经物理校验的 VRPTW-Cus100 训练专家池，记录实例映射、路线、道路成本和专家文件 hash；PPO 不读取专家池。
+- 外部专家记录允许包含成本和完整路线；模型自己的 incumbent 只保存成本，不保存自己的历史路线做 self-replay。
+- SL-PPO 沿用 `e1_cost_incumbent_v1` 完整契约；不要仅接一个 route-level loss 就声称移植了完整方法，也不要换成旧 explore/历史路线 archive 版本。
+- 不使用 val/test 的路线或成本训练、选择训练专家、更新 incumbent 或校准 reward。test 在验证集选定 best 后进行。
+- 不把另一个问题的专家直接套用到 VRPTW；不以 E1 RRNCO 的已训练权重作为四组初始化。
+
+## 5. 正式运行前先通过这些短程检查
+
+先打通 B01/PPO 与 B04/SL-PPO，再补 B02/AWBC、B03/DAPG。四组完成相同预检后才开始对应正式 run。
+
+1. **原生 actor 等价性。** 新 adapter 在不新增训练项时，保留原生概率、mask、路线成本；共享宿主参数初始 hash 一致。新增模块初始化不能扰动宿主初始化/采样 RNG。
+2. **未更新参数时的概率回放。** 同一轨迹 old/replay log-prob 接近一致、ratio≈1、KL≈0；报告最大误差和分位数。分别检查 FP32 和计划使用的实际精度，不只看平均 loss。
+3. **外生随机性。** RRNCO 的 `sample_type='prob'` 邻域采样要在 rollout/replay 中使用相同外生样本；保持 batchify/unbatchify 的实例/轨迹顺序。更新参数后重建依赖参数的编码缓存，不复用 detach 的旧 embedding 代替当前策略。
+4. **有效步与 critic。** forced depot/POMO start、done后padding、无合法动作和截断规则一致；强制动作不伪造可学习log-prob，value/GAE对齐正确，mask过的动作概率为0。
+5. **专家 teacher-forcing。** 专家路线通过同一环境和独立 validator；动作概率、成本、末段返仓都能重放。AWBC/DAPG/SL-PPO 的梯度非零且有限，单次更新后概率实际改变。
+6. **保存恢复与资源。** checkpoint包含actor、critic、optimizer、RNG、方法状态；恢复可继续同一协议。验证单卡短程运行、显存峰值、速度及自动best-test流程。
+
+读取同一物理实例的道路 D 和道路行驶时间 T，不从欧氏距离偷偷推算时间。保留 RRNCO 原生距离/时间偏置及其非线性；任何公共数值修复需用于四组并单独记录。
+
+## 6. A6000 两张卡的建议队列
+
+以下是建议排队顺序，不代表当前GPU已空闲。不要中断正在运行的E2-A或其他任务。
+
+| GPU | 第一项 | 该项训练和 best-test 验收后 |
+|---|---|---|
+| GPU0 | B01：RRNCO + PPO | B02：RRNCO + AWBC |
+| GPU1 | B04：RRNCO + SL-PPO | B03：RRNCO + DAPG |
+
+每个实验单卡，四组采用相同全局有效batch与在线预算；这样两张A6000可同时跑两组。用microbatch/chunk和必要的梯度累积适配显存，需验证梯度等价性，不能只为填满显存给一组增加有效batch或候选数。
+
+请准备正式 `nohup/setsid` shell，记录PID、日志、config、源码冻结和恢复信息。后继任务等待当前项best-test验收；训练/测试失败时写明状态，不把进程退出码0当作结果已验收。
+
+现有 `scripts/run_e2_a6000.sh` 属于早期准备入口，不能仅凭它存在就宣称四组正式训练已可运行。先检查远端实际代码；若接口尚未完成，交回明确缺项。
+
+## 7. 回传文件和结果
+
+建议目录：`CaliRoute/results/e2/E2B_RRNCO_VRPTW100_S3009/`，四个run分开保存。不要覆盖 E1 或 E2-A 结果。
+
+请回传：
+
+- `protocol.json`：四组共用协议、方法差异、各hash、预算计数定义。
+- `smoke_results.json`：上述接口与概率回放的实测误差、梯度、显存和耗时。
+- 每组 manifest/config、源码版本/哈希、train/eval日志、best选择依据、checkpoint哈希。
+- 每组 `test/instances.jsonl`、summary、acceptance：1000个实例完整覆盖，实际K50，成功/失败均记录；由独立validator重算道路km。
+- 结果更新至 E2 表 **B01、B02、B03、B04**，与A05/A06（RRNCO原生/AGDA）区分。
+
+| 实验 | 可行数/1000 | 自身可行均值 km | 与B01共同可行数 | 共同子集双方均值 | 配对改善% | 推理s/实例 | 训练h |
+|---|---|---|---|---|---|---|---|
+| B01 PPO | TBD | TBD | N/A | N/A | N/A | TBD | TBD |
+| B02 AWBC | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| B03 DAPG | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| B04 SL-PPO | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+相对B01的改善按共同可行实例计算 `mean_i[100*(C_PPO,i-C_method,i)/C_PPO,i]`，不是两个均值的比值。若各对照共同子集不同需分别标明；四方法横向成本比较另给四组共同可行子集。当前单training seed不写seed mean±std。
+
+推理记录硬件、batch和计时边界；训练耗时包含验证和方法预热，恢复停机间隔分开。缺失填TBD，不能用0代替。
+
+## 8. 当前可参考的代码与说明
+
+以下路径相对 `CaliRoute/`；请以远端实际文件及冻结配置为准，不整份复制 E1 模型配置。
+
+- `benchmarks/native_sources/rrnco/rrnco/`：原生RRNCO宿主。
+- `e1/native_vrptw.py`、`e1/validator.py`：VRPTW适配与独立物理校验。
+- `offline2online/trainer.py`、`caliroute/plugins/slppo.py`：E1训练实现与解级PPO核心；后者不包含完整SL-PPO方法所需的所有逻辑。
+- `e1/configs.py`：E1方法配置入口；核对真实run配置，不照搬其CaliRoute模型定义或默认问题类型。
+- `e2/protocol.py`：协议匹配与逐实例配对汇总；还需检查三个专家方法的专家hash互相一致。
+- [详细接口核查清单](RADAR_RRNCO_A6000_handoff.md)：重点看第6节RRNCO逐动作回放与物理契约。
+- [用户原始执行说明](user_execution_specification.txt)、[E2结果表](E2_experiment_table.csv)。
+
+请先交回“接口是否已验收＋四组最终共同配置＋可运行命令”，之后按机器空闲情况安排正式训练；不要将未完成的adapter或准备shell描述成已经跑通。

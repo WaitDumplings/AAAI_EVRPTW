@@ -62,7 +62,7 @@ def step_logits(policy, state, cache, starts):
 
 def run_actions(policy, env, batch, critic, *, starts=3, actions=None,
                 neighbors=None, cap=201, greedy=False, forced_start=True,
-                start_actions=None):
+                start_actions=None, allow_terminal_padding=False):
     """Roll out or teacher-force complete routes. Output shape [time, S*B].
 
     POMO start is external, has logprob=0 and policy_valid=False, but its
@@ -117,7 +117,15 @@ def run_actions(policy, env, batch, critic, *, starts=3, actions=None,
     if not td['done'].all():
         raise RuntimeError('Decode cap exceeded; no silent truncated success')
     if actions is not None and len(results['actions']) != actions.size(0):
-        raise ValueError('Teacher-forced sequence has unaccounted trailing actions')
+        tail=actions[len(results['actions']):]
+        if not allow_terminal_padding or bool((tail!=0).any()):
+            raise ValueError('Teacher-forced sequence has unaccounted trailing actions')
+        for action in tail:
+            for key in results:
+                value=torch.zeros_like(results[key][-1])
+                if key=='actions':value=action
+                if key=='mask':value[...,0]=True
+                results[key].append(value)
     output = {k: torch.stack(v) for k,v in results.items()}
     output['neighbors'] = samples
     output['physical_cost'] = -output['reward'].sum(0)
