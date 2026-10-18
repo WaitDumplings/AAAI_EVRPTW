@@ -1,0 +1,22 @@
+{
+  "loss": {
+    "e1": -1.7209655046463013,
+    "enhanced": -1.7209655046463013,
+    "exact": true
+  },
+  "best_training_cost_km": {
+    "e1": 2445.19921875,
+    "enhanced": 2445.19921875,
+    "exact": true
+  },
+  "decision_steps": {
+    "e1": 488882,
+    "enhanced": 488882,
+    "exact": true
+  },
+  "completed_rollouts": {
+    "e1": 3200,
+    "enhanced": 3200,
+    "exact": true
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "baseline_first_batch": {
+    "best_training_cost_km": 2116.165771484375,
+    "completed_rollouts": 6,
+    "decision_steps": 822,
+    "loss": -43.06037139892578
+  },
+  "batch": 2,
+  "disabled_first_batch": {
+    "best_training_cost_km": 2116.165771484375,
+    "completed_rollouts": 6,
+    "decision_steps": 822,
+    "loss": -43.06037139892578
+  },
+  "disabled_gradient_relative_l2": 2.7488638775846164e-06,
+  "enabled_first_batch": {
+    "best_training_cost_km": 2116.165771484375,
+    "completed_rollouts": 6,
+    "decision_steps": 822,
+    "loss": -43.06037139892578
+  },
+  "n_traj": 3,
+  "optimizer_coverage": true,
+  "passed": true,
+  "plugin_gradient_l1": 28846.78475476624,
+  "plugin_rng_preserved": true,
+  "reload_validation": {
+    "actual_K": [
+      3
+    ],
+    "actual_candidates": 6,
+    "checkpoint_id": "smoke",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 2,
+    "failure_count": 0,
+    "feasible_count": 2,
+    "feasible_instances": 2,
+    "feasible_rate": 1.0,
+    "instances": 2,
+    "mean_distance_km": 815.2622993905097,
+    "mean_runtime_s": 0.17791654681786895,
+    "mean_vehicle_count": 8.0,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_RRNCO_VRPTW100_S3009_A6000_V1/smoke/agda/reload_validation.jsonl",
+    "output_sha256": "20d8df74e8ffb65792a4e90f2ab0b0f3bec1c3b03b588136dc7abaf26f2abb23",
+    "requested_K": [
+      3
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "val",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "wall_time_s": 0.3962892317213118
+  },
+  "shared_gradient_max_error": 0.005859375,
+  "shared_gradient_relative_l2": 2.5901259806079086e-06,
+  "updates": [
+    {
+      "best_training_cost_km": 2116.165771484375,
+      "completed_rollouts": 6,
+      "decision_steps": 822,
+      "loss": -43.06037139892578
+    },
+    {
+      "best_training_cost_km": 2063.14697265625,
+      "completed_rollouts": 6,
+      "decision_steps": 774,
+      "loss": 18.11049461364746
+    },
+    {
+      "best_training_cost_km": 777.7860107421875,
+      "completed_rollouts": 6,
+      "decision_steps": 656,
+      "loss": -20.08840560913086
+    }
+  ],
+  "validation": {
+    "actual_K": [
+      3
+    ],
+    "actual_candidates": 6,
+    "checkpoint_id": "smoke",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 2,
+    "failure_count": 0,
+    "feasible_count": 2,
+    "feasible_instances": 2,
+    "feasible_rate": 1.0,
+    "instances": 2,
+    "mean_distance_km": 815.2622993905097,
+    "mean_runtime_s": 0.177849163999781,
+    "mean_vehicle_count": 8.0,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_RRNCO_VRPTW100_S3009_A6000_V1/smoke/agda/validation.jsonl",
+    "output_sha256": "f56ea4434b2f21866151482a7ea831d03b7a7be170d5b386a275fe02c9be54f0",
+    "requested_K": [
+      3
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "val",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "wall_time_s": 0.3983783442527056
+  },
+  "variant": "agda"
+}
