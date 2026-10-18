@@ -1,0 +1,57 @@
+E2 first batch: three-server queue preparation
+
+Current readiness
+-----------------
+These shells are PREPARATION shells. No E2 end-to-end training backend has
+passed integration acceptance yet. --execute fails with exit code 2 BEFORE
+starting a training process. This is not an approval prompt and is not caused
+by GPU availability. It cannot be bypassed by passing --baseline-policy reuse.
+
+Commands (from CaliRoute; absolute script paths also work)
+--------------------------------------------------------
+bash scripts/run_e2_2080ti_a.sh
+bash scripts/run_e2_a6000.sh
+bash scripts/run_e2_2080ti_3.sh
+
+The default command only previews the plan. Add --prepare to write planned
+run configurations and readiness status in a detached nohup/setsid process.
+Add --check to inspect the outstanding integration work synchronously.
+
+2080ti_a:
+  GPU0: POMO CVRP100 base
+  GPU1: POMO CVRP100 + RDI
+  GPU2: RADAR CVRP100 + AGDA
+  GPU3: reserved; matched RADAR base if E1 reuse cannot be accepted
+A6000:
+  GPU0: RRNCO VRPTW100 + PPO, then + AWBC
+  GPU1: RRNCO VRPTW100 + SL-PPO, then + DAPG
+2080ti_3:
+  GPU0: EVRPTW-RL (local paper reimplementation) Cus100 base
+  GPU1: EVRPTW-RL Cus100 + AGDA
+  GPU2: RRNCO VRPTW100 + AGDA; prepend matched native base if needed
+
+Single GPU per run. Seed3009, test1000, K50, from scratch.
+Keep 2080ti_b on its E1 EVRPTW100 AWBC/DAPG jobs.
+A queued successor must wait for accepted best-checkpoint test, not just
+training process exit. No queue successor starts during preparation.
+
+Portable overrides
+------------------
+E2_PYTHON=/path/to/python
+E2_DATA_ROOT=/path/to/AAAI_Dataset
+E2_OUTPUT=/path/to/e2/results
+E2_BASELINE_POLICY=pending|reuse|rerun (default pending)
+
+'reuse' only requests reuse; a source/data/protocol audit is still needed.
+'rerun' adds the two native baseline slots; all jobs still require integration.
+Do not run two profiles on the same physical machine's GPU IDs concurrently.
+
+Outputs
+-------
+results/e2/E2_CUS100_S3009_V1_<server>/server_plan.json
+results/e2/E2_CUS100_S3009_V1_<server>/runs/<job>/planned_run.json
+results/e2/E2_CUS100_S3009_V1_<server>/status.json
+results/e2/launchers/<server>/preparation.log
+
+The preparation process exits after writing the plan. Its nohup PID is NOT
+a training PID. See formal_training_started=false and state=prepared_not_training.

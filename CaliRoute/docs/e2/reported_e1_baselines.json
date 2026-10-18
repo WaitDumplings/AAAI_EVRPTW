@@ -1,0 +1,63 @@
+{
+  "recorded_at": "2026-10-18T06:09:44.425131+00:00",
+  "source": "User-supplied remote E1 audit summary in conversation",
+  "local_artifacts_verified": false,
+  "remote_export_directory": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e1/exports/E1_native_baselines_20261017",
+  "local_destination": "/data/Maojie/AAAI_EVRPTW/CaliRoute/results/e1/exports/E1_native_baselines_20261017",
+  "common_reported": {
+    "training_seed": 3009,
+    "batch_size": 64,
+    "n_traj": 50,
+    "optimizer_updates": 1517,
+    "instance_exposures": 96000,
+    "training_pool_size": 5000,
+    "data_passes": 19.2,
+    "learning_rate": 0.0004,
+    "learning_rate_decayed": false,
+    "test_K": 50,
+    "test_count": 1000,
+    "test_feasible_count": 1000
+  },
+  "runs": {
+    "radar_cvrp100": {
+      "problem": "cvrp",
+      "backbone": "radar",
+      "best_optimizer_update": 455,
+      "test_mean_km": 204.365285
+    },
+    "rrnco_vrptw100": {
+      "problem": "vrptw",
+      "backbone": "rrnco",
+      "best_optimizer_update": 1517,
+      "test_mean_km": 239.382073
+    }
+  },
+  "local_budget_reconstruction": {
+    "status": "Matches reported counts under local E1 default eval_interval_exposures=3200; not a substitute for remote logs",
+    "eval_interval_exposures_assumed": 3200,
+    "optimizer_updates": 1517,
+    "instance_exposures": 96000,
+    "batch_size_counts": {
+      "8": 5,
+      "16": 5,
+      "24": 5,
+      "32": 4,
+      "40": 5,
+      "48": 5,
+      "56": 5,
+      "64": 1483
+    },
+    "reason": "Native batches stop at dataset end and validation-exposure boundaries; some batches are smaller than 64"
+  },
+  "eligibility": {
+    "panel_A": "Candidate only; compare source/config/data hashes, initialization, native trainer, actual batch sequence and evaluation protocol before accepting reuse",
+    "panel_B": "Not eligible as PPO baseline; native REINFORCE differs from step-level PPO"
+  },
+  "outstanding": [
+    "Evidence archive files unavailable at both supplied remote path and corresponding local path",
+    "Verify archive hashes and frozen source against E2 host sources",
+    "Verify train/val/test hashes and sampling/order, initialization RNG and full LR/optimizer settings",
+    "Verify evaluation schedule, inference seed, native greedy-multistart vs sampling, batch size, masks, decode cap and checkpoint-selection rule",
+    "Preserve derived-summary provenance; recompute from original per-instance results"
+  ]
+}

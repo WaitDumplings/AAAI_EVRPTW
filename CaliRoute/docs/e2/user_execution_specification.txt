@@ -1,0 +1,203 @@
+**对，接下来就是 E2：跨 backbone 的模块集成验证。** 它不是再做一遍 E1 的完整方法排名，而是回答：
+
+> **同一个外部 routing solver，在保留自身结构与训练协议的前提下，加入我们的模块，是否能改善解质量？这种作用是否仅限于 TERRAN？**
+
+沿用我们之前确定的范围：**CVRP、VRPTW、EVRPTW 都覆盖，每个任务选择一到两个兼容的宿主；先做 Cus100、单 seed，不复制全部三个规模。**
+
+我把执行说明和结果占位表整理好了，可以交给 code agent：
+
+:chatgpt-content-reference{index="6"}[下载 E2 执行计划与回填表](sandbox:/mnt/data/AAAI_E2_CrossBackbone_Execution_Plan.md)
+
+下面是这轮具体需要做的事情。
+
+## 一、E2 分成两部分，不要将架构改动和训练目标混在一起
+
+### E2-A：RDI／AGDA 的跨 backbone 集成
+
+对一个选定的宿主 \(B\)，进行以下适用的比较：
+
+| 配置 | 改动 | 训练方式 | 回答的问题 |
+|---|---|---|---|
+| **B** | 原宿主 | 保留原生训练方式 | 匹配基线 |
+| **B + RDI** | 只加入 encoder 道路关系模块 | 与 B 相同 | RDI 是否在其他兼容 encoder 上有效？ |
+| **B + AGDA** | 只加入 decoder 候选修正模块 | 与 B 相同 | AGDA 是否在其他兼容 decoder 上有效？ |
+| **B + RDI + AGDA** | 同时加入两个架构模块 | 与 B 相同 | 可选的组合验证 |
+
+**前两个单模块比较比最后的组合比较更重要。** 不能只跑原版和“三个模块全部加入”，然后声称三个模块都完成了独立迁移验证。
+
+而且，一个宿主不必支持所有模块。例如，POMO 本来使用 modified REINFORCE；验证其 RDI／AGDA 插件时，可以保留这一训练方式，不必同时改成 PPO。这样还能检验架构模块是否依赖你们的 PPO 实现。[arXiv](https://arxiv.org/abs/2010.16011)
+
+### E2-B：SL-PPO 的跨 actor 验证
+
+这里保持同一个外部 actor，比较不同训练目标：
+
+| 配置 | Actor | 训练目标 | 外部经验 |
+|---|---|---|---|
+| **B + PPO** | 完全相同 | 你们的 step-level PPO | 不使用 |
+| **B + AWBC** | 同上 | PPO＋提交版本的 AWBC | 同一批训练专家 |
+| **B + DAPG** | 同上 | PPO＋提交版本的 DAPG | 同上 |
+| **B + SL-PPO** | 同上 | PPO＋当前 SL-PPO | 同上 |
+
+**这一组不要默认同时加入 RDI/AGDA。** 保留宿主自己的道路编码和 decoder，只改变训练目标，才能判断 SL-PPO 的作用是否依赖你们原来的 actor。
+
+这里也有一个必须避免的错误：
+
+\[
+\underbrace{\text{原生 REINFORCE 的宿主}}_{\text{原训练算法}}
+\quad\text{vs}\quad
+\underbrace{\text{宿主 + SL-PPO}}_{\text{算法、critic、经验都可能变化}}
+\]
+
+这可以作为系统比较，却不能单独隔离 SL-PPO 的收益。**需要先建立同一 actor 下的 PPO 对照。**
+
+另一个实现细节是：RL4CO 官方文档中的 PPO 将整个自回归构造视为 single-step MDP，不能未经核查就替代你们逐动作的 PPO/GAE。E2 应优先复用 E1 已验证的训练逻辑，再适配外部 actor。[RL4CO](https://rl4co.ai4co.org/docs/content/api/rl/ppo/)
+
+---
+
+## 二、三个任务分别用哪些宿主？
+
+我建议继续使用之前的候选分工，但区分“候选结构合适”和“本地代码已经跑通”。
+
+| Problem | 宿主 | E2 中的主要任务 | 当前安排 |
+|---|---|---|---|
+| **CVRP** | **POMO** | 优先验证 RDI；AGDA 可选 | 可以先启动接口检查 |
+| **CVRP** | **RADAR** | 优先验证 AGDA；选定后可验证匹配 PPO 下的 SL-PPO | 尽量复用 E1 的原版实现和结果 |
+| **VRPTW** | **RRNCO** | AGDA，以及匹配 PPO 下的 SL-PPO | 作为第一宿主 |
+| **VRPTW** | **RouteFinder** | RDI／AGDA 的第二宿主候选 | 先核查本地实现与道路接口 |
+| **EVRPTW** | **一个独立、兼容的已有模型** | 按真实接口选择 RDI／AGDA／SL-PPO | 先由 agent 审计并锁定具体名称 |
+| **EVRPTW** | 第二个宿主 | 补充第一宿主没有覆盖的接口 | 可选，不必一开始同时开发 |
+
+这里有几处不能为了表格整齐而强行处理：
+
+**RRNCO 不适合直接按普通 encoder attention 插入 RDI。** 它的 encoder 使用 AAFM/NAB，且已经融合道路关系；其公开实现支持 CVRP 与带时间窗的容量路由，因此更适合先承担 VRPTW 上的 AGDA 和训练目标验证。[arXiv](https://arxiv.org/html/2503.16159v2)
+
+**RADAR 的道路编码必须保留。** 它使用 SVD 表示与 Sinkhorn 机制；不能先关闭这些原生组件，再把结果称为“原版 RADAR＋我们的模块”。[GitHub](https://github.com/yihang0410/RADAR)
+
+**RouteFinder 支持时间窗等 VRP 属性，但这不自动证明它已兼容你们的有向道路矩阵和环境定义。** 它目前仍是第二宿主候选，而不是已经确认可直接启动的配置。[AI4CO](https://ai4co.github.io/routefinder/?utm_source=chatgpt.com)
+
+**EVRPTW 的具体宿主需要以本地仓库为准。** 之前提到的模型名称不能直接当成“已经复现完成”。也不能只用 TERRAN 自身的 base，替代外部 backbone 验证。
+
+最终实验可以做到“每个任务都有外部宿主”，但不必做到“每个宿主都接齐三个模块”。**哪些接口实际验证过，论文就将结论限定到哪些接口。**
+
+---
+
+## 三、E1 已经完成，哪些可以直接复用？
+
+**可以复用的是这次重新训练完成的 E1 基线，不需要将它们全部重新跑一遍。**
+
+例如，如果 E1 的 RADAR-CVRP100 与 E2 使用相同的数据、实现、训练预算、seed 和评估规则，那么：
+
+\[
+\text{E1 的 RADAR}
+\quad\text{可以直接作为}\quad
+\text{RADAR + AGDA 的基线}.
+\]
+
+RRNCO 也同理。
+
+但有两个限制。
+
+### 1. 原生训练器改变后，需要新基线
+
+E1 的 RRNCO/RADAR 原生训练结果，不能自动充当 E2-B 中的 `B + PPO`。这是一条不同的训练配置，需要匹配地训练。
+
+### 2. 复用基线结果，不等于给增强版额外预训练
+
+**不建议拿已经训练完的 E1 checkpoint 加上模块继续训练，然后与只经历原预算的 E1 baseline 比较。** 那会混入额外训练量和初始化优势。
+
+本轮主对照仍建议：
+
+> **原宿主和增强宿主按匹配的初始化、数据与训练预算从头训练；已有 E1 基线符合这些条件时，直接复用其结果。**
+
+所以 E2 的新增工作主要是增强版本和必要的 PPO 适配基线，而不是重做整个 E1。
+
+---
+
+## 四、现在交给 agent 的第一批任务
+
+### 第一步：先给每个宿主做接口审计
+
+不需要先启动所有长训练。Agent 应先输出一张兼容性表，说明：
+
+**实际代码路径和版本、encoder 关系评分接口、decoder K/V/logit-key 接口、原生 trainer、环境差异、可复用的 E1 run，以及能测试哪些模块。**
+
+尤其要检查：
+
+- 模块关闭时，是否恢复宿主原来的前向行为。
+- AGDA 是否只修改预定接口，而不是把整个 decoder 换成你们的实现。
+- PPO 接入后，固定轨迹的动作概率能否正确重算。
+- 时间窗、充电、站点访问和 decoding cap 是否与统一环境一致。
+
+**EVRPTW 宿主的选择应在这一步完成，不等 CVRP 全部跑完以后才处理。**
+
+### 第二步：先启动 CVRP 的两组成对实验
+
+第一批可以明确成：
+
+| 组别 | Baseline | 新增训练 |
+|---|---|---|
+| **RDI 外部验证** | POMO-CVRP100 | POMO＋RDI |
+| **AGDA 外部验证** | RADAR-CVRP100 | RADAR＋AGDA |
+
+如果 POMO 不在已完成的 E1 中，就需要补原版 POMO；RADAR 基线符合协议时直接复用。
+
+这两组先用 **E1 实际采用的 training seed**。不要把此前建议过的 `3009` 自动当成实际值，以 agent 的 manifest 为准。
+
+### 第三步：并行打通 SL-PPO 的外部 actor 接口
+
+选定一个宿主后，先验证 `B + PPO` 与 `B + SL-PPO` 能正确训练和回放，再补齐 AWBC/DAPG。
+
+**至少在一个外部 actor 上完成四项比较。** 其他任务可以先跑 PPO/SL-PPO 确认，但仅凭这两行，不能单独证明 SL-PPO 比其他经验利用方式更好。
+
+这一轮继续保留我们已经确定的方法边界：
+
+**外部记录提供成本与完整轨迹；自身 incumbent 只存成本；不新增 self-replay。**
+
+### 第四步：扩展 VRPTW／EVRPTW，最后补 seeds
+
+三个任务使用各自的训练实例与训练专家，不能把 CVRP 的经验记录直接套到另一个任务。
+
+先单 seed 完成兼容性和实验流程；配置冻结后，关键比较补另外两个 seeds。**不要求现在同时开启所有宿主、全部模块组合和三 seeds。**
+
+---
+
+## 五、E2 最后应该交回什么结果？
+
+建议正文分成两张小表或一个表的两个面板。
+
+### 表 A：架构模块集成
+
+| Problem | Backbone | 加入模块 | 原版成本 | 增强版成本 | 改善（%） | 原版／增强版可行数 | 推理时间变化 |
+|---|---|---|---:|---:|---:|---|---|
+| CVRP | POMO | RDI | TBD | TBD | TBD | TBD | TBD |
+| CVRP | RADAR | AGDA | TBD | TBD | TBD | TBD | TBD |
+| VRPTW | RRNCO | AGDA | TBD | TBD | TBD | TBD | TBD |
+| EVRPTW | 待锁定宿主 | 实际测试模块 | TBD | TBD | TBD | TBD | TBD |
+
+第二宿主和其他兼容模块按实际运行补行，不必预先填满所有格子。
+
+### 表 B：训练目标的跨 actor 验证
+
+| Problem | 固定 actor | PPO | AWBC | DAPG | SL-PPO |
+|---|---|---:|---:|---:|---:|
+| CVRP | 选定宿主 | TBD | TBD | TBD | TBD |
+| VRPTW | 选定宿主 | TBD | TBD | TBD | TBD |
+| EVRPTW | 选定宿主 | TBD | TBD | TBD | TBD |
+
+**E2 的主要指标是相对于同一宿主的增量，而不是再次围绕 Gurobi 排名。** 对一对方法，在共同可行实例集合 \(S\) 上计算：
+
+\[
+\mathrm{Improvement}
+=
+\frac{100}{|S|}
+\sum_{i\in S}
+\frac{C_{B,i}-C_{B+M,i}}{C_{B,i}}.
+\]
+
+同时报告全体测试实例上的可行数和 \(|S|\)，避免成本改善掩盖可行率下降。正值表示改善，负值照实保留。详细回填表中还应记录参数量、训练时间、checkpoint、配置和逐实例结果路径。
+
+---
+
+**因此，E2 现在的第一件事是：锁定各任务宿主及其兼容接口，复用合格的 E1 基线，然后启动“POMO＋RDI、RADAR＋AGDA”，并行适配外部 actor 的 PPO/SL-PPO。** 不需要重新生成 test 或再跑 Gurobi，也不需要先展开 E3 的所有消融。
+
+目前这条消息还没有附上完成后的三张 E1 表，之前部分附件也已过期。**请把三张回填表和对应 run/config 路径重新上传，便于核对哪些基线可以直接复用。**

@@ -1,0 +1,55 @@
+{
+  "repository": "https://github.com/yd-kwon/POMO",
+  "git_head": "d7c3d6ea580499a53e874fe9e065f69e799a8551",
+  "scope": "Unmodified official CVRP Python source and README only; no weights or datasets",
+  "files": [
+    {
+      "path": "NEW_py_ver/CVRP/CVRProblemDef.py",
+      "sha256": "0f3c90ffda2274e6e82a5370acb31cd482eda03ab52e10612dfabd76f35e6428"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/CVRPEnv.py",
+      "sha256": "1e16b84204a6b8788cd96c85b239b4b1697501262e67f0856960e21bec17295e"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/CVRPModel.py",
+      "sha256": "b68ce5d922632bd2643da7660188194c962311607667abff852e1ba24db84fa4"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/CVRPTester.py",
+      "sha256": "871a4d819674316b8663cf8fa2a0f4975721b881a8b93c96478714de3d43547c"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/CVRPTrainer.py",
+      "sha256": "77cc016669d28ccb8bf6ad860a31bfe97590377c15ebbe503f18520b54f36996"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/test_n100.py",
+      "sha256": "75cdee0a4bfbb799f5fcc4d24ff2ddaa19398aeddb3d17f153d5b880286a3940"
+    },
+    {
+      "path": "NEW_py_ver/CVRP/POMO/train_n100.py",
+      "sha256": "af03faf82acfed2995eafa66414c918a018a833a448ca33ac386d8518de4a330"
+    },
+    {
+      "path": "NEW_py_ver/utils/log_image_style/style_cvrp_20.json",
+      "sha256": "886a29bbed132eac45a719b5e1eb6aacd6b6da4d7e7a132a9ad917f88177b105"
+    },
+    {
+      "path": "NEW_py_ver/utils/log_image_style/style_loss_1.json",
+      "sha256": "eb67399538571d2cbd507bcd62c98f2c939cc7510a58640aa1a33a52fc1e6d30"
+    },
+    {
+      "path": "NEW_py_ver/utils/log_image_style/style_tsp_20.json",
+      "sha256": "d8cadbf4dd4f88175821f7dfb51b955dbdf8d817e80a1c21c8bf029eadee5955"
+    },
+    {
+      "path": "NEW_py_ver/utils/utils.py",
+      "sha256": "52c41f224d322702453109f8c01d2aae30d4c544579d61c59a66e9e87ea7bf45"
+    },
+    {
+      "path": "README.md",
+      "sha256": "f8455535bbe7c9ebe7487f0a2183a8dcd44325679ee9dbcc4b17c8d944d719a7"
+    }
+  ]
+}

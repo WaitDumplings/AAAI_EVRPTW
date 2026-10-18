@@ -1,0 +1,510 @@
+{
+  "schema": "e2_preparation_v1",
+  "created_at": "2026-10-18T05:37:45.652913+00:00",
+  "stage": "interface_audit_and_protocol_preparation",
+  "formal_training_started": false,
+  "customers": 100,
+  "training_seed": {
+    "proposed": 3009,
+    "status": "Local controlled E1 config verified as 3009; user reports both remote native baselines also seed3009; archive confirmation pending",
+    "local_evidence": "results/e1/E1_CVRP100_BASE_NO_ROAD_S3009_E1500_20261012_R2/runs/ppo_base/config.yaml -> experiment_protocol.training_seed=3009"
+  },
+  "test": {
+    "count": 1000,
+    "K": 50,
+    "split": "reuse E1 independent test; no new generation"
+  },
+  "phases": {
+    "A": "Native trainer unchanged within host; baseline/RDI and baseline/AGDA before combined",
+    "B": "Fixed external actor and critic, matched step PPO/GAE; PPO vs AWBC vs DAPG vs SL-PPO"
+  },
+  "modules": {
+    "RDI": "Reuse joint node-edge graph core as an explicit host-compatible residual addition while retaining host encoder; additive RoadDistanceInjection alone must be labeled a reduced variant, not full E1 RDI.",
+    "AGDA": "Reuse AdaptiveGraphAttention; E1 core uses delta_action_key + action_bias, delta_k/v off. Host feature packing is explicit; do not replace native decoder.",
+    "SLPPO": "Use submitted E1 cost-incumbent contract: external train trajectories and costs; own incumbent costs only; no self-replay."
+  },
+  "jobs": [
+    {
+      "server": "2080ti_a",
+      "gpu": 0,
+      "tasks": [
+        "pomo_cvrp100_base"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_a",
+      "gpu": 1,
+      "tasks": [
+        "pomo_cvrp100_rdi"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_a",
+      "gpu": 2,
+      "tasks": [
+        "radar_cvrp100_agda"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_a",
+      "gpu": 3,
+      "tasks": [],
+      "state": "preparation_only"
+    },
+    {
+      "server": "a6000",
+      "gpu": 0,
+      "tasks": [
+        "rrnco_vrptw100_ppo",
+        "rrnco_vrptw100_awbc"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "a6000",
+      "gpu": 1,
+      "tasks": [
+        "rrnco_vrptw100_slppo",
+        "rrnco_vrptw100_dapg"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_3",
+      "gpu": 0,
+      "tasks": [
+        "evrptw_rl_evrptw100_base"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_3",
+      "gpu": 1,
+      "tasks": [
+        "evrptw_rl_evrptw100_agda"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_3",
+      "gpu": 2,
+      "tasks": [
+        "rrnco_vrptw100_agda"
+      ],
+      "state": "preparation_only"
+    },
+    {
+      "server": "2080ti_b",
+      "gpu": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "tasks": [
+        "Continue E1 EVRPTW100 AWBC/DAPG"
+      ],
+      "state": "reserved"
+    }
+  ],
+  "launch_gates": [
+    "module-off logits/actions/gradients match original host",
+    "matched common host parameter initialization independent of plugin RNG",
+    "real directed-road environment route/cost validation",
+    "mask polarity, charging/time and decoding-cap audit",
+    "unchanged-policy fixed-trajectory replay KL near zero including SVD RNG, dropout/BatchNorm and LSTM state",
+    "finite gradients through enabled module; parameter/update/transition and sample counters",
+    "same effective batch, exposure, LR schedule, validation/test K; only chunks vary with hardware",
+    "source/data/config hashes and E1 baseline reuse check"
+  ],
+  "known_blocks": [
+    "Remote RADAR/RRNCO E1 run provenance absent locally",
+    "End-to-end adapters/training launchers not ready. RADAR decoder boundary exists, but feature packing and real native rollout/optimizer integration remain pending.",
+    "EVRPTW host is a local paper reimplementation with explicit environment adaptations; not official code"
+  ],
+  "references": [
+    "https://github.com/yd-kwon/POMO",
+    "https://github.com/yihang0410/RADAR",
+    "https://rl4co.ai4co.org/docs/content/api/rl/ppo/",
+    "https://arxiv.org/abs/2010.02068"
+  ],
+  "completed_checks": [
+    "Official POMO CVRP source pinned to d7c3d6ea580499a53e874fe9e065f69e799a8551, including native trainer utilities",
+    "Native POMO Cus100 forward/backward and hard-mask smoke passed",
+    "EVRPTW-RL local paper reimplementation Cus100+20CS tensor forward/backward and identical same-state replay passed",
+    "RADAR AGDA action-key/bias decoder boundary: exact disabled/zero-init probabilities, nonzero gradients, hard-mask preservation passed",
+    "6 E2 protocol/adapter tests passed; real-environment and full PPO trajectory replay not yet tested"
+  ],
+  "e1_reuse_fallback": "If remote native provenance cannot be verified, train a new matched native baseline on reserved GPU2; never infer comparability from summary cost.",
+  "remote_baseline_report": "docs/e2/reported_e1_baselines.json",
+  "native_panel_A_candidate_budget": {
+    "instance_exposures": 96000,
+    "batch_size": 64,
+    "n_traj": 50,
+    "expected_optimizer_updates": 1517,
+    "learning_rate": 0.0004,
+    "initialization": "scratch",
+    "note": "Match archived native batch boundaries and evaluation schedule; do not reinterpret as 1500 full dataset epochs. This does not set Panel B PPO budgets."
+  },
+  "server_shells": {
+    "2080ti_a": "scripts/run_e2_2080ti_a.sh",
+    "a6000": "scripts/run_e2_a6000.sh",
+    "2080ti_3": "scripts/run_e2_2080ti_3.sh"
+  },
+  "server_queue_plans": {
+    "2080ti_a": {
+      "schema": "e2_server_plan_v1",
+      "server": "2080ti_a",
+      "baseline_policy": "pending",
+      "baseline_reuse_approved": false,
+      "reuse_note": "reuse is a request, not acceptance; matching archive/hash audit still required",
+      "campaign": "E2_CUS100_S3009_V1_2080ti_a",
+      "queues": {
+        "0": [
+          {
+            "id": "pomo_cvrp100_base",
+            "problem": "cvrp",
+            "customers": 100,
+            "backbone": "pomo",
+            "panel": "A",
+            "objective": "native_pomo_reinforce",
+            "modules": [],
+            "after": [],
+            "baseline": null,
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 0,
+            "CUDA_VISIBLE_DEVICES": "0",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ],
+        "1": [
+          {
+            "id": "pomo_cvrp100_rdi",
+            "problem": "cvrp",
+            "customers": 100,
+            "backbone": "pomo",
+            "panel": "A",
+            "objective": "native_pomo_reinforce",
+            "modules": [
+              "RDI"
+            ],
+            "after": [],
+            "baseline": "pomo_cvrp100_base",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 1,
+            "CUDA_VISIBLE_DEVICES": "1",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ],
+        "2": [
+          {
+            "id": "radar_cvrp100_agda",
+            "problem": "cvrp",
+            "customers": 100,
+            "backbone": "radar",
+            "panel": "A",
+            "objective": "native_pomo_reinforce",
+            "modules": [
+              "AGDA"
+            ],
+            "after": [],
+            "baseline": "radar_cvrp100_base",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 2,
+            "CUDA_VISIBLE_DEVICES": "2",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "needs_frozen_native_protocol",
+              "instance_exposures": 96000,
+              "batch_size": 64,
+              "n_traj": 50,
+              "expected_updates": 1517,
+              "learning_rate": 0.0004
+            }
+          }
+        ],
+        "3": []
+      },
+      "queue_completion": "Next task starts only after training and accepted best-checkpoint test of predecessor",
+      "hardware_policy": "Single GPU per job. Keep effective batches/exposure fixed within comparisons; tune execution chunks only.",
+      "reserved_server": "2080ti_b remains on E1 EVRPTW100 AWBC/DAPG",
+      "launchable": false
+    },
+    "a6000": {
+      "schema": "e2_server_plan_v1",
+      "server": "a6000",
+      "baseline_policy": "pending",
+      "baseline_reuse_approved": false,
+      "reuse_note": "reuse is a request, not acceptance; matching archive/hash audit still required",
+      "campaign": "E2_CUS100_S3009_V1_a6000",
+      "queues": {
+        "0": [
+          {
+            "id": "rrnco_vrptw100_ppo",
+            "problem": "vrptw",
+            "customers": 100,
+            "backbone": "rrnco",
+            "panel": "B",
+            "objective": "step_ppo",
+            "modules": [],
+            "after": [],
+            "baseline": null,
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 0,
+            "CUDA_VISIBLE_DEVICES": "0",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          },
+          {
+            "id": "rrnco_vrptw100_awbc",
+            "problem": "vrptw",
+            "customers": 100,
+            "backbone": "rrnco",
+            "panel": "B",
+            "objective": "step_ppo_awbc",
+            "modules": [],
+            "after": [
+              "rrnco_vrptw100_ppo"
+            ],
+            "baseline": "rrnco_vrptw100_ppo",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 0,
+            "CUDA_VISIBLE_DEVICES": "0",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ],
+        "1": [
+          {
+            "id": "rrnco_vrptw100_slppo",
+            "problem": "vrptw",
+            "customers": 100,
+            "backbone": "rrnco",
+            "panel": "B",
+            "objective": "step_ppo_slppo",
+            "modules": [],
+            "after": [],
+            "baseline": "rrnco_vrptw100_ppo",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 1,
+            "CUDA_VISIBLE_DEVICES": "1",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          },
+          {
+            "id": "rrnco_vrptw100_dapg",
+            "problem": "vrptw",
+            "customers": 100,
+            "backbone": "rrnco",
+            "panel": "B",
+            "objective": "step_ppo_dapg",
+            "modules": [],
+            "after": [
+              "rrnco_vrptw100_slppo"
+            ],
+            "baseline": "rrnco_vrptw100_ppo",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 1,
+            "CUDA_VISIBLE_DEVICES": "1",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ]
+      },
+      "queue_completion": "Next task starts only after training and accepted best-checkpoint test of predecessor",
+      "hardware_policy": "Single GPU per job. Keep effective batches/exposure fixed within comparisons; tune execution chunks only.",
+      "reserved_server": "2080ti_b remains on E1 EVRPTW100 AWBC/DAPG",
+      "launchable": false
+    },
+    "2080ti_3": {
+      "schema": "e2_server_plan_v1",
+      "server": "2080ti_3",
+      "baseline_policy": "pending",
+      "baseline_reuse_approved": false,
+      "reuse_note": "reuse is a request, not acceptance; matching archive/hash audit still required",
+      "campaign": "E2_CUS100_S3009_V1_2080ti_3",
+      "queues": {
+        "0": [
+          {
+            "id": "evrptw_rl_evrptw100_base",
+            "problem": "evrptw",
+            "customers": 100,
+            "backbone": "evrptw_rl_reimplementation",
+            "panel": "A",
+            "objective": "native_policy_gradient",
+            "modules": [],
+            "after": [],
+            "baseline": null,
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 0,
+            "CUDA_VISIBLE_DEVICES": "0",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ],
+        "1": [
+          {
+            "id": "evrptw_rl_evrptw100_agda",
+            "problem": "evrptw",
+            "customers": 100,
+            "backbone": "evrptw_rl_reimplementation",
+            "panel": "A",
+            "objective": "native_policy_gradient",
+            "modules": [
+              "AGDA"
+            ],
+            "after": [],
+            "baseline": "evrptw_rl_evrptw100_base",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 1,
+            "CUDA_VISIBLE_DEVICES": "1",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "pending_matched_pair_protocol"
+            }
+          }
+        ],
+        "2": [
+          {
+            "id": "rrnco_vrptw100_agda",
+            "problem": "vrptw",
+            "customers": 100,
+            "backbone": "rrnco",
+            "panel": "A",
+            "objective": "native_pomo_reinforce",
+            "modules": [
+              "AGDA"
+            ],
+            "after": [],
+            "baseline": "rrnco_vrptw100_native_base",
+            "initialization": "scratch",
+            "training_seed": 3009,
+            "eval_K": 50,
+            "test_count": 1000,
+            "world_size": 1,
+            "self_replay": false,
+            "incumbent_storage": "cost_only",
+            "status": "adapter_integration_pending",
+            "training_entrypoint": null,
+            "post_training": "validation-selected best checkpoint -> independent test -> E2 pair table",
+            "physical_gpu": 2,
+            "CUDA_VISIBLE_DEVICES": "2",
+            "logical_device": "cuda:0",
+            "training_budget": {
+              "status": "needs_frozen_native_protocol",
+              "instance_exposures": 96000,
+              "batch_size": 64,
+              "n_traj": 50,
+              "expected_updates": 1517,
+              "learning_rate": 0.0004
+            }
+          }
+        ]
+      },
+      "queue_completion": "Next task starts only after training and accepted best-checkpoint test of predecessor",
+      "hardware_policy": "Single GPU per job. Keep effective batches/exposure fixed within comparisons; tune execution chunks only.",
+      "reserved_server": "2080ti_b remains on E1 EVRPTW100 AWBC/DAPG",
+      "launchable": false
+    }
+  }
+}
