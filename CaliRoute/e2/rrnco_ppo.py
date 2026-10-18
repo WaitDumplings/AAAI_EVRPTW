@@ -54,7 +54,10 @@ class ExpertPool:
                 seq=json.loads(row['route_sequence_json'])
                 if seq[0]!=0:raise ValueError('Expert missing initial depot')
                 seq=seq[1:]
-                while seq and seq[-1]==0:seq.pop()
+                # Native done includes the depot's visited bit. A single-tour
+                # expert needs its explicit final depot; otherwise completion
+                # accidentally depends on another route supplying batch padding.
+                if not seq or seq[-1]!=0:raise ValueError('Expert missing final depot')
                 # Validate the very representation used by teacher forcing.
                 check=validate_routes(instance_for(arrays,metadata,mapping[identity]),
                     action_routes(seq,implicit_final_return=True),cost)

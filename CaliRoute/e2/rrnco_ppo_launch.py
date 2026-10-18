@@ -57,6 +57,13 @@ def evaluate(exp,*,split='val',small=False,checkpoint_id='preflight'):
 
 def preflight(run):
     cfg,manifest=verify_run(run);exp=PPOExperiment(cfg,run,manifest)
+    expert_audit=None
+    if exp.experts is not None:
+        from e1.native_worker import rng_state,restore_rng
+        from e2.expert_audit import audit_expert_completion
+        saved_rng=rng_state()
+        expert_audit=audit_expert_completion(exp)
+        restore_rng(saved_rng)
     torch.cuda.reset_peak_memory_stats();started=time.perf_counter()
     first=exp.iteration_step(audit=True);saved=exp.save('last.pt')
     # Continue once, then restore exactly and repeat the same online sampling,
@@ -84,7 +91,9 @@ def preflight(run):
         resume_parameter_max_difference=maxdiff,validation=result,reload_validation=again,
         max_memory_allocated=torch.cuda.max_memory_allocated(),max_memory_reserved=torch.cuda.max_memory_reserved(),
         elapsed_s=time.perf_counter()-started,gpu=torch.cuda.get_device_name(),finished_at=now())
-    if exp.experts is not None:report['e1_unchanged_source']=exp.e1_evidence
+    if exp.experts is not None:
+        report['e1_unchanged_source']=exp.e1_evidence
+        report['expert_completion_audit']=expert_audit
     atomic_json(run/'preflight.json',report);print(json.dumps(report,indent=2),flush=True)
 
 
