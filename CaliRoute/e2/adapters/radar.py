@@ -25,6 +25,8 @@ class RadarAGDADecoder(nn.Module):
             system_feature_dim=system_feature_dim)
         self.node_embeddings = None
         self.context = None
+        self.activation_checkpointing = False
+        self.trajectory_chunk_size = None
 
     def set_kv(self, encoded_jobs):
         # Rebuilt on every native pre_forward, including after an optimizer step.
@@ -49,6 +51,29 @@ class RadarAGDADecoder(nn.Module):
             raise ValueError('Candidate features must match native batch/trajectory/node order')
         if node_embeddings.shape[:2] != (batch, nodes):
             raise ValueError('Node embedding order/shape mismatch')
+        chunk = self.trajectory_chunk_size or trajectories
+        if chunk < 1:
+            raise ValueError('trajectory_chunk_size must be positive')
+        outputs=[]
+        # Native environment mutates load and mask during env.step. Checkpoint
+        # backward must replay the decision-time state, not the final state.
+        if self.activation_checkpointing and torch.is_grad_enabled():
+            load = load.clone()
+            ninf_mask = ninf_mask.clone()
+        for start in range(0,trajectories,chunk):
+            stop=min(start+chunk,trajectories)
+            args=(encoded_q0[:,start:stop],load[:,start:stop],ninf_mask[:,start:stop],
+                  node_embeddings,decision_tokens[:,start:stop],candidate_features[:,start:stop],system_features[:,start:stop])
+            if self.activation_checkpointing and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+                outputs.append(checkpoint(self._enabled_forward,*args,use_reentrant=False,preserve_rng_state=True))
+            else:
+                outputs.append(self._enabled_forward(*args))
+        return outputs[0] if len(outputs)==1 else torch.cat(outputs,dim=1)
+
+    def _enabled_forward(self, encoded_q0, load, ninf_mask, node_embeddings,
+                         decision_tokens, candidate_features, system_features):
+        batch, trajectories, nodes = ninf_mask.shape
         _, _, action_key, bias = self.agda(node_embeddings, decision_tokens,
             candidate_features, system_features=system_features)
         native = self.native

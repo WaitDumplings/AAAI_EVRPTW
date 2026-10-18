@@ -1,0 +1,77 @@
+{
+  "agda_trajectory_chunk_size": 50,
+  "batch": 64,
+  "batch_seconds": [
+    0.8384721018373966,
+    0.32113032788038254
+  ],
+  "elapsed_s": 3.6793614998459816,
+  "finished_at": "2026-10-18T06:58:57.439113+00:00",
+  "gpu": "NVIDIA RTX 6000 Ada Generation",
+  "harness_sha256": "581efc8ddb2e8f47ebf2955b84087f7debada5c7c55e43a820013e9a2e3476ed",
+  "host_initial_sha256": "237f292a787d19593e2a34a0bea0dbc03b512762630c042b8bfdd056cc77bc8f",
+  "max_memory_allocated": 11558780928,
+  "max_memory_reserved": 12492734464,
+  "n_traj": 50,
+  "optimizer_updates": 2,
+  "passed": true,
+  "reload_validation": {
+    "actual_K": [
+      50
+    ],
+    "actual_candidates": 100,
+    "checkpoint_id": "1d57d621e53e6a44eb1d64729b81aaa37d1a36ba8d2e3ee657adc62d89048ac9",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 8,
+    "failure_count": 0,
+    "feasible_count": 2,
+    "feasible_instances": 2,
+    "feasible_rate": 1.0,
+    "instances": 2,
+    "mean_distance_km": 472.37469444796443,
+    "mean_runtime_s": 0.05351874511688948,
+    "mean_vehicle_count": 9.5,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_RADAR_CVRP100_S3009_A6000_V1/preflight/rdi/preflight_validation_reload.jsonl",
+    "output_sha256": "50d1fd7fd341251d39babab53d2bdb7f8b15f8b5ab087beba8e3508ba2dd8239",
+    "requested_K": [
+      50
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "val",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "wall_time_s": 0.1477165101096034
+  },
+  "validation": {
+    "actual_K": [
+      50
+    ],
+    "actual_candidates": 100,
+    "checkpoint_id": "1d57d621e53e6a44eb1d64729b81aaa37d1a36ba8d2e3ee657adc62d89048ac9",
+    "cost_mismatch_candidates": 0,
+    "evaluation_batch_size": 8,
+    "failure_count": 0,
+    "feasible_count": 2,
+    "feasible_instances": 2,
+    "feasible_rate": 1.0,
+    "instances": 2,
+    "mean_distance_km": 472.37469444796443,
+    "mean_runtime_s": 0.054236565018072724,
+    "mean_vehicle_count": 9.5,
+    "output": "/data/Maojie/AAAI/AAAI_EVRPTW/CaliRoute/results/e2/E2_RADAR_CVRP100_S3009_A6000_V1/preflight/rdi/preflight_validation.jsonl",
+    "output_sha256": "14838de6203713c6a7b774cdfc1af4af8e9755647da37c66055cf57372ff1679",
+    "requested_K": [
+      50
+    ],
+    "selection_rule": "maximize_feasible_count_then_minimize_feasible_mean_km",
+    "split": "val",
+    "statistical_scope": "Single training seed. No between-training-seed standard deviation is estimated.",
+    "training_seeds": [
+      3009
+    ],
+    "wall_time_s": 0.14734952803701162
+  },
+  "variant": "rdi"
+}
