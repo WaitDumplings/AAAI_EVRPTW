@@ -124,7 +124,7 @@ def publish(m,states):
                     inference_s_per_instance=str(s['mean_runtime_s']),checkpoint_path=evidence['checkpoint'],
                     instances_path=str(run/'test/instances.jsonl'),parameter_count=str(m['initializations'][name]['trainable_parameters']))
     tmp=table.with_suffix('.tmp')
-    with tmp.open('w',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
+    with tmp.open('w',newline='') as f:w=csv.DictWriter(f,fieldnames=fields,lineterminator='\n');w.writeheader();w.writerows(rows)
     tmp.replace(table);lock.close()
     render=subprocess.run([sys.executable,str(ROOT/'scripts/render_e3_table.py')],capture_output=True,text=True)
     if render.returncode:
