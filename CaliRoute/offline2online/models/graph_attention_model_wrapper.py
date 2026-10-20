@@ -381,6 +381,10 @@ class Backbone(nn.Module):
             dist_mat = dist_mat.to(device=node_inputs["cus_loc"].device, dtype=node_inputs["cus_loc"].dtype)
             if dist_mat.dim() == 2:
                 dist_mat = dist_mat.unsqueeze(0)
+        if getattr(self, 'e3_encoder_metric', None) == 'euclidean':
+            # Observations are physical km / a shared isotropic scalar. This
+            # local replacement never changes decoder/environment road edges.
+            dist_mat = self._build_distance_matrix(node_inputs)
         node_type = self._build_node_type(node_inputs)
         dist_bias = -self.dist_bias_scale * dist_mat if self.use_encoder_distance_bias else torch.zeros_like(dist_mat)
         pair_id = node_type.unsqueeze(2) * 3 + node_type.unsqueeze(1)

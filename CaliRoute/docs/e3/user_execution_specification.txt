@@ -1,0 +1,193 @@
+**E3 就围绕三个问题跑：道路信息是否有效、AGDA 是否更有效地使用相同信息、SL-PPO 怎样利用完整解的成本与轨迹。** 不需要再重复 E1 的九个设置，也不需要在 E2 的所有外部 backbone 上复制这些消融。
+
+**下面建议作为执行清单：E3 统一使用我们自己的 backbone，先做 Cus100、一个 training seed；复用配置一致的 E1 结果，只新增缺少的对照。**
+
+# 一、E3-A：道路关系实验——为什么需要 RDI？
+
+### 需要跑的三个配置
+
+**任务：CVRP-Cus100。AGDA 关闭，SL-PPO 关闭，使用相同 PPO 训练协议。**
+
+| 实验 ID | Encoder 距离输入 | 其他部分 | 是否需要新增训练 |
+|---|---|---|---|
+| `A0_no_bias` | 无 encoder distance bias | 原有 decoder、query、mask 均保留 | 可复用 E1 的 PPO(base)，前提是配置一致 |
+| `AE_euclidean_bias` | Euclidean distance bias | 与 A0 相同 | **新增** |
+| `AR_road_bias` | 原始 RDI 的 road-distance bias | 与 A0 相同 | **新增** |
+
+**三者都在同一真实道路环境中训练与测试。** Reward、可行性和最终总距离统一使用 \(D^R\)，只改变 encoder 中的距离表示。
+
+不能把 AE 改成“在欧式环境训练”，否则同时改变了训练问题，无法隔离道路表示的作用。也不能为了让 A0 更弱，删除原有 decoder 中的 distance-row 等信息。
+
+Euclidean control 使用保留物理几何的坐标距离，并采用明确的标量归一化；不要分别拉伸两个坐标轴后，再把得到的距离当成真实 Euclidean geometry。
+
+### 除训练外，还要做什么？
+
+对固定测试实例计算 **Euclidean–Road 近邻失配程度**，然后分析：
+
+> **Road bias 相对于 Euclidean bias 的改善，在不同道路失配程度的实例上是否不同？**
+
+低、中、高失配的分组规则应提前固定，不能看完模型收益再划分。
+
+### 最后交付
+
+一张 A0／AE／AR 的成本与可行率表，加一张“道路失配程度—RDI 收益”的图。
+
+**这部分验证的是道路关系是否带来有效信息，不要求预先保证“失配越大，收益越大”。结果没有这种趋势，就不作这种主张。**
+
+---
+
+# 二、E3-B：Decoder 实验——AGDA 的收益是不是只来自更多特征？
+
+这是 RDI → AGDA 逻辑最需要的证据。
+
+### 需要跑的三个配置
+
+**RDI 开启，SL-PPO 关闭，保持同一 PPO 训练协议。**
+
+| 实验 ID | Decoder 的动态信息使用方式 | 要检验的因素 | 是否需要新增训练 |
+|---|---|---|---|
+| `B0_static_candidates` | 动态 query，静态候选 K/V/logit keys | 不使用候选侧动态修正 | 可能复用 AR，需核对非候选路径 |
+| `B1_feature_matched_logit` | 与 AGDA 相同的信息，通过 MLP 直接产生逐候选 logit correction | 更多信息是否已经足够 | **新增** |
+| `B2_agda` | 相同信息通过原始 AGDA 修正候选投影 | AGDA 的信息使用方式是否有额外价值 | 可复用 E1 的 PPO(RDI+AGDA) |
+
+B1 的形式可以是：
+
+\[
+o'_{t,i}
+=
+o_{t,i}
++
+g\!\left(h_i,q_t,\xi_{t,i},d_t^{\mathrm{dec}},s_t^{\mathrm{tok}}\right).
+\]
+
+**重点是信息匹配，不是随意加一个很小的 MLP。** B1 和 B2 都应得到相同的 candidate descriptors、车辆状态与全局上下文，尽量匹配参数量，并保留相同的 query、mask 和其他 decoder 处理。
+
+这样才能区分：
+
+> **B2 优于 B0，是因为提供了动态信息，还是因为 AGDA 的使用方式更有效？**
+
+最关键的比较是 **B2 vs B1**。
+
+### 哪些 problem 要做？
+
+| 任务 | 建议范围 | 目的 |
+|---|---|---|
+| **CVRP-Cus100** | B0／B1／B2 | 先打通通用道路、容量与动态信息对照 |
+| **VRPTW-Cus100** | B0／B1／B2 | 验证时间状态及候选访问后果 |
+| **EVRPTW-Cus100** | 至少 B1／B2 | 验证完整资源信息下的候选修正 |
+
+**EVRPTW 的电池解释有一个前置条件：数据中确实存在能量压力。** 先统计充电访问和电量余量；若电池约束很少起作用，就不能仅凭这一组平均成本宣称验证了充电决策机制。额外 energy-stress 数据属于单独的补充实验，不替换原 test。
+
+### 最后交付
+
+一张按任务分组的 B0／B1／B2 表，包含成本、可行率、参数量和推理时间。
+
+相同状态上的候选概率、attention 或后续完成成本诊断可以作为第二阶段增强项，**不是第一轮训练的前置要求**。
+
+**特别注意：AR 不一定自动等于 B0。** 如果 AGDA 同时改变了 query 或全局 context，B0 必须保留匹配的非候选路径，可能需要单独训练，不能为省一次运行而混淆对照。
+
+---
+
+# 三、E3-C：完整解学习——成本、轨迹和 incumbent 分别贡献了什么？
+
+**固定同一个 RDI+AGDA actor，只改变训练目标及经验使用方式。**
+
+这部分继续保持我们最终确定的边界：
+
+> **外部记录提供 cost＋trajectory；自身 incumbent 只提供 cost；不新增自身历史轨迹 replay。**
+
+## C1. 完整的信息拆分
+
+先在 **CVRP-Cus100** 跑以下配置：
+
+| 实验 ID | Policy solution objective | 自身 incumbent 成本 | 外部成本 | 外部轨迹 replay | 运行安排 |
+|---|---|---:|---:|---:|---|
+| `C0_ppo` | 无 | 不参与训练 | 无 | 无 | 复用 E1 的 PPO(RDI+AGDA) |
+| `C1_group_only` | 仅 group comparison | 关闭 | 无 | 无 | **新增** |
+| `C2_no_external` | Group＋可用 reference | 开启 | 无 | 无 | **新增** |
+| `C3_external_cost_only` | 与完整版本一致 | 开启 | 开启 | 关闭 | **新增** |
+| `C4_full_slppo` | 完整版本 | 开启 | 开启 | 开启 | 复用 E1 的 SL-PPO |
+
+每组比较回答的事情不同：
+
+**C1 vs C0：** 加入 policy solution-level objective 的作用。
+
+**C2 vs C1：** 记住自身曾经实现的最好成本，是否提供额外价值。
+
+**C3 vs C2：** 外部完整解的成本参照，是否提供额外价值。
+
+**C4 vs C3：** 已经知道 expert cost 后，再提供对应轨迹，是否还有增量。
+
+**其中 C4 vs C3 是现在故事线最重要的一组比较。** 它直接回答：
+
+> **仅知道“这个实例曾经做到过 250 km”，与同时知道“250 km 是怎样构造出来的”，对训练有什么不同？**
+
+关闭某个信息来源时，要检查完整的数据流。比如 `group_only` 不能只是关闭 reference loss，却仍然把 incumbent 放入 group statistics；`no_external` 也不能只关闭 replay，却继续使用 expert cost。
+
+## C2. 再加一个训练目标对照
+
+| 实验 ID | 改动 | 目的 |
+|---|---|---|
+| `C5_matched_gated_bc` | 保留完整 SL-PPO 的 policy 分支、reference、expert 门控与权重，只将 expert 分支换成匹配的长度归一化 weighted BC | 区分“经验选择和质量权重”的收益，与 expert 更新形式本身的收益 |
+
+**这不替代 E1 的 AWBC/DAPG，也不是修改正式方法。** 它只是一条控制更严格的机制对照：相同轨迹、相同门控、相同质量权重，换一种更新方式后会怎样？
+
+如果 C5 与 C4 很接近，就应考虑主要收益是否来自 reference/gating，而不是强调原始 replay objective 的独特作用。
+
+## C3. 任务覆盖不需要复制全部配置
+
+**CVRP-Cus100：** 完整做 C0–C5。
+
+**EVRPTW-Cus100：** 优先确认 C2、C3、C4，即无外部记录、仅外部成本、完整成本＋轨迹。C4 可复用 E1。
+
+**VRPTW：** 第一轮不用再复制整套 C0–C5。其整体表现已有 E1，动态机制重点由 E3-B 覆盖；需要扩大某个结论时再补。
+
+### 最后交付
+
+除了最终成本表，还应使用训练日志画 **validation 学习曲线**，并记录 expert replay 的可用率、门控通过率、实际权重、reference 来源与 incumbent 更新。
+
+**不要只画 best-so-far cache 曲线。** 缓存成本越来越好，并不等于当前 policy 的平均输出质量越来越好；需要同时看当前策略的表现。
+
+---
+
+# 四、第一批到底新增哪些训练？
+
+**先在 CVRP-Cus100 启动以下七个配置，使用与 E1 相同的那个实际 training seed。**
+
+| 编号 | 新增配置 | 所属部分 |
+|---|---|---|
+| 1 | `AE_euclidean_bias` | E3-A |
+| 2 | `AR_road_bias` | E3-A；符合条件时兼作 B0 |
+| 3 | `B1_feature_matched_logit` | E3-B |
+| 4 | `C1_group_only` | E3-C |
+| 5 | `C2_no_external` | E3-C |
+| 6 | `C3_external_cost_only` | E3-C |
+| 7 | `C5_matched_gated_bc` | E3-C |
+
+已有的 **PPO(base)、PPO(RDI+AGDA)、AWBC、DAPG、完整 SL-PPO**，在配置、训练预算和评估协议一致时直接复用。
+
+如果 AR 与 B0 的 query/context 不匹配，则额外补一个真正的 B0。**所以“七个”是满足复用条件下的新增数量，不应强行通过改名凑齐。**
+
+CVRP 跑通之后，再扩展：
+
+**VRPTW-Cus100：** 新增 B0、B1，B2 复用 E1。
+
+**EVRPTW-Cus100：** 新增 B1、C2、C3，B2/C4 复用 E1。
+
+在上述复用条件全部成立时，**整套核心 E3 是 12 个新增配置／seed**。先完成单 seed 的实现与诊断；最终支撑正文的关键比较再补齐其他 seeds。
+
+---
+
+# 五、哪些暂时不需要跑？
+
+第一轮不必同时展开 **所有 K/V/W 分支组合、九种 representation variants、全面超参数扫描、每个 epoch 换新实例、全部任务的完整 factorial**。这些属于补充证据，不应阻塞核心 E3。
+
+历史质量扫描也可以放第二批：在训练记录确实保留了可回放轨迹的前提下，为完整 SL-PPO 加一档较低预算 expert，保持经验覆盖的实例集合一致。**不要使用 test Gurobi 记录做训练，也不要把专家质量变化和覆盖率变化混为一谈。**
+
+开发与 checkpoint 选择继续只用 train/validation；正式配置固定后再用现有 test 评价。E3 不需要重新生成 9,000 条 test 或重新跑一套 Gurobi。
+
+---
+
+**建议现在直接安排第一批七个 CVRP-Cus100 配置。它们分别补齐三个关键证据：Road bias 相比 Euclidean bias、AGDA 相比同信息量 logit correction、完整 SL-PPO 相比只知道 expert cost 的版本。**
+
+此前部分论文附件已过期；以上依据我们已确定的实验协议整理。后续需要逐项核对原文公式和分支定义时，请重新上传主文与 Appendix。

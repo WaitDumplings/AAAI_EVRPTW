@@ -1,0 +1,21 @@
+id,panel,task,customers,config_id,comparison_purpose,training_plan,batch,reuse_candidate,status,server,gpu,training_seed,seed_status,test_count,K,evaluation_status,feasible_count,mean_cost_km,parameter_count,inference_s_per_instance,training_hours,run_path,config_path,checkpoint_path,instances_path
+A_CVRP_A0,A,CVRP,100,A0_no_bias,无 encoder bias；保留原 decoder,新增,首批五组,不复用 E1,preflight,2080ti_a,"0,1",3009,已冻结,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,/data/Maojie/AAAI_EVRPTW/CaliRoute/results/e3/E3_CVRP100_S3009_E1500_2080ti_a_V3/A0_no_bias,/data/Maojie/AAAI_EVRPTW/CaliRoute/results/e3/E3_CVRP100_S3009_E1500_2080ti_a_V3/A0_no_bias/config.yaml,TBD,TBD
+A_CVRP_AE,A,CVRP,100,AE_euclidean_bias,物理几何 Euclidean bias,新增,首批五组,不复用 E1,preflight,2080ti_a,"2,3",3009,已冻结,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,/data/Maojie/AAAI_EVRPTW/CaliRoute/results/e3/E3_CVRP100_S3009_E1500_2080ti_a_V3/AE_euclidean_bias,/data/Maojie/AAAI_EVRPTW/CaliRoute/results/e3/E3_CVRP100_S3009_E1500_2080ti_a_V3/AE_euclidean_bias/config.yaml,TBD,TBD
+A_CVRP_AR,A,CVRP,100,AR_road_bias,原始 RDI road-distance bias,新增,首批五组,不复用 E1,待预检,2080ti_3,"0,1",3009,已确定,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_CVRP_B0,B,CVRP,100,B0_static_candidates,动态 query；静态候选投影,新增,首批五组,不复用 E1,待预检,2080ti_b,"0,1",3009,已确定,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_CVRP_B1,B,CVRP,100,B1_feature_matched_logit,同信息 MLP → logit correction,新增,首批五组,不复用 E1,待预检,2080ti_b,"2,3",3009,已确定,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_CVRP_B2,B,CVRP,100,B2_agda,同信息 → 原始 AGDA 候选修正,新增,复用核查,需与本批 B0/B1 匹配；E1 graph配置不等价,待后续安排,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_VRPTW_B0,B,VRPTW,100,B0_static_candidates,动态 query；静态候选投影,新增,扩展,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_VRPTW_B1,B,VRPTW,100,B1_feature_matched_logit,同信息 MLP → logit correction,新增,扩展,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_VRPTW_B2,B,VRPTW,100,B2_agda,同信息 → 原始 AGDA 候选修正,条件复用,复用核查,E1 PPO(RDI+AGDA),复用待核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_EVRPTW_B1,B,EVRPTW,100,B1_feature_matched_logit,同信息 MLP → logit correction,新增,扩展,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+B_EVRPTW_B2,B,EVRPTW,100,B2_agda,同信息 → 原始 AGDA 候选修正,条件复用,复用核查,E1 PPO(RDI+AGDA),复用待核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C0,C,CVRP,100,C0_ppo,仅 PPO；无解级目标或经验,条件复用,复用核查,E1 PPO(RDI+AGDA)；与B2同一结果,复用待核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C1,C,CVRP,100,C1_group_only,解级 group；无任何 reference,新增,首批 ④,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C2,C,CVRP,100,C2_no_external,group + 自身 incumbent 成本,新增,首批 ⑤,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C3,C,CVRP,100,C3_external_cost_only,再加外部成本；不回放轨迹,新增,首批 ⑥,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C4,C,CVRP,100,C4_full_slppo,完整成本 + 外部轨迹 replay,条件复用,复用核查,E1 完整 SL-PPO,复用待核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_CVRP_C5,C,CVRP,100,C5_matched_gated_bc,仅替换 expert 更新为匹配 BC,新增,首批 ⑦,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_EVRPTW_C2,C,EVRPTW,100,C2_no_external,group + 自身 incumbent 成本,新增,扩展,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_EVRPTW_C3,C,EVRPTW,100,C3_external_cost_only,再加外部成本；不回放轨迹,新增,扩展,N/A,待实现/协议核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD
+C_EVRPTW_C4,C,EVRPTW,100,C4_full_slppo,完整成本 + 外部轨迹 replay,条件复用,复用核查,E1 完整 SL-PPO,复用待核查,TBD,TBD,3009,计划与E1实际seed匹配,1000,50,沿用E1协议前需核查一致性,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD,TBD

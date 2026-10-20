@@ -207,7 +207,7 @@ class AdaptiveGraphAttention(nn.Module):
         )
 
     def precompute_node_projections(self, node_embeddings):
-        if not self.enabled or not self.optimize_dynamic_projections:
+        if hasattr(self, 'e3_logit_head') or not self.enabled or not self.optimize_dynamic_projections:
             return None
         if not (self.enable_delta_k or self.enable_delta_v or self.enable_delta_action_key):
             return None
@@ -256,6 +256,16 @@ class AdaptiveGraphAttention(nn.Module):
         flat_tokens = self.token_norm(decision_input + attended_tokens)
         flat_tokens = self.token_ff_norm(flat_tokens + self.token_ff(flat_tokens))
         decision_token = flat_tokens[:, 0, :].reshape(B, T, D)
+
+        if hasattr(self, 'e3_logit_head'):
+            N = node_embeddings.shape[1]
+            inputs = torch.cat([
+                node_embeddings[:, None].expand(-1, T, -1, -1),
+                decision_tokens[:, :, 0, :].unsqueeze(2).expand(-1, -1, N, -1),
+                candidate_features,
+                decision_token.unsqueeze(2).expand(-1, -1, N, -1),
+                state_token.unsqueeze(2).expand(-1, -1, N, -1)], dim=-1)
+            return 0, 0, 0, self.e3_logit_head(inputs).squeeze(-1)
 
         key_delta = 0
         value_delta = 0

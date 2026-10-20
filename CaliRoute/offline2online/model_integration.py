@@ -22,6 +22,9 @@ E1_NO_ROAD_FLAG = 'e1_no_road_input'
 
 def _canonical_model(model):
     result = {}
+    if 'e3_profile' in model:
+        from e3.model import validate
+        result['e3_profile'] = validate(model['e3_profile'])
     for name in (*FLAGS, *FEATURE_FLAGS):
         value = model.get(name, False)
         if not isinstance(value, bool):
@@ -74,7 +77,7 @@ def _canonical_model(model):
 
 
 def enabled(profile):
-    return any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, E1_ROW_FLAG, E1_NO_ROAD_FLAG))
+    return bool(profile.get('e3_profile')) or any(profile.get(name, False) for name in (*FLAGS, *FEATURE_FLAGS, JOINT_GRAPH_FLAG, E1_ROW_FLAG, E1_NO_ROAD_FLAG))
 
 
 def signature(cfg):
@@ -98,6 +101,9 @@ def _check_agent(agent, profile):
 
 def configure(agent, cfg):
     profile = signature(cfg)
+    if 'e3_profile' in profile:
+        from e3.model import install
+        install(agent, cfg)
     _check_agent(agent, profile)
     previous = getattr(agent, '_model_integration_signature', None)
     if previous is not None and previous != profile:
@@ -138,6 +144,8 @@ def load_checkpoint_profile(agent, checkpoint, *, resume, checkpoint_path=None):
         raise ValueError('E1 no-road input contract changed; start from scratch')
     if source != target and (source.get(E1_ROW_FLAG, False) or target.get(E1_ROW_FLAG, False)):
         raise ValueError('E1 shared distance-row profile changed; use an identical profile or start from scratch')
+    if source.get('e3_profile') != target.get('e3_profile'):
+        raise ValueError('E3 architecture changed; start from scratch')
     if resume and source != target:
         raise ValueError('Model integration changed on resume; use weights-only initialization')
     if resume:

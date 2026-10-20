@@ -1,0 +1,49 @@
+{
+  "scope": "Engineering preflight only; no scientific result",
+  "variant": "B1_feature_matched_logit",
+  "task": "CVRP100",
+  "world_size": 2,
+  "batch_per_gpu": 32,
+  "n_traj": 50,
+  "ppo_passes": 4,
+  "chunk": 16,
+  "epochs": 1,
+  "validation_instances": 4,
+  "validation_K": 50,
+  "unit_tests": "52 passed",
+  "rank_diagnostics": [
+    {
+      "rank": 0,
+      "optimizer_steps_epoch": 16,
+      "grad_norm_nonfinite_count": 0,
+      "gpu_peak_allocated_bytes": 7815385088,
+      "gpu_peak_reserved_bytes": 8015314944,
+      "parameter_sync": {
+        "amp_scale": 1.0,
+        "amp_scale_rank_max_diff": 0.0,
+        "amp_skipped_steps_rank_max_diff": 0.0,
+        "optimizer_steps_rank_max_diff": 0.0,
+        "parameter_sync_checksum_max_diff": 0.0,
+        "parameter_sync_scope": "per-parameter FP32 sum and squared-norm checksums; not a full elementwise parameter comparison"
+      },
+      "epoch_wall_time_s": 61.69827885692939
+    },
+    {
+      "rank": 1,
+      "optimizer_steps_epoch": 16,
+      "grad_norm_nonfinite_count": 0,
+      "gpu_peak_allocated_bytes": 7815608320,
+      "gpu_peak_reserved_bytes": 8015314944,
+      "parameter_sync": {
+        "amp_scale": 1.0,
+        "amp_scale_rank_max_diff": 0.0,
+        "amp_skipped_steps_rank_max_diff": 0.0,
+        "optimizer_steps_rank_max_diff": 0.0,
+        "parameter_sync_checksum_max_diff": 0.0,
+        "parameter_sync_scope": "per-parameter FP32 sum and squared-norm checksums; not a full elementwise parameter comparison"
+      },
+      "epoch_wall_time_s": 61.69850690290332
+    }
+  ],
+  "previous_chunk32": "OOM; artifacts preserved; no formal weights initialized from preflight"
+}
