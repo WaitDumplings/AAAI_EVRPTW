@@ -1,0 +1,29 @@
+{
+  "checkpointing": true,
+  "rows": [
+    {
+      "chunk": 32,
+      "gradient_max_error": 0.0,
+      "logprob_max_error": 0.0,
+      "peak_allocated": 4565144064,
+      "peak_reserved": 5146411008,
+      "reference_gradient_max": 1.3281539678573608,
+      "seconds": 10.255659605842084
+    },
+    {
+      "chunk": 128,
+      "gradient_max_error": 2.9690563678741455e-05,
+      "logprob_max_error": 0.00018453598022460938,
+      "peak_allocated": 17983371776,
+      "peak_reserved": 20262682624,
+      "reference_gradient_max": 1.3281539678573608,
+      "seconds": 9.857723135035485
+    },
+    {
+      "chunk": 512,
+      "oom": true
+    }
+  ],
+  "same_neighbor_samples": true,
+  "same_sampled_decisions": true
+}

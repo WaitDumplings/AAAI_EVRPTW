@@ -1,0 +1,28 @@
+[
+  {
+    "method": "awbc",
+    "passed": true,
+    "same_shape_replay_error": 0.0,
+    "online_replay_error": 0.0,
+    "gradient_l2": 30.53917121887207,
+    "probability_change": 0.21532487869262695,
+    "resume_max_error": 3.880180884152651e-06,
+    "warmup_updates": 0,
+    "warmup_wall_s": 0.0,
+    "memory_reserved_gib": 7.3359375,
+    "preflight_wall_s": 240.9095829948783
+  },
+  {
+    "method": "dapg",
+    "passed": true,
+    "same_shape_replay_error": 0.0,
+    "online_replay_error": 0.0,
+    "gradient_l2": 18.712879180908203,
+    "probability_change": 0.24950695037841797,
+    "resume_max_error": 3.993511199951172e-06,
+    "warmup_updates": 48,
+    "warmup_wall_s": 498.46814353438094,
+    "memory_reserved_gib": 8.298828125,
+    "preflight_wall_s": 758.7059477772564
+  }
+]
