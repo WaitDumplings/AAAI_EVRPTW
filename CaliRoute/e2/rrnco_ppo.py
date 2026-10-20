@@ -98,12 +98,19 @@ class PPOExperiment:
         self.expert_steps=0;self.expert_routes=0;self.best=None
         self.train_wall_s=0.;self.evaluation_wall_s=0.;self.total_active_wall_s=0.
         self.experts=None;self.expert_neighbors={};self.current_indices=None
-        if cfg['e2b_method']=='slppo':
+        self.imitation=None;self.warmup_updates=0;self.warmup_wall_s=0.;self.warmup_expert_steps=0
+        if cfg['e2b_method'] in {'slppo','awbc','dapg'}:
             if file_hash(run/'expert_pool.csv')!=cfg['expert_sha256']:raise ValueError('Changed train expert pool')
             self.experts=ExpertPool(run/'expert_pool.csv',self.arrays,self.metadata)
+        if cfg['e2b_method']=='slppo':
             self.e1,self.e1_evidence=load_solution_functions(self.teacher_callback)
             self.method_cfg=deepcopy(cfg['e1_method_config']);self.e1['_apply_solution_level_aliases'](self.method_cfg)
             self.e1['_validate_e1_solution_contract'](self.method_cfg)
+        if cfg['e2b_method'] in {'awbc','dapg'}:
+            from e2.rrnco_imitation import NativeExpertSteps
+            self.method_cfg=deepcopy(cfg['e1_method_config'])
+            self.imitation=NativeExpertSteps(self)
+            self.e1_evidence=self.imitation.evidence
         self.runner.sampler_state=self.method_state
         self.runner.restore_sampler=self.restore_method_state
         self.runner.architecture.update(e2b_method=cfg['e2b_method'],critic='StepCritic(current128+mean128+time+capacity)',
@@ -115,13 +122,17 @@ class PPOExperiment:
             incumbent=deepcopy(self.incumbent),iteration=self.iteration,optimizer_steps=self.optimizer_steps,
             decisions=self.decisions,expert_steps=self.expert_steps,expert_routes=self.expert_routes,best=self.best,
             train_wall_s=self.train_wall_s,evaluation_wall_s=self.evaluation_wall_s,total_active_wall_s=self.total_active_wall_s,
-            train_sha256=self.manifest['datasets']['train']['npz_sha256'],expert_sha256=self.cfg.get('expert_sha256'))
+            train_sha256=self.manifest['datasets']['train']['npz_sha256'],expert_sha256=self.cfg.get('expert_sha256'),
+            expert_rng=deepcopy(self.imitation.rng.bit_generator.state) if self.imitation else None,
+            warmup_updates=self.warmup_updates,warmup_wall_s=self.warmup_wall_s,warmup_expert_steps=self.warmup_expert_steps)
 
     def restore_method_state(self,state):
         if state['train_sha256']!=self.manifest['datasets']['train']['npz_sha256'] or state['expert_sha256']!=self.cfg.get('expert_sha256'):
             raise ValueError('Method state train/expert identities differ')
         allowed={x['instance_id'] for x in self.metadata['instances']}
         if any(k not in allowed or not np.isfinite(v) or v<0 for k,v in state['incumbent'].items()):raise ValueError('Invalid cost-only incumbent')
+        if self.imitation:self.imitation.rng.bit_generator.state=deepcopy(state['expert_rng'])
+        for key in ['warmup_updates','warmup_wall_s','warmup_expert_steps']:setattr(self,key,state.get(key,0))
         self.online_rng.bit_generator.state=state['online_rng'];self.minibatch_rng.bit_generator.state=state['minibatch_rng']
         for k in ['incumbent','iteration','optimizer_steps','decisions','expert_steps','expert_routes','best','train_wall_s','evaluation_wall_s','total_active_wall_s']:setattr(self,k,state[k])
 
@@ -180,8 +191,13 @@ class PPOExperiment:
         valid=old['policy_valid'];a=advantage[valid]
         advantage=(advantage-a.mean())/a.std(unbiased=False).clamp_min(1e-8)
         route_adv=None;candidates=[];method_info={}
-        if self.experts is not None:route_adv,candidates,method_info=self.prepare_solution(old,indices)
+        if self.cfg['e2b_method']=='slppo':route_adv,candidates,method_info=self.prepare_solution(old,indices)
         report={};kl_values=[];step_count=0;stop=False
+        baseline=float(old['physical_cost'].mean())
+        if self.imitation:
+            cfg=self.method_cfg['offline']
+            demo_coef=float(cfg['awbc_coef']) if self.cfg['e2b_method']=='awbc' else max(float(cfg['bc_coef'])*float(cfg['bc_decay'])**self.iteration,float(cfg['min_bc_coef']))*max(float(advantage[valid].max()),0.)
+            method_info.update(demo_coef=demo_coef,awbc_policy_mean_successful_km=baseline)
         if audit:
             with torch.no_grad():replay=self.rollout(batch,actions=old['actions'],neighbors=old['neighbors'])
             error=(old['logp']-replay['logp'])[valid].abs()
@@ -225,8 +241,27 @@ class PPOExperiment:
                         report['expert_gradient_l2']=float(check.norm())
                         if not torch.isfinite(check).all() or not bool(check.abs().sum()>0):raise ValueError('Missing expert gradient')
                     (self.method_cfg['offline']['sl_coef']*aux).backward()
+                if self.imitation and demo_coef>0:
+                    aux,demo_info=self.imitation.loss(self.cfg['e2b_method'],baseline)
+                    method_info.update(demo_info,expert_sample_indices_sha256=json_hash(self.imitation.last_indices.tolist()))
+                    if audit and 'expert_gradient_l2' not in report:
+                        check=torch.autograd.grad(aux,self.policy.decoder.project_node_embeddings.weight,retain_graph=True)[0]
+                        report['expert_gradient_l2']=float(check.norm())
+                        if not torch.isfinite(check).all() or not bool(check.abs().sum()>0):raise ValueError('Missing imitation gradient')
+                        from e1.native_worker import rng_state,restore_rng
+                        audit_indices=torch.tensor(self.imitation.last_indices[:8]);audit_rng=rng_state()
+                        with torch.no_grad():audit_before=self.imitation.forward(audit_indices)[0]
+                        restore_rng(audit_rng)
+                    (demo_coef*aux).backward()
                 norm=torch.nn.utils.clip_grad_norm_(self.runner.model.parameters(),p['grad_clip'],error_if_nonfinite=True)
                 self.runner.optimizer.step();self.optimizer_steps+=1;step_count+=1
+                if self.imitation and audit and 'expert_probability_change' not in report and 'expert_gradient_l2' in report:
+                    from e1.native_worker import rng_state,restore_rng
+                    after_rng=rng_state();restore_rng(audit_rng)
+                    with torch.no_grad():audit_after=self.imitation.forward(audit_indices)[0]
+                    restore_rng(after_rng)
+                    report['expert_probability_change']=float((audit_after-audit_before).abs().max())
+                    if report['expert_probability_change']==0:raise ValueError('Imitation policy did not change')
                 if selected and audit and 'expert_probability_change' not in report:
                     with torch.no_grad():changed=self.teacher_callback(None,selected,'cuda',128)
                     report['expert_probability_change']=float((changed-current.detach()).abs().max())
@@ -245,6 +280,23 @@ class PPOExperiment:
             instance_indices_sha256=json_hash(indices.tolist()),incumbent_count=len(self.incumbent),
             method_diagnostics=method_info,updated_at=now())
         return report
+
+    def warmup_step(self):
+        import time
+        if self.cfg['e2b_method']!='dapg':raise ValueError('Only DAPG has BC warmup')
+        started=time.perf_counter();self.runner.model.train();self.runner.optimizer.zero_grad(set_to_none=True)
+        loss,info=self.imitation.loss('bc')
+        (float(self.method_cfg['offline']['bc_warmup_coef'])*loss).backward()
+        torch.nn.utils.clip_grad_norm_(self.runner.model.parameters(),self.p['grad_clip'],error_if_nonfinite=True)
+        self.runner.optimizer.step();torch.cuda.synchronize()
+        elapsed=time.perf_counter()-started;self.warmup_updates+=1
+        self.warmup_wall_s+=elapsed;self.total_active_wall_s+=elapsed;self.warmup_expert_steps+=info['bc_steps']
+        return dict(info,warmup_update=self.warmup_updates,warmup_wall_s=self.warmup_wall_s,
+            expert_indices_sha256=json_hash(self.imitation.last_indices.tolist()),updated_at=now())
+
+    def warmup_target(self):
+        if self.cfg['e2b_method']!='dapg':return 0
+        cfg=self.method_cfg['offline'];return int(cfg['bc_warmup_epochs'])*int(cfg['bc_updates_per_epoch'])
 
     def save(self,name):
         counters=dict(online_rollout_iterations=self.iteration,instance_exposures=self.iteration*self.p['batch_size'],

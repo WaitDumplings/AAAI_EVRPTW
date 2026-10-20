@@ -26,11 +26,12 @@ def prepare(root,campaign,method,*,preflight=False,small=False):
         expert_sha256=None,preflight_result=str(campaign/'preflight'/method/'preflight.json'))
     cfg['experiment_protocol'].update(panel='E2-B',modules=[],training_objective='per_action_PPO_GAE',
         online_rollout_iterations=1500,total_instance_exposures=96000,ppo_passes=4)
-    if method=='slppo':
+    if method in {'slppo','awbc','dapg'}:
         shutil.copy2(EXPERT,run/'expert_pool.csv');cfg['expert_sha256']=file_hash(run/'expert_pool.csv')
-        preset=method_preset('slppo');offline=preset.offline_config()
+        preset=method_preset(method);offline=preset.offline_config()
         offline.update(solution_reference_contract='e1_cost_incumbent_v1',policy_replay_enabled=False,
             branch_exploration_enabled=False,exploration_enabled=False,use_priority_sampler=False,strict_replay=True)
+        if method in {'awbc','dapg'}:offline.update(expert_microbatch_size=32)
         cfg['e1_method_config']=dict(offline=offline,advantage=preset.advantage_config(),
             training=dict(reward_norm_mode='legacy'),data=dict(num_customers=100))
     worker=root/'scripts/run_e2b_rrnco_worker.py';dest=run/'native_harness/scripts'/worker.name
@@ -64,7 +65,17 @@ def preflight(run):
         saved_rng=rng_state()
         expert_audit=audit_expert_completion(exp)
         restore_rng(saved_rng)
+    imitation_audit=exp.imitation.audit() if exp.imitation else None
     torch.cuda.reset_peak_memory_stats();started=time.perf_counter()
+    warmup_recovery=None
+    if exp.warmup_target():
+        exp.warmup_step();warm_checkpoint=exp.save('warmup.pt')
+        w1=exp.warmup_step();weights={k:v.clone() for k,v in exp.runner.model.state_dict().items()}
+        exp.restore(warm_checkpoint['path']);w2=exp.warmup_step()
+        difference=max(float((v-exp.runner.model.state_dict()[k]).abs().max()) for k,v in weights.items())
+        if w1['expert_indices_sha256']!=w2['expert_indices_sha256'] or difference>2e-5:raise ValueError('Warmup resume differs')
+        warmup_recovery=dict(passed=True,parameter_max_difference=difference)
+        while exp.warmup_updates<exp.warmup_target():exp.warmup_step()
     first=exp.iteration_step(audit=True);saved=exp.save('last.pt')
     # Continue once, then restore exactly and repeat the same online sampling,
     # minibatch order, external neighborhood samples and method state update.
@@ -74,6 +85,7 @@ def preflight(run):
     exp.restore(saved['path']);repeat=exp.iteration_step(audit=False)
     if second['instance_indices_sha256']!=repeat['instance_indices_sha256'] or memory_after!=exp.incumbent:
         raise ValueError('Resume sampler/incumbent differs')
+    if exp.imitation and second['method_diagnostics']['expert_sample_indices_sha256']!=repeat['method_diagnostics']['expert_sample_indices_sha256']:raise ValueError('Expert sampler resume differs')
     maxdiff=max(float((v-exp.runner.model.state_dict()[k]).abs().max()) for k,v in state_after.items())
     # Native CUDA indexing backward has small nondeterministic reductions.
     if maxdiff>2e-5:raise ValueError(('Resume parameter difference',maxdiff))
@@ -84,7 +96,8 @@ def preflight(run):
     checkpoint=exp.save('best.pt');exp.restore(checkpoint['path'])
     again=evaluate(exp,small=True,checkpoint_id='reload')
     if result['mean_distance_km']!=again['mean_distance_km']:raise ValueError('Reload validation differs')
-    report=dict(passed=True,method=cfg['e2b_method'],protocol=exp.p,
+    report=dict(passed=True,method=cfg['e2b_method'],protocol=exp.p,imitation_audit=imitation_audit,
+        warmup_recovery=warmup_recovery,warmup_updates=exp.warmup_updates,warmup_expert_steps=exp.warmup_expert_steps,warmup_wall_s=exp.warmup_wall_s,
         harness_sha256=manifest['harness']['sha256'],expert_sha256=cfg['expert_sha256'],
         actor_initial_sha256=exp.actor_initial,critic_initial_sha256=exp.critic_initial,
         first_iteration=first,second_iteration=second,resumed_iteration=repeat,
@@ -108,6 +121,13 @@ def formal(run,resume=False):
     if resume:exp.restore(run/'native_checkpoints/last.pt')
     resumed_active_s=exp.total_active_wall_s;active_started=time.perf_counter()
     atomic_json(run/'architecture.json',exp.runner.architecture)
+    while exp.warmup_updates<exp.warmup_target():
+        row=exp.warmup_step()
+        with (run/'warmup.jsonl').open('a') as f:f.write(json.dumps(row,allow_nan=False)+'\n')
+        exp.total_active_wall_s=resumed_active_s+time.perf_counter()-active_started
+        exp.save('last.pt')
+        atomic_json(run/'status.json',dict(state='bc_warmup',method=cfg['e2b_method'],warmup_update=exp.warmup_updates,warmup_target=exp.warmup_target(),training_complete=False,test_complete=False,updated_at=now()))
+        print(f"[{cfg['e2b_method']}] BC warmup={exp.warmup_updates}/{exp.warmup_target()}",flush=True)
     while exp.iteration<exp.p['online_rollout_iterations']:
         row=exp.iteration_step()
         with (run/'train.jsonl').open('a') as f:f.write(json.dumps(row,allow_nan=False)+'\n')
