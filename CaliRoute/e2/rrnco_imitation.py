@@ -117,8 +117,14 @@ class NativeExpertSteps:
             ids=torch.where(self.instances==identity)[0][:32]
             neighbors=out['neighbors'].expand(len(ids),-1,-1).contiguous()
             cached=self.forward(ids,neighbors)[0]
-            expected=out['logp'][self.times[ids].to('cuda'),0]
+            # Match encoder batch shape for the strict replay comparison.
+            # Batch1 versus batch32 CUDA matmuls have different FP32 reduction orders.
+            repeated=seq.expand(-1,len(ids)).contiguous()
+            matched=run_actions(self.exp.policy,self.exp.env,self.exp.batch([identity]*len(ids)),self.exp.critic,
+                starts=1,actions=repeated,start_actions=repeated[0],neighbors=neighbors,allow_terminal_padding=True)
+            expected=matched['logp'][self.times[ids].to('cuda'),torch.arange(len(ids),device='cuda')]
             error=float((cached-expected).abs().max())
+            cross_batch_error=float((cached-out['logp'][self.times[ids].to('cuda'),0]).abs().max())
         if error>2e-5:raise ValueError(('Prefix/full route probability mismatch',error))
         param=self.exp.policy.decoder.project_node_embeddings.weight
         full=self.forward(ids,neighbors)[0];g1=torch.autograd.grad(full.mean(),param)[0]
@@ -128,4 +134,4 @@ class NativeExpertSteps:
         if grad_error>2e-5*scale:raise ValueError(('Expert microbatch gradient mismatch',grad_error))
         restore_rng(saved)
         return dict(passed=True,cached_vs_full_route_logprob_max_error=error,
-                    microbatch_gradient_max_error=grad_error,valid_steps=len(self.actions))
+                    microbatch_gradient_max_error=grad_error,cross_batch_1_vs_32_logprob_max_error=cross_batch_error,valid_steps=len(self.actions))
