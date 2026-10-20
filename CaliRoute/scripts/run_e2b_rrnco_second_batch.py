@@ -21,7 +21,8 @@ def main():
     if any(int(x)>1024 for x in used.splitlines()):raise RuntimeError('GPU occupied')
     for method in ['awbc','dapg']:
         if (c/'runs'/method).exists() or (c/'preflight'/method).exists():raise FileExistsError('Existing second batch needs explicit recovery')
-    old=json.loads((c/'scheduler_a6000/status.json').read_text());atomic_json(c/'scheduler_a6000/first_batch_completed.json',old)
+    old=json.loads((c/'scheduler_a6000/status.json').read_text())
+    if not (c/'scheduler_a6000/first_batch_completed.json').exists():atomic_json(c/'scheduler_a6000/first_batch_completed.json',old)
     head=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip()
     state=dict(state='preparing_second_batch',pid=os.getpid(),started_at=now(),git_head=head,workers=old['workers'])
     def save():state['updated_at']=now();atomic_json(c/'scheduler_a6000/status.json',state)

@@ -273,6 +273,7 @@ class PPOExperiment:
         self.train_wall_s+=elapsed;self.total_active_wall_s+=elapsed
         report.update(iteration=self.iteration,online_rollout_iterations=self.iteration,instance_exposures=self.iteration*b,
             complete_rollouts=self.iteration*b*s,valid_decision_steps=self.decisions,optimizer_steps_actual=self.optimizer_steps,
+            optimizer_steps_total=self.optimizer_steps+self.warmup_updates,warmup_optimizer_steps=self.warmup_updates,
             optimizer_steps_this_iteration=step_count,kl_guard_triggered=stop,kl_max=max(kl_values),
             expert_backward_steps=self.expert_steps,expert_backward_routes=self.expert_routes,
             training_wall_s=self.train_wall_s,iteration_wall_s=elapsed,mean_cost_km=float(old['physical_cost'].mean()),
